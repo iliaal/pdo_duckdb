@@ -1,0 +1,10 @@
+# LeakSanitizer suppressions for the ASAN CI job.
+#
+# Narrow, library-scoped suppressions only. Leaks originating in pdo_duckdb's
+# own code (duckdb_statement.c / duckdb_driver.c / duckdb_appender.c frames)
+# are NOT suppressed and will fail CI.
+#
+# DuckDB allocates process-lifetime state during initialization (the extension
+# registry, type catalogs, static singletons) that is intentionally never freed
+# before exit. Those are out of this driver's control.
+leak:libduckdb
