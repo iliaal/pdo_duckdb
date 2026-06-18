@@ -96,7 +96,6 @@ static bool duckdb_handle_preparer(pdo_dbh_t *dbh, zend_string *sql, pdo_stmt_t 
 	int parse_ret;
 
 	S->H = H;
-	S->current_row = -1;
 	stmt->driver_data = S;
 	stmt->methods = &duckdb_stmt_methods;
 	/* DuckDB understands $1/$2 numbered parameters. Declaring NAMED support with
