@@ -7,6 +7,9 @@ namespace Pdo\Duckdb {
      * Fast bulk-insert handle for a single table, created via
      * PDO::duckdbAppender() / Pdo\Duckdb::duckdbAppender(). Wraps DuckDB's
      * native appender API.
+     *
+     * @strict-properties
+     * @not-serializable
      */
     final class Appender
     {

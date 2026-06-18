@@ -341,12 +341,34 @@ static int pdo_duckdb_stmt_describe(pdo_stmt_t *stmt, int colno)
 	return 1;
 }
 
+/* Reconstruct the cell as a duckdb_value and render its canonical string into
+ * `result`. Used for types without a native PHP mapping, and for integers that
+ * overflow zend_long on 32-bit builds. */
+static void pdo_duckdb_col_to_string(duckdb_vector vec, idx_t row, zval *result)
+{
+	duckdb_value v = pdo_duckdb_cell_to_value(vec, row);
+	/* duckdb_get_varchar() on a NULL value throws a C++ InternalException that
+	 * aborts the process; guard with is_null (also covers any unhandled type
+	 * cell_to_value falls back to a NULL value for). */
+	if (duckdb_is_null_value(v)) {
+		ZVAL_NULL(result);
+	} else {
+		char *s = duckdb_get_varchar(v);
+		if (s) {
+			ZVAL_STRING(result, s);
+			duckdb_free(s);
+		} else {
+			ZVAL_NULL(result);
+		}
+	}
+	duckdb_destroy_value(&v);
+}
+
 static int pdo_duckdb_stmt_get_col(
 		pdo_stmt_t *stmt, int colno, zval *result, enum pdo_param_type *type)
 {
 	pdo_duckdb_stmt *S = (pdo_duckdb_stmt *)stmt->driver_data;
 	duckdb_vector vec;
-	duckdb_logical_type lt;
 	duckdb_type tid;
 	uint64_t *validity;
 	void *data;
@@ -361,9 +383,10 @@ static int pdo_duckdb_stmt_get_col(
 
 	row = S->cur;
 	vec = duckdb_data_chunk_get_vector(S->chunk, (idx_t)colno);
-	lt = duckdb_vector_get_column_type(vec);
-	tid = duckdb_get_type_id(lt);
-	duckdb_destroy_logical_type(&lt);
+	/* The result-level type id is returned by value (no allocation), unlike
+	 * duckdb_vector_get_column_type() which allocates a logical type per call —
+	 * this runs once per cell, so it must stay allocation-free on the hot path. */
+	tid = duckdb_column_type(&S->result, (idx_t)colno);
 
 	validity = duckdb_vector_get_validity(vec);
 	if (validity && !duckdb_validity_row_is_valid(validity, row)) {
@@ -378,45 +401,46 @@ static int pdo_duckdb_stmt_get_col(
 		case DUCKDB_TYPE_TINYINT:   ZVAL_LONG(result, ((int8_t *)data)[row]); return 1;
 		case DUCKDB_TYPE_SMALLINT:  ZVAL_LONG(result, ((int16_t *)data)[row]); return 1;
 		case DUCKDB_TYPE_INTEGER:   ZVAL_LONG(result, ((int32_t *)data)[row]); return 1;
-		case DUCKDB_TYPE_BIGINT:    ZVAL_LONG(result, (zend_long)((int64_t *)data)[row]); return 1;
 		case DUCKDB_TYPE_UTINYINT:  ZVAL_LONG(result, ((uint8_t *)data)[row]); return 1;
 		case DUCKDB_TYPE_USMALLINT: ZVAL_LONG(result, ((uint16_t *)data)[row]); return 1;
-		case DUCKDB_TYPE_UINTEGER:  ZVAL_LONG(result, (zend_long)((uint32_t *)data)[row]); return 1;
 		case DUCKDB_TYPE_FLOAT:     ZVAL_DOUBLE(result, (double)((float *)data)[row]); return 1;
 		case DUCKDB_TYPE_DOUBLE:    ZVAL_DOUBLE(result, ((double *)data)[row]); return 1;
 
-		case DUCKDB_TYPE_VARCHAR: {
-			duckdb_string_t s = ((duckdb_string_t *)data)[row];
-			ZVAL_STRINGL(result, duckdb_string_t_data(&s), duckdb_string_t_length(s));
+		case DUCKDB_TYPE_BIGINT: {
+			int64_t v = ((int64_t *)data)[row];
+#if SIZEOF_ZEND_LONG < 8
+			if (v < (int64_t)ZEND_LONG_MIN || v > (int64_t)ZEND_LONG_MAX) {
+				pdo_duckdb_col_to_string(vec, row, result);  /* preserve precision as string */
+				return 1;
+			}
+#endif
+			ZVAL_LONG(result, (zend_long)v);
 			return 1;
 		}
+		case DUCKDB_TYPE_UINTEGER: {
+			uint32_t v = ((uint32_t *)data)[row];
+#if SIZEOF_ZEND_LONG < 8
+			if (v > (uint32_t)ZEND_LONG_MAX) {
+				pdo_duckdb_col_to_string(vec, row, result);
+				return 1;
+			}
+#endif
+			ZVAL_LONG(result, (zend_long)v);
+			return 1;
+		}
+
+		case DUCKDB_TYPE_VARCHAR:
 		case DUCKDB_TYPE_BLOB: {
 			duckdb_string_t s = ((duckdb_string_t *)data)[row];
 			ZVAL_STRINGL(result, duckdb_string_t_data(&s), duckdb_string_t_length(s));
 			return 1;
 		}
 
-		default: {
+		default:
 			/* UBIGINT/HUGEINT/DECIMAL/temporal/UUID/ENUM/BIT and the nested
-			 * types are returned as their canonical DuckDB string form. The
-			 * is_null guard covers any type we don't reconstruct (cell_to_value
-			 * falls back to a NULL value): duckdb_get_varchar() on a NULL value
-			 * throws a C++ InternalException that would abort the process. */
-			duckdb_value v = pdo_duckdb_cell_to_value(vec, row);
-			if (duckdb_is_null_value(v)) {
-				ZVAL_NULL(result);
-			} else {
-				char *s = duckdb_get_varchar(v);
-				if (s) {
-					ZVAL_STRING(result, s);
-					duckdb_free(s);
-				} else {
-					ZVAL_NULL(result);
-				}
-			}
-			duckdb_destroy_value(&v);
+			 * types are returned as their canonical DuckDB string form. */
+			pdo_duckdb_col_to_string(vec, row, result);
 			return 1;
-		}
 	}
 }
 

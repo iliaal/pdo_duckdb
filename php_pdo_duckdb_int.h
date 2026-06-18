@@ -63,6 +63,8 @@ extern const struct pdo_stmt_methods duckdb_stmt_methods;
 typedef struct {
 	duckdb_appender appender;
 	bool closed;
+	idx_t ncols;		/* appender target column count */
+	bool *blob_cols;	/* per-column: is the target column BLOB? (NULL if ncols == 0) */
 	zend_object *pdo;	/* PDO object kept alive; it owns the connection */
 	zend_object std;
 } pdo_duckdb_appender;
