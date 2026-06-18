@@ -66,6 +66,17 @@ jobs:
           if [ -n "$dep" ]; then echo "ERROR: links libduckdb: $dep"; exit 1; fi
           echo "ok: no libduckdb dependency"
 
+      - name: Undefined symbols (macOS diagnostic)
+        if: runner.os == 'macOS'
+        continue-on-error: true
+        run: |
+          echo "=== undefined symbols NOT provided by PHP/system (these abort when called under -undefined suppress) ==="
+          nm -u modules/pdo_duckdb.so | sort -u \
+            | grep -viE "_php_|_zend|_zif_|_executor_globals|_compiler_globals|_sapi_|_core_globals|dyld_stub|__error|_pcre2|_gc_|_tsrm_|_virtual_|_object_|_zval_|_smart_str" \
+            | head -80
+          echo "=== je_ / jemalloc undefined? ==="
+          nm -u modules/pdo_duckdb.so | grep -iE "je_|jemalloc|malloc_zone" | head || echo "(none)"
+
       - name: Backtrace the abort (macOS diagnostic)
         if: runner.os == 'macOS'
         continue-on-error: true
