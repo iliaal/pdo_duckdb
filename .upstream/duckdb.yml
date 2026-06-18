@@ -1,0 +1,9 @@
+# /release-ext library-freshness gate. Schema: ~/.claude/commands/release-ext.md
+# detected from config.m4 (PHP_CHECK_LIBRARY([duckdb], ...)); system-linked, not vendored
+
+pinned: 1.5.4
+resolver: github
+repo: duckdb/duckdb
+# Upstream tags as vX.Y.Z; the gate strips the leading 'v'.
+tag_regex: "v?(.+)"
+note: "System-linked libduckdb (C API). Not vendored; pinned tracks the DuckDB version last verified against."
