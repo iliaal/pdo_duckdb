@@ -322,6 +322,9 @@ ZEND_METHOD(Pdo_Duckdb_Appender, flush)
 		RETURN_THROWS();
 	}
 	if (duckdb_appender_flush(a->appender) != DuckDBSuccess) {
+		/* A failed flush invalidates the appender (DuckDB contract): no further
+		 * appends are possible. Mark it unusable so the free path destroys it. */
+		a->closed = true;
 		pdo_duckdb_appender_throw(a->appender, "Failed to flush appender");
 		RETURN_THROWS();
 	}
@@ -338,6 +341,9 @@ ZEND_METHOD(Pdo_Duckdb_Appender, close)
 		RETURN_THROWS();
 	}
 	if (duckdb_appender_close(a->appender) != DuckDBSuccess) {
+		/* A failed close invalidates the appender (DuckDB contract); it's
+		 * unusable either way, so mark it closed before surfacing the error. */
+		a->closed = true;
 		pdo_duckdb_appender_throw(a->appender, "Failed to close appender");
 		RETURN_THROWS();
 	}

@@ -57,6 +57,13 @@ static int pdo_duckdb_stmt_execute(pdo_stmt_t *stmt)
 
 	pdo_duckdb_stmt_reset_result(S);
 
+	/* open_basedir may have been tightened after this statement was prepared;
+	 * apply the sandbox to the connection before re-executing. */
+	if (!pdo_duckdb_enforce_sandbox(S->H)) {
+		pdo_duckdb_error_stmt(stmt, "Unable to apply the open_basedir sandbox (enable_external_access) to DuckDB");
+		return 0;
+	}
+
 	/* duckdb_execute_prepared returns a *materialized* result: DuckDB buffers
 	 * the whole result set here, and duckdb_fetch_chunk() below streams chunks
 	 * out of that buffer. So fetching is chunked but memory is bounded by the

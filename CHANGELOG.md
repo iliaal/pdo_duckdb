@@ -19,8 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Pdo\Duckdb\Appender::appendRow()` now validates the column count and every
   value's type before appending anything, so a bad row no longer leaves the
   native appender mid-row (which previously poisoned it — later appends failed
-  with "too many appends"/"incomplete append"). A failed native append now marks
-  the appender unusable per DuckDB's invalidation contract.
+  with "too many appends"/"incomplete append").
+- The appender is now marked unusable after any failed native append, `flush()`,
+  or `close()`, per DuckDB's invalidation contract — further calls raise
+  "appender is closed" instead of operating on a poisoned native appender.
 - Switched the appender error path from the deprecated `duckdb_appender_error`
   to `duckdb_appender_error_data`.
 
@@ -28,9 +30,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - When `open_basedir` is set, connections disable DuckDB's external SQL file
   access (`read_csv`/`COPY`/`ATTACH`/httpfs) via `enable_external_access=false`,
   and fail closed if that configuration cannot be applied.
-- A persistent connection cached without `open_basedir` can no longer be reused
-  to bypass a later-tightened `open_basedir`: on reuse the driver escalates the
-  live connection (disables external access), so external file access is denied
-  even when `handle_factory` is skipped on the cached handle.
+- A connection opened before `open_basedir` was tightened can no longer be used
+  to bypass it. The sandbox is enforced on the live connection at every SQL
+  entry point (prepare/exec/execute), covering both persistent reuse and a
+  normal handle whose `open_basedir` is tightened mid-request after it opened.
 
 [Unreleased]: https://github.com/iliaal/pdo_duckdb/compare/HEAD...HEAD

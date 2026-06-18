@@ -98,6 +98,12 @@ static inline pdo_duckdb_appender *pdo_duckdb_appender_from_obj(zend_object *o)
 zend_result pdo_duckdb_appender_minit(void);
 const zend_function_entry *pdo_duckdb_get_driver_methods(pdo_dbh_t *dbh, int kind);
 
+/* Ensure the open_basedir SQL sandbox is applied to this handle before running
+ * SQL. Covers handles opened before open_basedir was tightened (their open-time
+ * config didn't include the sandbox). One-time per handle. Returns false if the
+ * sandbox is required but could not be applied. */
+bool pdo_duckdb_enforce_sandbox(pdo_duckdb_db_handle *H);
+
 /* Records an error against the dbh (or stmt). msg is copied; pass the message
  * obtained from duckdb_result_error()/duckdb_prepare_error() or a literal. */
 extern int _pdo_duckdb_error(pdo_dbh_t *dbh, pdo_stmt_t *stmt, const char *msg, const char *file, int line);
