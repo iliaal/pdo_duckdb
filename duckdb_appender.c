@@ -27,6 +27,7 @@
 
 zend_class_entry *pdo_duckdb_appender_ce;
 static zend_object_handlers pdo_duckdb_appender_handlers;
+static zend_class_entry *pdo_duckdb_ce; /* the Pdo\Duckdb PDO subclass */
 
 static void pdo_duckdb_appender_throw(duckdb_appender ap, const char *what)
 {
@@ -67,7 +68,7 @@ static void pdo_duckdb_appender_free(zend_object *obj)
 	zend_object_std_dtor(obj);
 }
 
-void pdo_duckdb_appender_minit(void)
+zend_result pdo_duckdb_appender_minit(void)
 {
 	pdo_duckdb_appender_ce = register_class_Pdo_Duckdb_Appender();
 	pdo_duckdb_appender_ce->create_object = pdo_duckdb_appender_new;
@@ -76,10 +77,28 @@ void pdo_duckdb_appender_minit(void)
 	pdo_duckdb_appender_handlers.offset = offsetof(pdo_duckdb_appender, std);
 	pdo_duckdb_appender_handlers.free_obj = pdo_duckdb_appender_free;
 	pdo_duckdb_appender_handlers.clone_obj = NULL;
+
+#if PHP_VERSION_ID >= 80400
+	/* Modern PDO subclass model: a duckdb: DSN yields a Pdo\Duckdb instance, so
+	 * its methods don't trip PHP 8.5's deprecation of base-PDO driver methods. */
+	pdo_duckdb_ce = register_class_Pdo_Duckdb(php_pdo_get_dbh_ce());
+	pdo_duckdb_ce->create_object = pdo_dbh_new;
+	return php_pdo_register_driver_specific_ce(&pdo_duckdb_driver, pdo_duckdb_ce);
+#else
+	/* On 8.3 the method is exposed on the base PDO object via get_driver_methods
+	 * (see below); the generated subclass registrar is unused there. */
+	(void) register_class_Pdo_Duckdb;
+	(void) pdo_duckdb_ce;
+	return SUCCESS;
+#endif
 }
 
 const zend_function_entry *pdo_duckdb_get_driver_methods(pdo_dbh_t *dbh, int kind)
 {
+	/* Always expose the method on base-PDO instances (`new PDO('duckdb:')`),
+	 * for BC and for the 8.3 floor. On 8.4+ `PDO::connect()` additionally yields
+	 * a Pdo\Duckdb instance whose own method does not trip the 8.5 deprecation
+	 * of base-PDO driver methods. Same mechanism pdo_sqlite uses. */
 	switch (kind) {
 		case PDO_DBH_DRIVER_METHOD_KIND_DBH:
 			return class_PdoDuckDb_Ext_methods;
@@ -88,8 +107,10 @@ const zend_function_entry *pdo_duckdb_get_driver_methods(pdo_dbh_t *dbh, int kin
 	}
 }
 
-/* {{{ PDO::duckdbAppender(string $table, ?string $schema = null): Pdo\Duckdb\Appender */
-ZEND_METHOD(PdoDuckDb_Ext, duckdbAppender)
+/* {{{ duckdbAppender(string $table, ?string $schema = null): Pdo\Duckdb\Appender
+ * Shared by the Pdo\Duckdb subclass method (8.4+) and the base-PDO
+ * get_driver_methods vehicle (8.3). */
+static void pdo_duckdb_appender_create_impl(INTERNAL_FUNCTION_PARAMETERS)
 {
 	zend_string *table;
 	zend_string *schema = NULL;
@@ -122,6 +143,16 @@ ZEND_METHOD(PdoDuckDb_Ext, duckdbAppender)
 	a->closed = false;
 	a->pdo = Z_OBJ_P(ZEND_THIS);
 	GC_ADDREF(a->pdo);
+}
+
+ZEND_METHOD(Pdo_Duckdb, duckdbAppender)
+{
+	pdo_duckdb_appender_create_impl(INTERNAL_FUNCTION_PARAM_PASSTHRU);
+}
+
+ZEND_METHOD(PdoDuckDb_Ext, duckdbAppender)
+{
+	pdo_duckdb_appender_create_impl(INTERNAL_FUNCTION_PARAM_PASSTHRU);
 }
 /* }}} */
 

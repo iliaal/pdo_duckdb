@@ -5,7 +5,9 @@ pdo
 pdo_duckdb
 --FILE--
 <?php
-$db = new PDO('duckdb::memory:');
+// On 8.4+ use PDO::connect() -> Pdo\Duckdb subclass, whose duckdbAppender()
+// avoids the 8.5 deprecation of base-PDO driver methods. On 8.3 use new PDO().
+$db = PHP_VERSION_ID >= 80400 ? PDO::connect('duckdb::memory:') : new PDO('duckdb::memory:');
 $db->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
 $db->exec('CREATE TABLE t (id INTEGER, name VARCHAR, score DOUBLE, ok BOOLEAN)');
 

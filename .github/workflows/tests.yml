@@ -105,13 +105,10 @@ jobs:
           export TEST_PHP_EXECUTABLE=$(which php)
           export TEST_PHP_ARGS="-d extension=$(pwd)/modules/pdo_duckdb.so"
           export NO_INTERACTION=1
-          RESULT=$(php run-tests.php --show-diff -g FAIL,BORK,LEAK,XLEAK tests/ 2>&1)
-          echo "$RESULT"
-          FAILED=$(echo "$RESULT" | grep 'Tests failed' | grep -oP '\d+' | head -1)
-          if [ "$FAILED" -gt 0 ]; then
-            echo "::error::$FAILED test(s) failed"
-            exit 1
-          fi
+          # Direct invocation: run-tests.php exits non-zero on failures and the
+          # --show-diff output is printed inline (no capture-under-bash-e, which
+          # would abort at the assignment and hide the diff).
+          php run-tests.php --show-diff -g FAIL,BORK,LEAK,XLEAK tests/
 
   asan:
     name: PHP ${{ matrix.php }} - ASAN
@@ -133,6 +130,13 @@ jobs:
 
       - name: Install dependencies
         run: sudo apt-get update && sudo apt-get install -y llvm clang re2c bison autoconf unzip
+
+      - name: Put the clang ASan runtime on the loader path
+        # -shared-libasan binaries (the configure C-compiler probe, the built
+        # php, the extension) need libclang_rt.asan_*.so at runtime; it lives in
+        # clang's resource dir, not a default loader path. Without this, php-src
+        # configure fails with "cannot run C compiled programs".
+        run: echo "LD_LIBRARY_PATH=$(clang -print-resource-dir)/lib/linux" >> "$GITHUB_ENV"
 
       - name: Cache libduckdb
         id: cache-duckdb
@@ -183,7 +187,7 @@ jobs:
 
       - name: Run tests under ASAN
         run: |
-          export LD_LIBRARY_PATH="$PWD/duckdb/lib"
+          export LD_LIBRARY_PATH="$PWD/duckdb/lib:${LD_LIBRARY_PATH}"
           export TEST_PHP_EXECUTABLE=/tmp/php-asan/bin/php
           export TEST_PHP_ARGS="-d extension=$(pwd)/modules/pdo_duckdb.so"
           export NO_INTERACTION=1

@@ -56,8 +56,7 @@ PHP_MINIT_FUNCTION(pdo_duckdb)
 	if (php_pdo_register_driver(&pdo_duckdb_driver) == FAILURE) {
 		return FAILURE;
 	}
-	pdo_duckdb_appender_minit();
-	return SUCCESS;
+	return pdo_duckdb_appender_minit();
 }
 /* }}} */
 
