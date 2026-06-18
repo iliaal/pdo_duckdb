@@ -58,6 +58,10 @@ jobs:
           Expand-Archive duckdb.zip -DestinationPath duckdb-deps -Force
           # Bundle layout is flat: duckdb.h, duckdb.lib, duckdb.dll (+ duckdb.hpp).
           Get-ChildItem duckdb-deps | Select-Object Name, Length
+          # duckdb.lib satisfies the link; duckdb.dll must be on PATH so the
+          # Windows loader can resolve it when run-tests.php loads the extension
+          # (otherwise the extension fails to load and every test SKIPs).
+          Add-Content -Path $env:GITHUB_PATH -Value "${{ github.workspace }}\duckdb-deps"
 
       - name: Build extension
         uses: php/php-windows-builder/extension@v1
