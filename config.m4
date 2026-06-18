@@ -66,9 +66,23 @@ if test "$PHP_PDO_DUCKDB_STATIC" != "no"; then
       ;;
     *)
       dnl GNU ld: --start-group resolves the circular references between the
-      dnl DuckDB archives; pull libstdc++/libgcc in statically so the module is
-      dnl independent of the host's GLIBCXX/libgcc ABI (matters for prebuilts).
-      PDO_DUCKDB_SHARED_LIBADD="-Wl,--start-group,$DUCKDB_STATIC_ARCHIVES,--end-group -static-libstdc++ -static-libgcc"
+      dnl DuckDB archives. libduckdb is C++, but this extension is all-.c so the
+      dnl link driver is the C compiler (gcc), which does NOT link libstdc++ and
+      dnl silently IGNORES `-static-libstdc++` -- leaving the whole C++ runtime
+      dnl unresolved (hundreds of undefined std::/__cxxabi symbols, no libstdc++
+      dnl DT_NEEDED). Such a module still loads where libstdc++ already sits in
+      dnl the process (the build/CI host) but fails `dlopen` on a clean glibc box
+      dnl with `undefined symbol: _ZTVN10__cxxabiv120__function_type_infoE`. Link
+      dnl the static libstdc++ + libgcc_eh archives explicitly, inside the group,
+      dnl so the C++ runtime (incl. the C++ ABI typeinfo/vtables and the EH
+      dnl unwinder) is pulled in and the module is genuinely self-contained and
+      dnl independent of the host GLIBCXX/libgcc ABI.
+      LIBSTDCXX_A=`${CXX:-g++} -print-file-name=libstdc++.a 2>/dev/null`
+      LIBGCC_EH_A=`${CC:-gcc} -print-file-name=libgcc_eh.a 2>/dev/null`
+      if test ! -f "$LIBSTDCXX_A"; then
+        AC_MSG_ERROR([static libstdc++.a not found via '${CXX:-g++} -print-file-name=libstdc++.a'. A self-contained static build needs the static libstdc++ (e.g. the libstdc++-*-dev / libstdc++-static package). Refusing to build a module that would not load on a clean host.])
+      fi
+      PDO_DUCKDB_SHARED_LIBADD="-Wl,--start-group,$DUCKDB_STATIC_ARCHIVES,$LIBSTDCXX_A,$LIBGCC_EH_A,--end-group -static-libgcc"
       ;;
   esac
 
