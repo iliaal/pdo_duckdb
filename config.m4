@@ -54,7 +54,7 @@ if test "$PHP_PDO_DUCKDB_STATIC" != "no"; then
       dnl malloc-zone registration abort()s inside a dlopened bundle (SIGABRT at
       dnl the first query, no exception text).
       DUCKDB_MAC_ARCHIVES=`echo $DUCKDB_STATIC_DIR/*.a | tr ' ' '\n' | grep -v jemalloc | tr '\n' ',' | sed 's/,$//'`
-      PDO_DUCKDB_SHARED_LIBADD="-Wl,$DUCKDB_MAC_ARCHIVES -lc++"
+      PDO_DUCKDB_SHARED_LIBADD="-Wl,$DUCKDB_MAC_ARCHIVES -lc++ -lc++abi"
       ;;
     *)
       dnl GNU ld: --start-group resolves the circular references between the
