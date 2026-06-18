@@ -70,12 +70,18 @@ jobs:
         shell: bash
         run: |
           php -d extension="$GITHUB_WORKSPACE/modules/pdo_duckdb.so" -r '
-            if (!extension_loaded("pdo_duckdb")) { fwrite(STDERR, "extension did not load\n"); exit(1); }
+            fwrite(STDERR, "STAGE loaded=".(int)extension_loaded("pdo_duckdb")."\n");
             $d = new PDO("duckdb::memory:");
+            fwrite(STDERR, "STAGE connected\n");
             $d->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+            $v = $d->getAttribute(PDO::ATTR_CLIENT_VERSION);
+            fwrite(STDERR, "STAGE version=$v\n");
             $d->exec("CREATE TABLE t(i INTEGER, s VARCHAR)");
+            fwrite(STDERR, "STAGE created\n");
             $d->exec("INSERT INTO t VALUES (1, \x27a\x27), (2, \x27b\x27)");
+            fwrite(STDERR, "STAGE inserted\n");
             $n = (int) $d->query("SELECT count(*) FROM t")->fetchColumn();
+            fwrite(STDERR, "STAGE queried n=$n\n");
             if ($n !== 2) { fwrite(STDERR, "bad count: $n\n"); exit(1); }
-            echo "ok: self-contained query works, duckdb ", $d->getAttribute(PDO::ATTR_CLIENT_VERSION), "\n";
+            echo "ok: self-contained query works, duckdb $v\n";
           '
