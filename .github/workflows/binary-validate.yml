@@ -87,10 +87,15 @@ jobs:
           $d = new PDO("duckdb::memory:");
           fwrite(STDERR, "connected\n");
           PHP
-          lldb --batch -o "run" -o "thread backtrace all" -o "quit" -- \
-            php -d extension="$GITHUB_WORKSPACE/modules/pdo_duckdb.so" /tmp/probe.php > /tmp/lldb.txt 2>&1 || true
-          echo "=== LLDB (frames mentioning duckdb / abort / throw / assert) ==="
-          grep -iE "duckdb|abort|__cxa|throw|terminat|assert|libc\+\+|stop reason|SIGABRT|::" /tmp/lldb.txt | head -60
+          php -d extension="$GITHUB_WORKSPACE/modules/pdo_duckdb.so" /tmp/probe.php || true
+          sleep 3
+          echo "=== crash report termination reason ==="
+          rep=$(ls -t ~/Library/Logs/DiagnosticReports/php-*.ips 2>/dev/null | head -1)
+          if [ -n "$rep" ]; then
+            grep -iE "termination|Symbol not found|dyld|Referenced from|Expected in|exception|signal|abort" "$rep" | head -20
+          else
+            echo "(no crash report found)"
+          fi
 
       - name: Load + query (no libduckdb on path)
         shell: bash
