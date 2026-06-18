@@ -1,0 +1,22 @@
+# Read by /release-ext. Schema documented in ~/.claude/commands/release-ext.md.
+
+extension: pdo_duckdb
+version_macro: PHP_PDO_DUCKDB_VERSION    # detected from php_pdo_duckdb.h
+version_file: php_pdo_duckdb.h
+repo: iliaal/pdo_duckdb                   # from composer.json (no git remote yet)
+
+build_matrix:
+  - PHP-8.3
+  - PHP-8.4
+  - PHP-8.5
+  - PHP-8.6-vanilla
+
+# DuckDB is linked, not vendored. The matrix build needs libduckdb + duckdb.h;
+# if they are not on a standard search path, append =DIR (the DuckDB install
+# prefix) to the with-flag. --enable-pdo-duckdb-dev turns on -Werror.
+configure_base: "--with-pdo-duckdb --enable-pdo-duckdb-dev"
+
+# Driver wraps a C library; run the phpt suite under ASan to catch UAF/overflow.
+asan_test: true
+
+windows_ci: false
