@@ -46,6 +46,24 @@ typedef struct {
 extern const pdo_driver_t pdo_duckdb_driver;
 extern const struct pdo_stmt_methods duckdb_stmt_methods;
 
+/* Bulk-insert appender (driver-specific feature). */
+typedef struct {
+	duckdb_appender appender;
+	bool closed;
+	zend_object *pdo;	/* PDO object kept alive; it owns the connection */
+	zend_object std;
+} pdo_duckdb_appender;
+
+extern zend_class_entry *pdo_duckdb_appender_ce;
+
+static inline pdo_duckdb_appender *pdo_duckdb_appender_from_obj(zend_object *o)
+{
+	return (pdo_duckdb_appender *)((char *)o - offsetof(pdo_duckdb_appender, std));
+}
+
+void pdo_duckdb_appender_minit(void);
+const zend_function_entry *pdo_duckdb_get_driver_methods(pdo_dbh_t *dbh, int kind);
+
 /* Records an error against the dbh (or stmt). msg is copied; pass the message
  * obtained from duckdb_result_error()/duckdb_prepare_error() or a literal. */
 extern int _pdo_duckdb_error(pdo_dbh_t *dbh, pdo_stmt_t *stmt, const char *msg, const char *file, int line);

@@ -59,7 +59,7 @@ if test "$PHP_PDO_DUCKDB" != "no"; then
 
   PHP_SUBST([PDO_DUCKDB_SHARED_LIBADD])
   PHP_NEW_EXTENSION([pdo_duckdb],
-    [pdo_duckdb.c duckdb_driver.c duckdb_statement.c],
+    [pdo_duckdb.c duckdb_driver.c duckdb_statement.c duckdb_appender.c],
     [$ext_shared],,[$PDO_DUCKDB_CFLAGS])
 
   PHP_ADD_EXTENSION_DEP(pdo_duckdb, pdo)

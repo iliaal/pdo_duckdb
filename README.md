@@ -60,10 +60,40 @@ duckdb::memory:                   # in-memory database
 duckdb:                           # in-memory database (empty path)
 ```
 
+## Bulk insert (Appender)
+
+For fast bulk loads, `PDO::duckdbAppender()` returns a `Pdo\Duckdb\Appender`
+wrapping DuckDB's native appender — far faster than row-by-row `INSERT`:
+
+```php
+$db->exec('CREATE TABLE events (id INTEGER, name VARCHAR, ts TIMESTAMP)');
+
+$app = $db->duckdbAppender('events');      // optional 2nd arg: schema name
+foreach ($rows as $r) {
+    $app->appendRow($r['id'], $r['name'], $r['ts']);
+}
+$app->flush();                              // or $app->close() to finalize
+```
+
+`appendRow(...$values)` takes one argument per column (left to right) and
+returns the appender for chaining. PHP `null`/`bool`/`int`/`float`/`string` map
+to DuckDB values; DuckDB casts them to the target column types.
+
+## DuckDB extensions
+
+DuckDB extensions load through ordinary SQL — no special API:
+
+```php
+$db->exec('LOAD json');                     // bundled extensions load offline
+$db->exec('INSTALL httpfs; LOAD httpfs;');  // downloadable extensions
+```
+
 ## Usage notes
 
-- **Placeholders.** Positional `?` placeholders are bound natively. Named
-  placeholders (`:name`) are rewritten to positional by PDO.
+- **Placeholders.** Positional `?` and named `:name` placeholders are supported;
+  PDO rewrites them to DuckDB `$N` parameters. A repeated `:name` is bound once.
+  Because `:` is reserved for placeholders, inline `STRUCT`/`MAP` literals must
+  keep a space after the colon (`{'k': 1}`, not `{'k':1}`) in prepared queries.
 - **Transactions.** `beginTransaction()` / `commit()` / `rollBack()` map to
   DuckDB `BEGIN TRANSACTION` / `COMMIT` / `ROLLBACK`.
 - **`lastInsertId()`** is not supported — DuckDB has no implicit rowid. Use a

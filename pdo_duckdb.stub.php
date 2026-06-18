@@ -1,14 +1,23 @@
 <?php
 
-/**
- * @generate-class-entries
- *
- * Placeholder stub for pdo_duckdb.
- *
- * This driver currently registers with PDO and exposes no driver-specific
- * methods, so it builds without generated arginfo. When you add DuckDB-specific
- * functionality (e.g. APPEND/COPY helpers, extension loading), declare the
- * methods here, run `/php-stub-regen` to produce pdo_duckdb_arginfo.h, include
- * that header in the relevant .c file, and wire the method table through the
- * driver's get_driver_methods handler.
- */
+/** @generate-class-entries */
+
+namespace Pdo\Duckdb {
+    /**
+     * Fast bulk-insert handle for a single table, created via
+     * PDO::duckdbAppender(). Wraps DuckDB's native appender API.
+     */
+    final class Appender
+    {
+        private function __construct() {}
+
+        /** Append one row; each argument is a column value (left to right). */
+        public function appendRow(mixed ...$values): static {}
+
+        /** Flush buffered rows to the table. */
+        public function flush(): void {}
+
+        /** Flush and finalize; the appender is unusable afterwards. */
+        public function close(): void {}
+    }
+}
