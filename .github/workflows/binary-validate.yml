@@ -1,0 +1,77 @@
+name: Binary build validation
+
+# Dispatch-only dry run: proves the self-contained static build works on each
+# release target (Linux amd64/arm64, macOS arm64) on real runners, WITHOUT
+# publishing. The release publisher (release-linux.yml) reuses the same
+# download + static-link steps via php/pie-ext-binary-builder, so a green run
+# here is the pre-tag gate for those lanes.
+
+on:
+  workflow_dispatch:
+
+env:
+  DUCKDB_VERSION: "1.5.4"
+
+jobs:
+  validate:
+    name: ${{ matrix.os }} php ${{ matrix.php }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-24.04,     duckdb: static-libs-linux-amd64.zip, php: '8.4' }
+          - { os: ubuntu-24.04,     duckdb: static-libs-linux-amd64.zip, php: '8.5' }
+          - { os: ubuntu-24.04-arm, duckdb: static-libs-linux-arm64.zip, php: '8.4' }
+          - { os: ubuntu-24.04-arm, duckdb: static-libs-linux-arm64.zip, php: '8.5' }
+          - { os: macos-14,         duckdb: static-libs-osx-arm64.zip,   php: '8.4' }
+          - { os: macos-14,         duckdb: static-libs-osx-arm64.zip,   php: '8.5' }
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          coverage: none
+
+      - name: Download DuckDB static libs
+        shell: bash
+        run: |
+          curl -fsSL "https://github.com/duckdb/duckdb/releases/download/v${DUCKDB_VERSION}/${{ matrix.duckdb }}" -o duckdb-static.zip
+          mkdir -p duckdb-static
+          unzip -o -q duckdb-static.zip -d duckdb-static
+          ls -la duckdb-static | head
+
+      - name: Build (static, self-contained)
+        shell: bash
+        run: |
+          phpize
+          ./configure --with-pdo-duckdb-static="$GITHUB_WORKSPACE/duckdb-static" --enable-pdo-duckdb-dev
+          make -j"$(getconf _NPROCESSORS_ONLN)"
+          ls -lh modules/pdo_duckdb.so
+
+      - name: Verify self-contained (no libduckdb dependency)
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            otool -L modules/pdo_duckdb.so || true
+            otool -L modules/pdo_duckdb.so | grep -i duckdb && { echo "ERROR: links libduckdb"; exit 1; } || echo "ok: no libduckdb dependency"
+          else
+            ldd modules/pdo_duckdb.so || true
+            ldd modules/pdo_duckdb.so | grep -i duckdb && { echo "ERROR: links libduckdb"; exit 1; } || echo "ok: no libduckdb dependency"
+          fi
+
+      - name: Load + query (no libduckdb on path)
+        shell: bash
+        run: |
+          php -d extension="$GITHUB_WORKSPACE/modules/pdo_duckdb.so" -r '
+            if (!extension_loaded("pdo_duckdb")) { fwrite(STDERR, "extension did not load\n"); exit(1); }
+            $d = new PDO("duckdb::memory:");
+            $d->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+            $d->exec("CREATE TABLE t(i INTEGER, s VARCHAR)");
+            $d->exec("INSERT INTO t VALUES (1, \x27a\x27), (2, \x27b\x27)");
+            $n = (int) $d->query("SELECT count(*) FROM t")->fetchColumn();
+            if ($n !== 2) { fwrite(STDERR, "bad count: $n\n"); exit(1); }
+            echo "ok: self-contained query works, duckdb ", $d->getAttribute(PDO::ATTR_CLIENT_VERSION), "\n";
+          '
