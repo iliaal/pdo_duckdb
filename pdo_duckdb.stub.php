@@ -5,7 +5,8 @@
 namespace Pdo\Duckdb {
     /**
      * Fast bulk-insert handle for a single table, created via
-     * PDO::duckdbAppender(). Wraps DuckDB's native appender API.
+     * PDO::duckdbAppender() / Pdo\Duckdb::duckdbAppender(). Wraps DuckDB's
+     * native appender API.
      */
     final class Appender
     {
@@ -19,5 +20,20 @@ namespace Pdo\Duckdb {
 
         /** Flush and finalize; the appender is unusable afterwards. */
         public function close(): void {}
+    }
+}
+
+namespace Pdo {
+    /**
+     * Driver-specific PDO subclass for DuckDB. On PHP 8.4+ a duckdb: DSN
+     * yields an instance of this class (registered as the driver-specific CE),
+     * so its methods do not trip the 8.5 deprecation of base-PDO driver methods.
+     * On 8.3 the same method is exposed on the base PDO object via
+     * get_driver_methods instead.
+     */
+    class Duckdb extends \PDO
+    {
+        /** Create a bulk-insert appender for the given table. */
+        public function duckdbAppender(string $table, ?string $schema = null): \Pdo\Duckdb\Appender {}
     }
 }

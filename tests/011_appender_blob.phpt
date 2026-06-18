@@ -5,7 +5,7 @@ pdo
 pdo_duckdb
 --FILE--
 <?php
-$db = new PDO('duckdb::memory:');
+$db = PHP_VERSION_ID >= 80400 ? PDO::connect('duckdb::memory:') : new PDO('duckdb::memory:');
 $db->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
 $db->exec('CREATE TABLE b (id INTEGER, payload BLOB, label VARCHAR)');
 
