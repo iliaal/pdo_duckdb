@@ -92,14 +92,29 @@ static bool duckdb_handle_preparer(pdo_dbh_t *dbh, zend_string *sql, pdo_stmt_t 
 {
 	pdo_duckdb_db_handle *H = (pdo_duckdb_db_handle *)dbh->driver_data;
 	pdo_duckdb_stmt *S = ecalloc(1, sizeof(pdo_duckdb_stmt));
+	zend_string *rewritten = NULL;
+	int parse_ret;
 
 	S->H = H;
 	S->current_row = -1;
 	stmt->driver_data = S;
 	stmt->methods = &duckdb_stmt_methods;
-	/* DuckDB supports '?' positional placeholders natively; let PDO rewrite
-	 * named placeholders down to positional. */
-	stmt->supports_placeholders = PDO_PLACEHOLDER_POSITIONAL;
+	/* DuckDB understands $1/$2 numbered parameters. Declaring NAMED support with
+	 * the "$%d" rewrite template makes PDO rewrite BOTH positional '?' and named
+	 * ':name' placeholders to $N — and crucially coalesces a repeated ':name'
+	 * onto a single $N (the pgsql model), so `WHERE a = :x OR b = :x` works. */
+	stmt->supports_placeholders = PDO_PLACEHOLDER_NAMED;
+	stmt->named_rewrite_template = "$%d";
+
+	parse_ret = pdo_parse_params(stmt, sql, &rewritten);
+	if (parse_ret == 1) {
+		/* the query was rewritten (e.g. :name -> ?) */
+		sql = rewritten;
+	} else if (parse_ret == -1) {
+		/* parse failure; pdo_parse_params already set stmt->error_code */
+		strncpy(dbh->error_code, stmt->error_code, sizeof(dbh->error_code));
+		return false;
+	}
 
 	if (duckdb_prepare(H->conn, ZSTR_VAL(sql), &S->prepared) != DuckDBSuccess) {
 		pdo_duckdb_error(dbh, duckdb_prepare_error(S->prepared));
@@ -107,9 +122,15 @@ static bool duckdb_handle_preparer(pdo_dbh_t *dbh, zend_string *sql, pdo_stmt_t 
 			duckdb_destroy_prepare(&S->prepared);
 			S->prepared = NULL;
 		}
+		if (rewritten) {
+			zend_string_release(rewritten);
+		}
 		return false;
 	}
 
+	if (rewritten) {
+		zend_string_release(rewritten);
+	}
 	return true;
 }
 
@@ -204,6 +225,20 @@ static bool duckdb_handle_rollback(pdo_dbh_t *dbh)
 	return true;
 }
 
+static bool pdo_duckdb_set_attr(pdo_dbh_t *dbh, zend_long attr, zval *val)
+{
+	switch (attr) {
+		case PDO_ATTR_AUTOCOMMIT:
+		case PDO_ATTR_PERSISTENT:
+			/* No driver-level action needed: PDO core manages persistence, and
+			 * explicit transactions go through begin/commit/rollback. Accept so
+			 * that passing these as constructor options does not raise IM001. */
+			return true;
+		default:
+			return false;
+	}
+}
+
 static int pdo_duckdb_get_attribute(pdo_dbh_t *dbh, zend_long attr, zval *return_value)
 {
 	switch (attr) {
@@ -234,6 +269,7 @@ static const struct pdo_dbh_methods duckdb_methods = {
 	.begin = duckdb_handle_begin,
 	.commit = duckdb_handle_commit,
 	.rollback = duckdb_handle_rollback,
+	.set_attribute = pdo_duckdb_set_attr,
 	.fetch_err = pdo_duckdb_fetch_error_func,
 	.get_attribute = pdo_duckdb_get_attribute,
 	/* last_id: DuckDB has no implicit rowid; use sequences + currval(). */

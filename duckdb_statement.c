@@ -75,11 +75,32 @@ static int pdo_duckdb_stmt_param_hook(pdo_stmt_t *stmt, struct pdo_bound_param_d
 	zval *parameter;
 	idx_t idx;
 
-	if (event_type != PDO_PARAM_EVT_EXEC_PRE || !param->is_param) {
+	if (!param->is_param) {
 		return 1;
 	}
 
-	/* PDO rewrites named placeholders to positional, so paramno is always set. */
+	/* Resolve the rewritten "$N" placeholder name into a 0-based paramno.
+	 * Positional binds arrive with name == NULL and paramno already set. */
+	if (event_type == PDO_PARAM_EVT_NORMALIZE) {
+		if (param->name) {
+			if (ZSTR_VAL(param->name)[0] == '$') {
+				param->paramno = ZEND_ATOL(ZSTR_VAL(param->name) + 1) - 1;
+			} else if (stmt->bound_param_map) {
+				zend_string *nv = zend_hash_find_ptr(stmt->bound_param_map, param->name);
+				if (nv == NULL) {
+					pdo_duckdb_error_stmt(stmt, "parameter was not defined");
+					return 0;
+				}
+				param->paramno = ZEND_ATOL(ZSTR_VAL(nv) + 1) - 1;
+			}
+		}
+		return 1;
+	}
+
+	if (event_type != PDO_PARAM_EVT_EXEC_PRE) {
+		return 1;
+	}
+
 	if (param->paramno < 0) {
 		pdo_duckdb_error_stmt(stmt, "Cannot bind a parameter without a position");
 		return 0;
