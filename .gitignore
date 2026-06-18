@@ -22,7 +22,6 @@ configure
 configure.ac
 configure.in
 libtool
-run-tests.php
 *.loT
 acinclude.m4
 aclocal.m4
