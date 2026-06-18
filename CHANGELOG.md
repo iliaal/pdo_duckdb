@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-06-18
+
+### Added
+- Prebuilt binaries are now published with each release, so
+  `pie install iliaal/pdo_duckdb` installs a ready-to-use extension with no
+  local DuckDB library or build toolchain. Coverage: Linux glibc x86_64 and
+  arm64, macOS Apple Silicon (arm64), and Windows x64 (thread-safe and
+  non-thread-safe). PIE falls back to a source build when no prebuilt matches.
+- `--with-pdo-duckdb-static=DIR` configure mode, which statically links
+  DuckDB's static-libs bundle into a self-contained extension (how the Linux
+  and macOS prebuilts are built; the Windows package bundles `duckdb.dll`).
+
 ## [0.1.0] - 2026-06-18
 
 Initial release. A PDO driver for DuckDB.
@@ -39,5 +51,6 @@ Initial release. A PDO driver for DuckDB.
   table/schema names are rejected, rather than silently truncating the statement
   or identifier at the NUL.
 
-[Unreleased]: https://github.com/iliaal/pdo_duckdb/compare/0.1.0...HEAD
+[Unreleased]: https://github.com/iliaal/pdo_duckdb/compare/0.2.0...HEAD
+[0.2.0]: https://github.com/iliaal/pdo_duckdb/releases/tag/0.2.0
 [0.1.0]: https://github.com/iliaal/pdo_duckdb/releases/tag/0.1.0

@@ -18,9 +18,9 @@ foreach ($stmt as $row) {
 ## Requirements
 
 - PHP 8.1 or newer with the `pdo` extension
-- The DuckDB C library (`libduckdb` + `duckdb.h`). Download a prebuilt
-  `libduckdb` bundle from the [DuckDB installation page](https://duckdb.org/docs/installation/)
-  or install it via your package manager.
+- For a source build only: the DuckDB C library (`libduckdb` + `duckdb.h`) —
+  download a prebuilt `libduckdb` bundle from the [DuckDB installation page](https://duckdb.org/docs/installation/)
+  or install it via your package manager. Prebuilt installs (below) need nothing else.
 
 ## Installation
 
@@ -30,8 +30,11 @@ foreach ($stmt as $row) {
 pie install iliaal/pdo_duckdb
 ```
 
-If `duckdb.h` and `libduckdb` are not in a standard location, point the build at
-the DuckDB install prefix:
+On Linux (x86_64/arm64), macOS (Apple Silicon), and Windows x64, PIE downloads a
+self-contained prebuilt binary — no DuckDB install or build toolchain needed. On
+other platforms or older PHP it falls back to a source build, which needs
+`libduckdb` + `duckdb.h`; point it at the prefix if they aren't in a standard
+location:
 
 ```sh
 pie install iliaal/pdo_duckdb --with-pdo-duckdb=/opt/duckdb
