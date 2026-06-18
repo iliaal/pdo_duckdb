@@ -1,0 +1,88 @@
+name: Windows Build
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  release:
+    types: [published]
+
+env:
+  # Keep in sync with DUCKDB_VERSION in tests.yml.
+  DUCKDB_VERSION: "1.5.4"
+
+jobs:
+  windows-matrix:
+    name: Generate Windows build matrix
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.filter.outputs.matrix }}
+    steps:
+      - id: gen
+        uses: php/php-windows-builder/extension-matrix@v1
+        with:
+          extension-url: ${{ github.event.repository.html_url }}
+          php-version-list: '8.1, 8.2, 8.3, 8.4, 8.5'
+
+      - id: filter
+        shell: bash
+        run: |
+          # DuckDB ships no 32-bit Windows C library (only amd64 / arm64), so
+          # drop x86 from the matrix — those builds can't link libduckdb.
+          echo '${{ steps.gen.outputs.matrix }}' > matrix.json
+          cat matrix.json
+          if jq -e 'has("include")' matrix.json >/dev/null 2>&1; then
+            out=$(jq -c '{include: [.include[] | select(.arch == "x64")]}' matrix.json)
+          else
+            out=$(jq -c '[.[] | select(.arch == "x64")]' matrix.json)
+          fi
+          echo "matrix=$out" >> "$GITHUB_OUTPUT"
+          echo "filtered: $out"
+
+  windows-build:
+    name: Build ${{ matrix.php-version }} ${{ matrix.arch }} ${{ matrix.ts }}
+    needs: windows-matrix
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.windows-matrix.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Download and stage libduckdb (x64)
+        shell: pwsh
+        run: |
+          $url = "https://github.com/duckdb/duckdb/releases/download/v${{ env.DUCKDB_VERSION }}/libduckdb-windows-amd64.zip"
+          Invoke-WebRequest -Uri $url -OutFile duckdb.zip
+          Expand-Archive duckdb.zip -DestinationPath duckdb-deps -Force
+          # Bundle layout is flat: duckdb.h, duckdb.lib, duckdb.dll (+ duckdb.hpp).
+          Get-ChildItem duckdb-deps | Select-Object Name, Length
+
+      - name: Build extension
+        uses: php/php-windows-builder/extension@v1
+        with:
+          php-version: ${{ matrix.php-version }}
+          ts: ${{ matrix.ts }}
+          arch: ${{ matrix.arch }}
+          args: --with-pdo-duckdb=${{ github.workspace }}\duckdb-deps
+
+  release:
+    name: Attach Windows DLLs to release
+    if: github.event_name == 'release'
+    needs: windows-build
+    runs-on: ubuntu-latest
+    # The default GITHUB_TOKEN is read-only for contents on newer repos, and
+    # php-windows-builder/release@v1 POSTs to the releases API; without this it
+    # 403s.
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Upload release artifacts
+        uses: php/php-windows-builder/release@v1
+        with:
+          release: ${{ github.event.release.tag_name }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
