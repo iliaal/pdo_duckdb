@@ -1,0 +1,91 @@
+name: Binary build validation (Windows)
+
+# Dispatch-only dry run for the experimental Windows prebuilt path: DuckDB
+# ships no MSVC static lib (only a MinGW one, not MSVC-linkable), so a static
+# self-contained DLL is impossible. Instead we build php_pdo_duckdb.dll against
+# DuckDB's dynamic import lib (duckdb.lib) and ship duckdb.dll alongside. PIE
+# installs bundled dependency DLLs to the PHP root (next to php.exe), which IS
+# on the loader path — so this proves the runtime model: load the freshly built
+# extension with a stock php.exe, duckdb.dll placed beside php.exe, run a query.
+
+on:
+  workflow_dispatch:
+
+env:
+  DUCKDB_VERSION: "1.5.4"
+
+jobs:
+  validate-windows:
+    name: windows php ${{ matrix.php }}
+    runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        php: ['8.4']
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Download libduckdb (amd64 dynamic: duckdb.h + duckdb.lib + duckdb.dll)
+        shell: pwsh
+        run: |
+          $url = "https://github.com/duckdb/duckdb/releases/download/v${{ env.DUCKDB_VERSION }}/libduckdb-windows-amd64.zip"
+          Invoke-WebRequest -Uri $url -OutFile duckdb.zip
+          Expand-Archive duckdb.zip -DestinationPath duckdb-deps -Force
+          Get-ChildItem duckdb-deps | Select-Object Name, Length
+
+      - name: Build extension DLL (MSVC, against dynamic libduckdb)
+        uses: php/php-windows-builder/extension@v1
+        with:
+          php-version: ${{ matrix.php }}
+          arch: x64
+          ts: nts
+          args: --with-pdo-duckdb=${{ github.workspace }}\duckdb-deps
+          run-tests: false
+
+      - name: Show build artifacts
+        shell: pwsh
+        run: Get-ChildItem -Recurse artifacts | Select-Object FullName, Length
+
+      - name: Setup a stock PHP to load the built DLL
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          coverage: none
+
+      - name: Bundle duckdb.dll beside php.exe and run a query
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # Extract the built extension DLL out of the packaged artifact zip.
+          $zip = Get-ChildItem -Recurse artifacts -Filter *.zip | Where-Object { $_.Name -notlike '*logs*' } | Select-Object -First 1
+          Write-Host "artifact zip: $($zip.FullName)"
+          Expand-Archive $zip.FullName -DestinationPath built -Force
+          Get-ChildItem -Recurse built | Select-Object FullName, Length
+          $extdll = Get-ChildItem -Recurse built -Filter "php_pdo_duckdb*.dll" | Select-Object -First 1
+          if (-not $extdll) { throw "no php_pdo_duckdb*.dll in artifact" }
+          Write-Host "extension dll: $($extdll.FullName)"
+
+          # Mirror what PIE does on install: dependency DLLs go to the PHP root,
+          # next to php.exe (on the loader path); the extension DLL is loaded by
+          # full path.
+          $php = (Get-Command php).Source
+          $phpdir = Split-Path $php
+          Write-Host "php.exe: $php"
+          Copy-Item duckdb-deps\duckdb.dll -Destination $phpdir -Force
+
+          # Print the dependent DLLs the extension imports (sanity: should list duckdb.dll).
+          php --ri pdo_duckdb 2>$null | Out-Null
+
+          $code = @'
+          $d = new PDO("duckdb::memory:");
+          $d->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+          $v = $d->getAttribute(PDO::ATTR_CLIENT_VERSION);
+          fwrite(STDERR, "STAGE connected, duckdb $v\n");
+          $d->exec("CREATE TABLE t(i INTEGER, s VARCHAR)");
+          $d->exec("INSERT INTO t VALUES (1,'a'),(2,'b')");
+          $n = (int)$d->query("SELECT count(*) FROM t")->fetchColumn();
+          if ($n !== 2) { fwrite(STDERR, "bad count: $n\n"); exit(1); }
+          echo "ok: bundled-DLL query works, duckdb $v\n";
+          '@
+          $code | Out-File -FilePath probe.php -Encoding utf8
+          php -d extension="$($extdll.FullName)" probe.php
