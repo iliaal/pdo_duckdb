@@ -1,0 +1,25 @@
+// vim:ft=javascript
+
+ARG_WITH("pdo-duckdb", "for pdo_duckdb support", "no");
+
+if (PHP_PDO_DUCKDB != "no") {
+	// --with-pdo-duckdb=DIR points at a directory holding duckdb.h and
+	// duckdb.lib (the prebuilt libduckdb Windows bundle: duckdb.h, duckdb.lib,
+	// duckdb.dll). Also search an include/ and lib/ subdir for prefix-style
+	// layouts.
+	var header_search = (PHP_PDO_DUCKDB != "yes")
+		? PHP_PDO_DUCKDB + ";" + PHP_PDO_DUCKDB + "\\include"
+		: "";
+	var lib_search = (PHP_PDO_DUCKDB != "yes")
+		? PHP_PDO_DUCKDB + ";" + PHP_PDO_DUCKDB + "\\lib"
+		: "";
+
+	if (CHECK_HEADER_ADD_INCLUDE("duckdb.h", "CFLAGS_PDO_DUCKDB", header_search) &&
+		CHECK_LIB("duckdb.lib", "pdo_duckdb", lib_search)) {
+		EXTENSION("pdo_duckdb", "pdo_duckdb.c duckdb_driver.c duckdb_statement.c duckdb_appender.c");
+		ADD_EXTENSION_DEP("pdo_duckdb", "pdo");
+	} else {
+		WARNING("pdo_duckdb not enabled; libduckdb headers/libraries not found");
+		PHP_PDO_DUCKDB = "no";
+	}
+}
