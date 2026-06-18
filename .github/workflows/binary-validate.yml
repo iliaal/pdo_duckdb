@@ -87,15 +87,24 @@ jobs:
           $d = new PDO("duckdb::memory:");
           fwrite(STDERR, "connected\n");
           PHP
-          php -d extension="$GITHUB_WORKSPACE/modules/pdo_duckdb.so" /tmp/probe.php || true
-          sleep 3
-          echo "=== crash report termination reason ==="
-          rep=$(ls -t ~/Library/Logs/DiagnosticReports/php-*.ips 2>/dev/null | head -1)
-          if [ -n "$rep" ]; then
-            grep -iE "termination|Symbol not found|dyld|Referenced from|Expected in|exception|signal|abort" "$rep" | head -20
-          else
-            echo "(no crash report found)"
-          fi
+          # First breakpoint to fire discriminates the abort cause:
+          #   __cxa_throw first  -> a C++ exception is raised then unwinding/catch
+          #                         fails -> terminate (EH/runtime mismatch).
+          #   abort/__assert/pure-virtual first, no prior throw -> a direct abort
+          #                         (assertion, pure-virtual, allocator) in duckdb_open.
+          # DuckDB's static text is stripped, but the system-lib frames around the
+          # abort (libc++abi / libsystem) symbolicate and reveal which path it is.
+          lldb --batch \
+            -o "breakpoint set -n abort" \
+            -o "breakpoint set -n __cxa_throw" \
+            -o "breakpoint set -n __cxa_pure_virtual" \
+            -o "breakpoint set -n __assert_rtn" \
+            -o "breakpoint set -n __cxa_rethrow" \
+            -o "run" \
+            -o "bt" \
+            -o "quit" \
+            -- php -d extension="$GITHUB_WORKSPACE/modules/pdo_duckdb.so" /tmp/probe.php 2>&1 \
+            | grep -iE "stop reason|frame #|Process [0-9]+ stopped|abort|throw|assert|pure|libc\+\+|libsystem|exception|stopped at breakpoint" | head -50
 
       - name: Load + query (no libduckdb on path)
         shell: bash
