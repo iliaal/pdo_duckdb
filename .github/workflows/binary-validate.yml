@@ -69,6 +69,40 @@ jobs:
           fi
           if [ -n "$dep" ]; then echo "ERROR: links libduckdb: $dep"; exit 1; fi
           echo "ok: no libduckdb dependency"
+          # Linux: the C++ runtime must be fully linked in. A gcc-C-driver link
+          # silently drops libstdc++ (the -static-libstdc++ flag is g++-only),
+          # leaving undefined std::/__cxxabi symbols that resolve only where
+          # libstdc++ already sits in the process (the build host) and fail
+          # dlopen on a clean box. Gate on it.
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            undef=$(nm -D -u modules/pdo_duckdb.so | grep -cE "_ZNSt|_ZSt|__cxxabi" || true)
+            if [ "$undef" -ne 0 ]; then
+              echo "ERROR: $undef undefined libstdc++/__cxxabi symbols — C++ runtime not statically linked"
+              nm -D -u modules/pdo_duckdb.so | grep -E "_ZNSt|_ZSt|__cxxabi" | head -10
+              exit 1
+            fi
+            echo "ok: C++ runtime fully resolved (0 undefined std/cxxabi)"
+          fi
+
+      - name: Load + query in a CLEAN container (Linux — catches build-host-only deps)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          # Load the freshly built .so with a stock php:<ver>-cli that has NO
+          # libstdc++/libduckdb pre-loaded, so a non-self-contained module fails
+          # here even though it loads on this build runner. This is the check
+          # that would have caught the 0.2.0 Linux libstdc++ defect.
+          cp modules/pdo_duckdb.so /tmp/pdo_duckdb.so
+          docker run --rm -v /tmp/pdo_duckdb.so:/ext/pdo_duckdb.so:ro "php:${{ matrix.php }}-cli" \
+            php -d extension=/ext/pdo_duckdb.so -r '
+              if (!extension_loaded("pdo_duckdb")) { fwrite(STDERR, "FAIL: not loaded\n"); exit(1); }
+              $d = new PDO("duckdb::memory:");
+              $d->exec("CREATE TABLE t(i INTEGER, s VARCHAR)");
+              $d->exec("INSERT INTO t VALUES (1, \x27a\x27), (2, \x27b\x27)");
+              $n = (int) $d->query("SELECT count(*) FROM t")->fetchColumn();
+              if ($n !== 2) { fwrite(STDERR, "FAIL: count $n\n"); exit(1); }
+              echo "ok: clean-container load+query works (duckdb ", $d->getAttribute(PDO::ATTR_CLIENT_VERSION), ")\n";
+            '
 
       - name: Undefined symbols (macOS diagnostic)
         if: runner.os == 'macOS'
