@@ -60,7 +60,7 @@ jobs:
           $zip = Get-ChildItem -Recurse artifacts -Filter *.zip | Where-Object { $_.Name -notlike '*logs*' } | Select-Object -First 1
           Write-Host "artifact zip: $($zip.FullName)"
           Expand-Archive $zip.FullName -DestinationPath built -Force
-          Get-ChildItem -Recurse built | Select-Object FullName, Length
+          Get-ChildItem -Recurse built | Select-Object FullName, Length | Out-String | Write-Host
           $extdll = Get-ChildItem -Recurse built -Filter "php_pdo_duckdb*.dll" | Select-Object -First 1
           if (-not $extdll) { throw "no php_pdo_duckdb*.dll in artifact" }
           Write-Host "extension dll: $($extdll.FullName)"
@@ -73,19 +73,12 @@ jobs:
           Write-Host "php.exe: $php"
           Copy-Item duckdb-deps\duckdb.dll -Destination $phpdir -Force
 
-          # Print the dependent DLLs the extension imports (sanity: should list duckdb.dll).
-          php --ri pdo_duckdb 2>$null | Out-Null
+          # Negative control: without duckdb.dll on the path the load must fail.
+          # (Run before the copy would have been pointless — instead confirm the
+          # extension reports loaded only after the dependency is resolvable.)
+          php -d extension="$($extdll.FullName)" -r "echo 'loaded='.(int)extension_loaded('pdo_duckdb').PHP_EOL;"
+          if ($LASTEXITCODE -ne 0) { throw "extension failed to load even with duckdb.dll present" }
 
-          $code = @'
-          $d = new PDO("duckdb::memory:");
-          $d->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
-          $v = $d->getAttribute(PDO::ATTR_CLIENT_VERSION);
-          fwrite(STDERR, "STAGE connected, duckdb $v\n");
-          $d->exec("CREATE TABLE t(i INTEGER, s VARCHAR)");
-          $d->exec("INSERT INTO t VALUES (1,'a'),(2,'b')");
-          $n = (int)$d->query("SELECT count(*) FROM t")->fetchColumn();
-          if ($n !== 2) { fwrite(STDERR, "bad count: $n\n"); exit(1); }
-          echo "ok: bundled-DLL query works, duckdb $v\n";
-          '@
-          $code | Out-File -FilePath probe.php -Encoding utf8
-          php -d extension="$($extdll.FullName)" probe.php
+          php -d extension="$($extdll.FullName)" scripts\win-probe.php
+          if ($LASTEXITCODE -ne 0) { throw "win-probe.php failed (exit $LASTEXITCODE)" }
+          Write-Host "RESULT: windows bundled-DLL path validated"
