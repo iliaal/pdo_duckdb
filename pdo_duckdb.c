@@ -53,7 +53,11 @@ ZEND_GET_MODULE(pdo_duckdb)
 /* {{{ PHP_MINIT_FUNCTION */
 PHP_MINIT_FUNCTION(pdo_duckdb)
 {
-	return php_pdo_register_driver(&pdo_duckdb_driver);
+	if (php_pdo_register_driver(&pdo_duckdb_driver) == FAILURE) {
+		return FAILURE;
+	}
+	pdo_duckdb_appender_minit();
+	return SUCCESS;
 }
 /* }}} */
 

@@ -271,6 +271,7 @@ static const struct pdo_dbh_methods duckdb_methods = {
 	.set_attribute = pdo_duckdb_set_attr,
 	.fetch_err = pdo_duckdb_fetch_error_func,
 	.get_attribute = pdo_duckdb_get_attribute,
+	.get_driver_methods = pdo_duckdb_get_driver_methods,
 	/* last_id: DuckDB has no implicit rowid; use sequences + currval(). */
 	/* in_transaction: NULL -> PDO uses its internal transaction tracking. */
 };
