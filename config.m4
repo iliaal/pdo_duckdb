@@ -54,7 +54,15 @@ if test "$PHP_PDO_DUCKDB_STATIC" != "no"; then
       dnl malloc-zone registration abort()s inside a dlopened bundle (SIGABRT at
       dnl the first query, no exception text).
       DUCKDB_MAC_ARCHIVES=`echo $DUCKDB_STATIC_DIR/*.a | tr ' ' '\n' | grep -v jemalloc | tr '\n' ',' | sed 's/,$//'`
-      PDO_DUCKDB_SHARED_LIBADD="-Wl,$DUCKDB_MAC_ARCHIVES -lc++ -lc++abi"
+      dnl -twolevel_namespace overrides libtool's hardcoded, deprecated
+      dnl `-flat_namespace`. Under flat namespace DuckDB's statically-linked ICU
+      dnl binds malloc/free across library boundaries, so memory it allocates is
+      dnl freed through the wrong zone -> find_zone_and_free abort inside
+      dnl TimeZone::detectHostTimeZone() at duckdb_open. ld64 honours the last
+      dnl namespace flag, and this token is appended after libtool's. libc++abi
+      dnl supplies the top-level std:: exception types + EH runtime that libc++
+      dnl alone leaves undefined.
+      PDO_DUCKDB_SHARED_LIBADD="-Wl,$DUCKDB_MAC_ARCHIVES -lc++ -lc++abi -Wl,-twolevel_namespace"
       ;;
     *)
       dnl GNU ld: --start-group resolves the circular references between the
