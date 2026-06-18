@@ -66,6 +66,19 @@ jobs:
           if [ -n "$dep" ]; then echo "ERROR: links libduckdb: $dep"; exit 1; fi
           echo "ok: no libduckdb dependency"
 
+      - name: Backtrace the abort (macOS diagnostic)
+        if: runner.os == 'macOS'
+        continue-on-error: true
+        run: |
+          cat > /tmp/probe.php <<'PHP'
+          <?php
+          fwrite(STDERR, "loaded=".(int)extension_loaded("pdo_duckdb")."\n");
+          $d = new PDO("duckdb::memory:");
+          fwrite(STDERR, "connected\n");
+          PHP
+          lldb --batch -o "run" -o "bt" -o "quit" -- \
+            php -d extension="$GITHUB_WORKSPACE/modules/pdo_duckdb.so" /tmp/probe.php 2>&1 | tail -45
+
       - name: Load + query (no libduckdb on path)
         shell: bash
         run: |
