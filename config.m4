@@ -49,8 +49,12 @@ if test "$PHP_PDO_DUCKDB_STATIC" != "no"; then
       dnl macOS: ld64 is multi-pass (no --start-group). libtool links the bundle
       dnl with `cc -undefined suppress`, so the DuckDB C++ runtime symbols are
       dnl NOT auto-resolved — link libc++ explicitly (a system dylib; dynamic is
-      dnl fine, no GLIBCXX-style portability concern on macOS).
-      PDO_DUCKDB_SHARED_LIBADD="-Wl,$DUCKDB_STATIC_ARCHIVES -lc++"
+      dnl fine, no GLIBCXX-style portability concern on macOS). Exclude bundled
+      dnl jemalloc: DuckDB uses the system allocator on macOS, and jemalloc's
+      dnl malloc-zone registration abort()s inside a dlopened bundle (SIGABRT at
+      dnl the first query, no exception text).
+      DUCKDB_MAC_ARCHIVES=`echo $DUCKDB_STATIC_DIR/*.a | tr ' ' '\n' | grep -v jemalloc | tr '\n' ',' | sed 's/,$//'`
+      PDO_DUCKDB_SHARED_LIBADD="-Wl,$DUCKDB_MAC_ARCHIVES -lc++"
       ;;
     *)
       dnl GNU ld: --start-group resolves the circular references between the
