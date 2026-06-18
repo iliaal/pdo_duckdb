@@ -19,4 +19,12 @@ configure_base: "--with-pdo-duckdb --enable-pdo-duckdb-dev"
 # Driver wraps a C library; run the phpt suite under ASan to catch UAF/overflow.
 asan_test: true
 
-windows_ci: false   # build-verification only in 0.1.0; static-linked binary publishing planned for 0.2.0
+# release-windows.yml (split pattern) uploads x64 NTS+TS DLLs + bundled
+# duckdb.dll to the published release.
+windows_ci: true
+
+# release-linux.yml ships self-contained static-linked .so prebuilts (Linux
+# glibc x86_64+arm64, macOS arm64) via php/pie-ext-binary-builder on
+# release:[published]. composer.json declares the matching
+# "download-url-method": ["pre-packaged-binary", "composer-default"].
+linux_prebuilt: true

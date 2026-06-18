@@ -1,0 +1,82 @@
+name: Release Windows binaries
+
+# Triggered when a GitHub Release is published. DuckDB ships no MSVC static
+# Windows lib (only a MinGW one, not MSVC-linkable), so a static self-contained
+# DLL is impossible. Instead we build php_pdo_duckdb.dll against DuckDB's
+# dynamic import lib (duckdb.lib) and SHIP duckdb.dll inside the asset zip. PIE
+# installs bundled dependency DLLs to the PHP root (next to php.exe, on the
+# loader path) and the extension DLL to ext\, so the dependency resolves at
+# load. The build + bundled-DLL load-and-query is dry-run in
+# binary-validate-windows.yml (workflow_dispatch).
+#
+# x64 only: DuckDB ships no 32-bit Windows lib. NTS + TS. PHP 8.4/8.5 are the
+# runtime-validated set; older PHP falls back to PIE's composer-default source
+# build.
+
+on:
+  release:
+    types: [published]
+
+env:
+  # Keep in sync with DUCKDB_VERSION in tests.yml.
+  DUCKDB_VERSION: "1.5.4"
+
+jobs:
+  build:
+    name: ${{ matrix.php }} ${{ matrix.ts }} x64
+    runs-on: windows-2022
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        php: ['8.4', '8.5']
+        ts: ['nts', 'ts']
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Download libduckdb (amd64 dynamic — duckdb.h, duckdb.lib, duckdb.dll)
+        shell: pwsh
+        run: |
+          $url = "https://github.com/duckdb/duckdb/releases/download/v${{ env.DUCKDB_VERSION }}/libduckdb-windows-amd64.zip"
+          Invoke-WebRequest -Uri $url -OutFile duckdb.zip
+          Expand-Archive duckdb.zip -DestinationPath duckdb-deps -Force
+
+      - name: Build extension DLL (MSVC, against dynamic libduckdb)
+        uses: php/php-windows-builder/extension@v1
+        with:
+          php-version: ${{ matrix.php }}
+          arch: x64
+          ts: ${{ matrix.ts }}
+          args: --with-pdo-duckdb=${{ github.workspace }}\duckdb-deps
+          run-tests: false
+
+      - name: Bundle duckdb.dll, name to the release tag, upload as a release asset
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tag = "${{ github.event.release.tag_name }}"
+
+          $zip = Get-ChildItem artifacts -Filter "php_pdo_duckdb-*.zip" |
+                 Where-Object { $_.Name -notlike '*-logs*' } | Select-Object -First 1
+          if (-not $zip) { throw "no extension artifact zip produced" }
+          # Reuse the php-ts-vs-arch suffix the builder picked (the vs version
+          # tracks the PHP version); only swap the ref segment for the tag.
+          if ($zip.BaseName -notmatch '(\d+\.\d+-(?:nts|ts)-vs\d+-\w+)$') {
+            throw "unexpected artifact name: $($zip.Name)"
+          }
+          $newbase = "php_pdo_duckdb-$tag-$($matches[1])"
+
+          Expand-Archive $zip.FullName -DestinationPath stage -Force
+          Get-ChildItem stage -Filter "php_pdo_duckdb-*.dll" | ForEach-Object { Rename-Item $_.FullName "$newbase.dll" }
+          Get-ChildItem stage -Filter "php_pdo_duckdb-*.pdb" | ForEach-Object { Rename-Item $_.FullName "$newbase.pdb" }
+          # Ship duckdb.dll alongside; PIE drops it next to php.exe on install.
+          Copy-Item duckdb-deps\duckdb.dll -Destination stage\ -Force
+
+          $out = "$newbase.zip"
+          if (Test-Path $out) { Remove-Item $out -Force }
+          Compress-Archive -Path stage\* -DestinationPath $out
+          Write-Host "uploading $out"
+          gh release upload "$tag" "$out" --clobber

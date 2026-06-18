@@ -15,6 +15,7 @@
     "php-ext": {
         "extension-name": "pdo_duckdb",
         "priority": 80,
+        "download-url-method": ["pre-packaged-binary", "composer-default"],
         "configure-options": [
             {
                 "name": "with-pdo-duckdb",

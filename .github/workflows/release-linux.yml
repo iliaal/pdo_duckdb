@@ -1,0 +1,74 @@
+name: Release Linux & macOS binaries
+
+# Triggered when a GitHub Release is published. Builds self-contained .so
+# binaries for Linux glibc (x86_64 + arm64) and macOS arm64 at the PHP
+# versions in the matrix (NTS only -- ZTS lives in the Windows lane) and
+# uploads each as a release asset via php/pie-ext-binary-builder using
+# PIE's pre-packaged-binary naming convention.
+#
+# pdo_duckdb links an external libduckdb, so the prebuilt must STATICALLY
+# link DuckDB to be self-contained (a dynamically-linked .so wouldn't load
+# without libduckdb on the user's loader path, and PIE prefers the prebuilt).
+# Each runner downloads DuckDB's static-libs bundle for its os/arch and the
+# build links it via config.m4's --with-pdo-duckdb-static mode. The exact
+# build + self-contained + load-and-query checks run in binary-validate.yml
+# (workflow_dispatch) as the pre-tag dry run.
+#
+# macOS Intel (macos-13) and Linux musl are intentionally absent -- those
+# users source-build via PIE's composer-default fallback. composer.json
+# declares "download-url-method": ["pre-packaged-binary", "composer-default"]
+# so PIE prefers the prebuilt and falls back to a source build when no asset
+# matches (older PHP, other arches/libc).
+
+on:
+  release:
+    types: [published]
+
+env:
+  # Keep in sync with DUCKDB_VERSION in tests.yml / windows.yml.
+  DUCKDB_VERSION: "1.5.4"
+
+jobs:
+  build:
+    name: ${{ matrix.os }} php ${{ matrix.php }}
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        # Pinned over *-latest so a runner image shift can't silently change
+        # the glibc baseline / toolchain on published assets without a diff.
+        os:
+          - ubuntu-24.04
+          - ubuntu-24.04-arm
+          - macos-14
+        php: ['8.4', '8.5']
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          coverage: none
+
+      - name: Download DuckDB static libs for this os/arch
+        shell: bash
+        run: |
+          case "${{ matrix.os }}" in
+            ubuntu-24.04)     asset=static-libs-linux-amd64.zip ;;
+            ubuntu-24.04-arm) asset=static-libs-linux-arm64.zip ;;
+            macos-14)         asset=static-libs-osx-arm64.zip ;;
+            *) echo "unmapped runner ${{ matrix.os }}"; exit 1 ;;
+          esac
+          curl -fsSL "https://github.com/duckdb/duckdb/releases/download/v${DUCKDB_VERSION}/${asset}" -o duckdb-static.zip
+          mkdir -p duckdb-static
+          unzip -o -q duckdb-static.zip -d duckdb-static
+
+      - name: Build and upload prebuilt binary
+        uses: php/pie-ext-binary-builder@0.0.3
+        with:
+          release-tag: ${{ github.event.release.tag_name }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          configure-flags: '--with-pdo-duckdb-static=${{ github.workspace }}/duckdb-static'
