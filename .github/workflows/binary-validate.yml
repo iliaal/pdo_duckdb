@@ -48,8 +48,21 @@ jobs:
         run: |
           phpize
           ./configure --with-pdo-duckdb-static="$GITHUB_WORKSPACE/duckdb-static" --enable-pdo-duckdb-dev
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            # libtool hardcodes the deprecated `-flat_namespace -undefined
+            # suppress` combo for bundles. Flat namespace lets DuckDB's
+            # statically-linked ICU bind malloc/free across library boundaries,
+            # so memory it allocates is freed through the wrong zone ->
+            # find_zone_and_free abort at duckdb_open. Force two-level namespace
+            # + dynamic_lookup so each symbol binds to its own library.
+            sed -i.bak -e 's/-flat_namespace/-twolevel_namespace/g' -e 's/-undefined\([^A-Za-z]*\)suppress/-undefined\1dynamic_lookup/g' libtool
+          fi
           make -j"$(getconf _NPROCESSORS_ONLN)"
           ls -lh modules/pdo_duckdb.so
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            echo "=== namespace flag in final link ==="
+            otool -hv modules/pdo_duckdb.so | grep -iE "TWOLEVEL|FLAT" || true
+          fi
 
       - name: Verify self-contained (no libduckdb dependency)
         shell: bash
