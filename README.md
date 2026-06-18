@@ -79,6 +79,12 @@ $app->flush();                              // or $app->close() to finalize
 returns the appender for chaining. PHP `null`/`bool`/`int`/`float`/`string` map
 to DuckDB values; DuckDB casts them to the target column types.
 
+On PHP 8.4+, `PDO::connect('duckdb:…')` returns a `Pdo\Duckdb` instance and
+`duckdbAppender()` lives on that subclass. On `new PDO('duckdb:…')` (and on PHP
+8.3) the method is available on the PDO object directly; note PHP 8.5 emits a
+deprecation for driver methods called on the base `PDO` class, so prefer
+`PDO::connect()` on 8.4+.
+
 ## DuckDB extensions
 
 DuckDB extensions load through ordinary SQL — no special API:
