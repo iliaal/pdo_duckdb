@@ -34,11 +34,13 @@ typedef struct {
 	duckdb_result result;
 	/* result holds a materialized rowset that must be destroyed */
 	bool has_result;
-	/* index of the row most recently positioned on by the fetcher; -1 before
-	 * the first fetch. get_col reads from this row. */
-	int64_t current_row;
-	/* number of rows in the materialized result (legacy row API) */
-	int64_t row_count;
+	/* Result is read forward-only via the data-chunk API. We stream one chunk
+	 * at a time; get_col reads column `cur` of the current chunk. */
+	duckdb_data_chunk chunk;	/* current chunk, NULL when none is loaded */
+	idx_t chunk_size;			/* rows in the current chunk */
+	idx_t cur;					/* current row within the chunk (valid after a fetch) */
+	bool started;				/* has the first chunk been fetched? */
+	bool done;					/* all chunks consumed */
 } pdo_duckdb_stmt;
 
 extern const pdo_driver_t pdo_duckdb_driver;
