@@ -1,5 +1,5 @@
 /* This is a generated file, edit pdo_duckdb.stub.php instead.
- * Stub hash: 81fd2ff5eb2e83699a2bfd216e33d2ca86465642 */
+ * Stub hash: 9309cc69b15bcf0ec2edf530d138f68a9d4d017a */
 
 ZEND_BEGIN_ARG_INFO_EX(arginfo_class_Pdo_Duckdb_Appender___construct, 0, 0, 0)
 ZEND_END_ARG_INFO()
@@ -42,7 +42,7 @@ static zend_class_entry *register_class_Pdo_Duckdb_Appender(void)
 	zend_class_entry ce, *class_entry;
 
 	INIT_NS_CLASS_ENTRY(ce, "Pdo\\Duckdb", "Appender", class_Pdo_Duckdb_Appender_methods);
-	class_entry = zend_register_internal_class_with_flags(&ce, NULL, ZEND_ACC_FINAL);
+	class_entry = zend_register_internal_class_with_flags(&ce, NULL, ZEND_ACC_FINAL|ZEND_ACC_NO_DYNAMIC_PROPERTIES|ZEND_ACC_NOT_SERIALIZABLE);
 
 	return class_entry;
 }

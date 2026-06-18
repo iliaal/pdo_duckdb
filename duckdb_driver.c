@@ -182,46 +182,34 @@ static zend_string *duckdb_handle_quoter(pdo_dbh_t *dbh, const zend_string *unqu
 	return buf.s;
 }
 
-static bool duckdb_handle_begin(pdo_dbh_t *dbh)
+/* Run a control statement (transaction verbs) that returns no rowset. */
+static bool duckdb_simple_exec(pdo_dbh_t *dbh, const char *sql)
 {
 	pdo_duckdb_db_handle *H = (pdo_duckdb_db_handle *)dbh->driver_data;
 	duckdb_result result;
 
-	if (duckdb_query(H->conn, "BEGIN TRANSACTION", &result) != DuckDBSuccess) {
+	if (duckdb_query(H->conn, sql, &result) != DuckDBSuccess) {
 		pdo_duckdb_error(dbh, duckdb_result_error(&result));
 		duckdb_destroy_result(&result);
 		return false;
 	}
 	duckdb_destroy_result(&result);
 	return true;
+}
+
+static bool duckdb_handle_begin(pdo_dbh_t *dbh)
+{
+	return duckdb_simple_exec(dbh, "BEGIN TRANSACTION");
 }
 
 static bool duckdb_handle_commit(pdo_dbh_t *dbh)
 {
-	pdo_duckdb_db_handle *H = (pdo_duckdb_db_handle *)dbh->driver_data;
-	duckdb_result result;
-
-	if (duckdb_query(H->conn, "COMMIT", &result) != DuckDBSuccess) {
-		pdo_duckdb_error(dbh, duckdb_result_error(&result));
-		duckdb_destroy_result(&result);
-		return false;
-	}
-	duckdb_destroy_result(&result);
-	return true;
+	return duckdb_simple_exec(dbh, "COMMIT");
 }
 
 static bool duckdb_handle_rollback(pdo_dbh_t *dbh)
 {
-	pdo_duckdb_db_handle *H = (pdo_duckdb_db_handle *)dbh->driver_data;
-	duckdb_result result;
-
-	if (duckdb_query(H->conn, "ROLLBACK", &result) != DuckDBSuccess) {
-		pdo_duckdb_error(dbh, duckdb_result_error(&result));
-		duckdb_destroy_result(&result);
-		return false;
-	}
-	duckdb_destroy_result(&result);
-	return true;
+	return duckdb_simple_exec(dbh, "ROLLBACK");
 }
 
 static bool pdo_duckdb_set_attr(pdo_dbh_t *dbh, zend_long attr, zval *val)
@@ -310,6 +298,8 @@ static int pdo_duckdb_handle_factory(pdo_dbh_t *dbh, zval *driver_options) /* {{
 	char *path;
 	char *open_error = NULL;
 	bool denied;
+	duckdb_config config = NULL;
+	duckdb_state open_state;
 
 	H = pecalloc(1, sizeof(pdo_duckdb_db_handle), dbh->is_persistent);
 	H->einfo.errcode = 0;
@@ -323,7 +313,19 @@ static int pdo_duckdb_handle_factory(pdo_dbh_t *dbh, zval *driver_options) /* {{
 		goto cleanup;
 	}
 
-	if (duckdb_open_ext(path, &H->db, NULL, &open_error) != DuckDBSuccess) {
+	/* open_basedir guards only the DB file path above; DuckDB SQL (read_csv,
+	 * COPY, ATTACH, httpfs, ...) can otherwise reach the filesystem/network
+	 * directly. When open_basedir is in effect, disable that external access so
+	 * the sandbox holds at the SQL layer too. */
+	if (PG(open_basedir) && *PG(open_basedir) && duckdb_create_config(&config) == DuckDBSuccess) {
+		duckdb_set_config(config, "enable_external_access", "false");
+	}
+
+	open_state = duckdb_open_ext(path, &H->db, config, &open_error);
+	if (config) {
+		duckdb_destroy_config(&config);
+	}
+	if (open_state != DuckDBSuccess) {
 		pdo_duckdb_error(dbh, open_error ? open_error : "Unable to open DuckDB database");
 		if (open_error) {
 			duckdb_free(open_error);

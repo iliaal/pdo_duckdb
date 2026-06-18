@@ -31,7 +31,7 @@ static zend_class_entry *pdo_duckdb_ce; /* the Pdo\Duckdb PDO subclass */
 
 static void pdo_duckdb_appender_throw(duckdb_appender ap, const char *what)
 {
-	const char *msg = duckdb_appender_error(ap);
+	const char *msg = ap ? duckdb_appender_error(ap) : NULL;
 	zend_throw_exception_ex(php_pdo_get_exception(), 0, "%s: %s", what, msg ? msg : "unknown error");
 }
 
@@ -44,6 +44,8 @@ static zend_object *pdo_duckdb_appender_new(zend_class_entry *ce)
 	a->std.handlers = &pdo_duckdb_appender_handlers;
 	a->appender = NULL;
 	a->closed = false;
+	a->ncols = 0;
+	a->blob_cols = NULL;
 	a->pdo = NULL;
 
 	return &a->std;
@@ -61,11 +63,32 @@ static void pdo_duckdb_appender_free(zend_object *obj)
 		duckdb_appender_destroy(&a->appender);
 		a->appender = NULL;
 	}
+	if (a->blob_cols) {
+		efree(a->blob_cols);
+		a->blob_cols = NULL;
+	}
 	if (a->pdo) {
 		OBJ_RELEASE(a->pdo);
 		a->pdo = NULL;
 	}
 	zend_object_std_dtor(obj);
+}
+
+/* The appender holds a reference to the PDO object (it owns the connection);
+ * expose it so a cycle through that object stays collectable. */
+static HashTable *pdo_duckdb_appender_get_gc(zend_object *obj, zval **table, int *n)
+{
+	pdo_duckdb_appender *a = pdo_duckdb_appender_from_obj(obj);
+
+	if (a->pdo) {
+		zend_get_gc_buffer *buf = zend_get_gc_buffer_create();
+		zend_get_gc_buffer_add_obj(buf, a->pdo);
+		zend_get_gc_buffer_use(buf, table, n);
+	} else {
+		*table = NULL;
+		*n = 0;
+	}
+	return zend_std_get_properties(obj);
 }
 
 zend_result pdo_duckdb_appender_minit(void)
@@ -77,6 +100,7 @@ zend_result pdo_duckdb_appender_minit(void)
 	pdo_duckdb_appender_handlers.offset = offsetof(pdo_duckdb_appender, std);
 	pdo_duckdb_appender_handlers.free_obj = pdo_duckdb_appender_free;
 	pdo_duckdb_appender_handlers.clone_obj = NULL;
+	pdo_duckdb_appender_handlers.get_gc = pdo_duckdb_appender_get_gc;
 
 #if PHP_VERSION_ID >= 80400
 	/* Modern PDO subclass model: a duckdb: DSN yields a Pdo\Duckdb instance, so
@@ -143,6 +167,19 @@ static void pdo_duckdb_appender_create_impl(INTERNAL_FUNCTION_PARAMETERS)
 	a->closed = false;
 	a->pdo = Z_OBJ_P(ZEND_THIS);
 	GC_ADDREF(a->pdo);
+
+	/* Cache which target columns are BLOB once, so appendRow() doesn't allocate
+	 * a logical type per string cell on the bulk-load hot path. */
+	a->ncols = duckdb_appender_column_count(ap);
+	if (a->ncols) {
+		idx_t c;
+		a->blob_cols = emalloc(sizeof(bool) * a->ncols);
+		for (c = 0; c < a->ncols; c++) {
+			duckdb_logical_type ct = duckdb_appender_column_type(ap, c);
+			a->blob_cols[c] = duckdb_get_type_id(ct) == DUCKDB_TYPE_BLOB;
+			duckdb_destroy_logical_type(&ct);
+		}
+	}
 }
 
 ZEND_METHOD(Pdo_Duckdb, duckdbAppender)
@@ -178,7 +215,6 @@ ZEND_METHOD(Pdo_Duckdb_Appender, appendRow)
 {
 	zval *args = NULL;
 	uint32_t argc = 0, i;
-	idx_t ncols;
 	pdo_duckdb_appender *a;
 
 	ZEND_PARSE_PARAMETERS_START(0, -1)
@@ -189,8 +225,6 @@ ZEND_METHOD(Pdo_Duckdb_Appender, appendRow)
 	if (!a) {
 		RETURN_THROWS();
 	}
-
-	ncols = duckdb_appender_column_count(a->appender);
 
 	for (i = 0; i < argc; i++) {
 		zval *v = &args[i];
@@ -215,12 +249,7 @@ ZEND_METHOD(Pdo_Duckdb_Appender, appendRow)
 				/* A PHP string maps to varchar by default, but DuckDB rejects
 				 * non-UTF-8 there. If the target column is BLOB, append raw
 				 * bytes so binary data round-trips. */
-				bool is_blob = false;
-				if (i < ncols) {
-					duckdb_logical_type ct = duckdb_appender_column_type(a->appender, i);
-					is_blob = duckdb_get_type_id(ct) == DUCKDB_TYPE_BLOB;
-					duckdb_destroy_logical_type(&ct);
-				}
+				bool is_blob = (i < a->ncols) && a->blob_cols[i];
 				st = is_blob
 					? duckdb_append_blob(a->appender, Z_STRVAL_P(v), (idx_t)Z_STRLEN_P(v))
 					: duckdb_append_varchar_length(a->appender, Z_STRVAL_P(v), (idx_t)Z_STRLEN_P(v));
