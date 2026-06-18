@@ -216,11 +216,24 @@ static bool pdo_duckdb_set_attr(pdo_dbh_t *dbh, zend_long attr, zval *val)
 {
 	switch (attr) {
 		case PDO_ATTR_AUTOCOMMIT:
+			/* DuckDB is autocommit-by-default with no session-level toggle;
+			 * explicit transactions go through begin/commit/rollback. Accept a
+			 * request to keep autocommit on (the real behaviour), but reject
+			 * turning it off rather than silently ignoring it — accepting false
+			 * would mislead the caller into thinking statements are batched into
+			 * a transaction when each still commits on its own. */
+			if (zend_is_true(val)) {
+				return true;
+			}
+			pdo_duckdb_error(dbh, "DuckDB does not support disabling autocommit; "
+				"use beginTransaction() for explicit transactions");
+			return false;
+
 		case PDO_ATTR_PERSISTENT:
-			/* No driver-level action needed: PDO core manages persistence, and
-			 * explicit transactions go through begin/commit/rollback. Accept so
-			 * that passing these as constructor options does not raise IM001. */
+			/* PDO core manages persistence; accept so it can be passed as a
+			 * constructor option without raising IM001. */
 			return true;
+
 		default:
 			return false;
 	}
@@ -273,7 +286,7 @@ static char *duckdb_make_path_safe(const char *data_source, bool *denied)
 	*denied = false;
 
 	if (!data_source || !*data_source || strcmp(data_source, ":memory:") == 0) {
-		return NULL;
+		return NULL;  /* in-memory database */
 	}
 
 	char *fullpath = expand_filepath(data_source, NULL);
@@ -316,9 +329,22 @@ static int pdo_duckdb_handle_factory(pdo_dbh_t *dbh, zval *driver_options) /* {{
 	/* open_basedir guards only the DB file path above; DuckDB SQL (read_csv,
 	 * COPY, ATTACH, httpfs, ...) can otherwise reach the filesystem/network
 	 * directly. When open_basedir is in effect, disable that external access so
-	 * the sandbox holds at the SQL layer too. */
-	if (PG(open_basedir) && *PG(open_basedir) && duckdb_create_config(&config) == DuckDBSuccess) {
-		duckdb_set_config(config, "enable_external_access", "false");
+	 * the sandbox holds at the SQL layer too. This is a security boundary, so
+	 * fail closed: if the config can't be built or applied, refuse to open
+	 * rather than silently connecting with external access still enabled. */
+	if (PG(open_basedir) && *PG(open_basedir)) {
+		if (duckdb_create_config(&config) != DuckDBSuccess ||
+			duckdb_set_config(config, "enable_external_access", "false") != DuckDBSuccess) {
+			if (config) {
+				duckdb_destroy_config(&config);
+			}
+			if (path) {
+				efree(path);
+			}
+			zend_throw_exception_ex(php_pdo_get_exception(), 0,
+				"Unable to apply the open_basedir sandbox (enable_external_access) to DuckDB");
+			goto cleanup;
+		}
 	}
 
 	open_state = duckdb_open_ext(path, &H->db, config, &open_error);
