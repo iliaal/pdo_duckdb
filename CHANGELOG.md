@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-06-18
+
+### Fixed
+- Linux prebuilt binaries are now genuinely self-contained. The 0.2.0 Linux
+  `.so` failed to load on a clean host (`undefined symbol:
+  _ZTVN10__cxxabiv120__function_type_infoE`) because the bundled DuckDB C++
+  runtime was never statically linked — the gcc C-driver link ignored the
+  g++-only `-static-libstdc++` flag. The build now links the static
+  `libstdc++`/`libgcc_eh` explicitly. macOS and Windows binaries were
+  unaffected. 0.2.0's broken Linux assets were removed, so installs pinned to
+  0.2.0 fall back to a source build on Linux.
+
 ## [0.2.0] - 2026-06-18
 
 ### Added
@@ -51,6 +63,7 @@ Initial release. A PDO driver for DuckDB.
   table/schema names are rejected, rather than silently truncating the statement
   or identifier at the NUL.
 
-[Unreleased]: https://github.com/iliaal/pdo_duckdb/compare/0.2.0...HEAD
+[Unreleased]: https://github.com/iliaal/pdo_duckdb/compare/0.2.1...HEAD
+[0.2.1]: https://github.com/iliaal/pdo_duckdb/releases/tag/0.2.1
 [0.2.0]: https://github.com/iliaal/pdo_duckdb/releases/tag/0.2.0
 [0.1.0]: https://github.com/iliaal/pdo_duckdb/releases/tag/0.1.0
