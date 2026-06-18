@@ -95,6 +95,14 @@ static bool duckdb_handle_preparer(pdo_dbh_t *dbh, zend_string *sql, pdo_stmt_t 
 	zend_string *rewritten = NULL;
 	int parse_ret;
 
+	/* duckdb_prepare() takes a NUL-terminated const char*, so an embedded NUL
+	 * would silently truncate the statement (e.g. "SELECT 1\0DROP ..." prepares
+	 * as "SELECT 1"). Reject it rather than run a different query than intended. */
+	if (zend_str_has_nul_byte(sql)) {
+		pdo_duckdb_error(dbh, "SQL statement contains a NUL byte");
+		return false;
+	}
+
 	if (!pdo_duckdb_enforce_sandbox(H)) {
 		pdo_duckdb_error(dbh, "Unable to apply the open_basedir sandbox (enable_external_access) to DuckDB");
 		return false;
@@ -144,6 +152,13 @@ static zend_long duckdb_handle_doer(pdo_dbh_t *dbh, const zend_string *sql)
 	pdo_duckdb_db_handle *H = (pdo_duckdb_db_handle *)dbh->driver_data;
 	duckdb_result result;
 	zend_long changed;
+
+	/* duckdb_query() takes a NUL-terminated const char*: an embedded NUL would
+	 * silently truncate the statement. Reject it. */
+	if (zend_str_has_nul_byte(sql)) {
+		pdo_duckdb_error(dbh, "SQL statement contains a NUL byte");
+		return -1;
+	}
 
 	if (!pdo_duckdb_enforce_sandbox(H)) {
 		pdo_duckdb_error(dbh, "Unable to apply the open_basedir sandbox (enable_external_access) to DuckDB");

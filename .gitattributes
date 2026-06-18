@@ -1,0 +1,21 @@
+# Normalize line endings; .phpt expected-output blocks are byte-exact, so keep
+# them out of autocrlf conversion on Windows runners.
+* text=auto
+tests/*.phpt -text
+
+*.so  binary
+*.dll binary
+*.lib binary
+
+# Exclude development-only files from `git archive` / distributed (PIE/Composer)
+# tarballs. run-tests.php is PHP-License-3.01 while the project itself is
+# BSD-3-Clause; excluding it (and the other dev tooling) keeps the distributed
+# artifact's license metadata accurate and the package lean.
+/run-tests.php    export-ignore
+/.github/         export-ignore
+/scripts/         export-ignore
+/tests/           export-ignore
+/.upstream/       export-ignore
+/.release-config  export-ignore
+/.gitignore       export-ignore
+/.gitattributes   export-ignore

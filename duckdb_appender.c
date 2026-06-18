@@ -159,6 +159,14 @@ static void pdo_duckdb_appender_create_impl(INTERNAL_FUNCTION_PARAMETERS)
 	PDO_CONSTRUCT_CHECK;
 	H = (pdo_duckdb_db_handle *)dbh->driver_data;
 
+	/* duckdb_appender_create() takes NUL-terminated const char* identifiers, so
+	 * an embedded NUL would silently truncate the table/schema name (e.g.
+	 * "safe\0bad" would append to "safe"). Reject it. */
+	if (zend_str_has_nul_byte(table) || (schema && zend_str_has_nul_byte(schema))) {
+		zend_value_error("Pdo\\Duckdb\\Appender table and schema names must not contain a NUL byte");
+		RETURN_THROWS();
+	}
+
 	if (duckdb_appender_create(H->conn, schema ? ZSTR_VAL(schema) : NULL, ZSTR_VAL(table), &ap) != DuckDBSuccess) {
 		pdo_duckdb_appender_throw(ap, "Unable to create DuckDB appender");
 		if (ap) {

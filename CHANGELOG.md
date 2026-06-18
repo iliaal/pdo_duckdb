@@ -25,6 +25,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   "appender is closed" instead of operating on a poisoned native appender.
 - Switched the appender error path from the deprecated `duckdb_appender_error`
   to `duckdb_appender_error_data`.
+- Distribution archives (`git archive` / PIE / Composer) now exclude
+  development-only files via `.gitattributes` `export-ignore` — notably the
+  PHP-License-3.01 `run-tests.php`, so the shipped artifact matches the
+  declared BSD-3-Clause license. Also excludes `tests/`, `.github/`, `scripts/`,
+  and repo-metadata files.
 
 ### Security
 - When `open_basedir` is set, connections disable DuckDB's external SQL file
@@ -34,5 +39,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to bypass it. The sandbox is enforced on the live connection at every SQL
   entry point (prepare/exec/execute), covering both persistent reuse and a
   normal handle whose `open_basedir` is tightened mid-request after it opened.
+- Reject embedded NUL bytes in SQL passed to `query()`/`prepare()`/`exec()` and
+  in `duckdbAppender()` table/schema names. The DuckDB C API takes
+  NUL-terminated strings, so an embedded NUL silently truncated the statement or
+  identifier (e.g. `"SELECT 1\0…"` ran as `SELECT 1`; `"safe\0bad"` appended to
+  `safe`); these now raise instead.
 
 [Unreleased]: https://github.com/iliaal/pdo_duckdb/compare/HEAD...HEAD
