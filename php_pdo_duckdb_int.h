@@ -54,6 +54,10 @@ typedef struct {
 	duckdb_database db;
 	duckdb_connection conn;
 	pdo_duckdb_error_info einfo;
+	/* Whether this handle was opened with DuckDB external access disabled
+	 * (the open_basedir SQL sandbox). Recorded so a persistent handle isn't
+	 * reused across a change in open_basedir policy — see check_liveness. */
+	bool external_access_disabled;
 } pdo_duckdb_db_handle;
 
 typedef struct {

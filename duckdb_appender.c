@@ -31,8 +31,14 @@ static zend_class_entry *pdo_duckdb_ce; /* the Pdo\Duckdb PDO subclass */
 
 static void pdo_duckdb_appender_throw(duckdb_appender ap, const char *what)
 {
-	const char *msg = ap ? duckdb_appender_error(ap) : NULL;
+	duckdb_error_data ed = ap ? duckdb_appender_error_data(ap) : NULL;
+	const char *msg = (ed && duckdb_error_data_has_error(ed)) ? duckdb_error_data_message(ed) : NULL;
+
 	zend_throw_exception_ex(php_pdo_get_exception(), 0, "%s: %s", what, msg ? msg : "unknown error");
+
+	if (ed) {
+		duckdb_destroy_error_data(&ed);
+	}
 }
 
 static zend_object *pdo_duckdb_appender_new(zend_class_entry *ce)
@@ -226,6 +232,35 @@ ZEND_METHOD(Pdo_Duckdb_Appender, appendRow)
 		RETURN_THROWS();
 	}
 
+	/* Validate the whole row before touching the native appender. DuckDB appends
+	 * value-by-value with no rollback: a failure partway through (a PHP value of
+	 * an unsupported type, or the wrong column count caught at end_row) leaves
+	 * the appender mid-row and poisons it — later appends fail with "too many
+	 * appends for chunk" and flush with "incomplete append to row". So check the
+	 * column count and every value's type up front, before any native append. */
+	if (argc != a->ncols) {
+		zend_value_error("Pdo\\Duckdb\\Appender::appendRow(): table has %u column(s), but %u value(s) were given",
+			(uint32_t)a->ncols, argc);
+		RETURN_THROWS();
+	}
+	for (i = 0; i < argc; i++) {
+		zval *v = &args[i];
+		ZVAL_DEREF(v);
+		switch (Z_TYPE_P(v)) {
+			case IS_NULL:
+			case IS_TRUE:
+			case IS_FALSE:
+			case IS_LONG:
+			case IS_DOUBLE:
+			case IS_STRING:
+				break;
+			default:
+				zend_type_error("Pdo\\Duckdb\\Appender::appendRow(): argument #%u is of unsupported type %s",
+					i + 1, zend_zval_value_name(v));
+				RETURN_THROWS();
+		}
+	}
+
 	for (i = 0; i < argc; i++) {
 		zval *v = &args[i];
 		duckdb_state st;
@@ -245,28 +280,30 @@ ZEND_METHOD(Pdo_Duckdb_Appender, appendRow)
 			case IS_DOUBLE:
 				st = duckdb_append_double(a->appender, Z_DVAL_P(v));
 				break;
-			case IS_STRING: {
-				/* A PHP string maps to varchar by default, but DuckDB rejects
-				 * non-UTF-8 there. If the target column is BLOB, append raw
-				 * bytes so binary data round-trips. */
+			default: {
+				/* IS_STRING (the only remaining type after validation above). A
+				 * PHP string maps to varchar by default, but DuckDB rejects
+				 * non-UTF-8 there. If the target column is BLOB, append raw bytes
+				 * so binary data round-trips. */
 				bool is_blob = (i < a->ncols) && a->blob_cols[i];
 				st = is_blob
 					? duckdb_append_blob(a->appender, Z_STRVAL_P(v), (idx_t)Z_STRLEN_P(v))
 					: duckdb_append_varchar_length(a->appender, Z_STRVAL_P(v), (idx_t)Z_STRLEN_P(v));
 				break;
 			}
-			default:
-				zend_type_error("Pdo\\Duckdb\\Appender::appendRow(): argument #%u is of unsupported type %s",
-					i + 1, zend_zval_value_name(v));
-				RETURN_THROWS();
 		}
 		if (st != DuckDBSuccess) {
+			/* A failed append invalidates the appender (DuckDB contract); mark it
+			 * unusable so the free path destroys it instead of issuing more
+			 * appends against a poisoned row. */
+			a->closed = true;
 			pdo_duckdb_appender_throw(a->appender, "Failed to append value");
 			RETURN_THROWS();
 		}
 	}
 
 	if (duckdb_appender_end_row(a->appender) != DuckDBSuccess) {
+		a->closed = true;
 		pdo_duckdb_appender_throw(a->appender, "Failed to end appender row");
 		RETURN_THROWS();
 	}

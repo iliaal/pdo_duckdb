@@ -111,9 +111,12 @@ $db->exec('INSTALL httpfs; LOAD httpfs;');  // downloadable extensions
 
 ## Status
 
-Early release. The result path currently uses DuckDB's legacy row-value C API;
-migration to the data-chunk/vector API is planned for performance and to track
-DuckDB's forward API.
+Early release. Result columns are decoded with DuckDB's data-chunk/vector API
+(native scalars straight to PHP values; nested/extended types via their
+canonical string form). Note that `execute()` returns a **materialized** result:
+DuckDB buffers the full result set in memory before PDO begins fetching, so a
+large `SELECT` is bounded by available memory rather than streamed row-by-row.
+True streaming (the pending-result API) is a planned follow-up.
 
 ## License
 
