@@ -19,4 +19,4 @@ configure_base: "--with-pdo-duckdb --enable-pdo-duckdb-dev"
 # Driver wraps a C library; run the phpt suite under ASan to catch UAF/overflow.
 asan_test: true
 
-windows_ci: true
+windows_ci: false   # build-verification only in 0.1.0; static-linked binary publishing planned for 0.2.0

@@ -5,14 +5,15 @@ name: Windows Build
 # php-windows-builder's test phase because the external duckdb.dll isn't on the
 # loader path there — the same build-verification scope the rest of the fleet's
 # external-library extensions (e.g. php_excel/LibXL) run on Windows.
+#
+# Binary publishing (self-contained, static-linked libduckdb) is deferred to
+# 0.2.0; this lane is build-verification only — it does not attach assets.
 
 on:
   push:
     branches: [master]
   pull_request:
     branches: [master]
-  release:
-    types: [published]
 
 env:
   # Keep in sync with DUCKDB_VERSION in tests.yml.
@@ -72,23 +73,3 @@ jobs:
           ts: ${{ matrix.ts }}
           arch: ${{ matrix.arch }}
           args: --with-pdo-duckdb=${{ github.workspace }}\duckdb-deps
-
-  release:
-    name: Attach Windows DLLs to release
-    if: github.event_name == 'release'
-    needs: windows-build
-    runs-on: ubuntu-latest
-    # The default GITHUB_TOKEN is read-only for contents on newer repos, and
-    # php-windows-builder/release@v1 POSTs to the releases API; without this it
-    # 403s.
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Upload release artifacts
-        uses: php/php-windows-builder/release@v1
-        with:
-          release: ${{ github.event.release.tag_name }}
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
