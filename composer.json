@@ -1,0 +1,31 @@
+{
+    "name": "iliaal/pdo_duckdb",
+    "description": "PDO driver for DuckDB, the in-process analytical database.",
+    "type": "php-ext",
+    "license": "BSD-3-Clause",
+    "authors": [
+        {
+            "name": "Ilia Alshanetsky",
+            "email": "ilia@ilia.ws"
+        }
+    ],
+    "require": {
+        "php": ">=8.3"
+    },
+    "php-ext": {
+        "extension-name": "pdo_duckdb",
+        "priority": 80,
+        "configure-options": [
+            {
+                "name": "with-pdo-duckdb",
+                "description": "DuckDB install prefix (containing include/duckdb.h and lib/libduckdb)",
+                "needs-value": true
+            },
+            {
+                "name": "enable-pdo-duckdb-dev",
+                "description": "Build with -Wall -Wextra -Werror for release verification",
+                "needs-value": false
+            }
+        ]
+    }
+}

@@ -1,0 +1,51 @@
+# PHP extension build artifacts
+*.la
+*.lo
+*.o
+*.so
+*.dep
+.libs/
+.deps/
+modules/
+build/
+autom4te.cache/
+Makefile
+Makefile.fragments
+Makefile.global
+Makefile.objects
+config.h
+config.h.in
+config.log
+config.status
+config.nice
+configure
+configure.ac
+configure.in
+libtool
+run-tests.php
+*.loT
+acinclude.m4
+aclocal.m4
+conftest*
+install-sh
+ltmain.sh
+missing
+mkinstalldirs
+tests/*.diff
+tests/*.out
+tests/*.exp
+tests/*.log
+tests/*.php
+tests/*.sh
+!tests/*.phpt
+
+# Generated arginfo is committed; uncomment if you prefer to regenerate
+# *_arginfo.h
+
+# Editor backups
+*~
+
+# Agent files
+/.claude/
+/AGENTS.md
+/CLAUDE.md
