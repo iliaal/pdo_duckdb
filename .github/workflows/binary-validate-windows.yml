@@ -16,12 +16,13 @@ env:
 
 jobs:
   validate-windows:
-    name: windows php ${{ matrix.php }}
+    name: windows php ${{ matrix.php }} ${{ matrix.ts }}
     runs-on: windows-2022
     strategy:
       fail-fast: false
       matrix:
         php: ['8.4', '8.5']
+        ts: ['nts', 'ts']
     steps:
       - uses: actions/checkout@v6
 
@@ -38,7 +39,7 @@ jobs:
         with:
           php-version: ${{ matrix.php }}
           arch: x64
-          ts: nts
+          ts: ${{ matrix.ts }}
           args: --with-pdo-duckdb=${{ github.workspace }}\duckdb-deps
           run-tests: false
 
@@ -51,6 +52,8 @@ jobs:
         with:
           php-version: ${{ matrix.php }}
           coverage: none
+        env:
+          phpts: ${{ matrix.ts }}
 
       - name: Bundle duckdb.dll beside php.exe and run a query
         shell: pwsh
