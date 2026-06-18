@@ -54,13 +54,17 @@ jobs:
       - name: Verify self-contained (no libduckdb dependency)
         shell: bash
         run: |
+          # Match libduckdb specifically — the module's own path contains
+          # "pdo_duckdb", so a bare "duckdb" grep false-matches on macOS otool -L.
           if [ "$RUNNER_OS" = "macOS" ]; then
             otool -L modules/pdo_duckdb.so || true
-            otool -L modules/pdo_duckdb.so | grep -i duckdb && { echo "ERROR: links libduckdb"; exit 1; } || echo "ok: no libduckdb dependency"
+            dep=$(otool -L modules/pdo_duckdb.so | tail -n +2 | grep -i libduckdb || true)
           else
             ldd modules/pdo_duckdb.so || true
-            ldd modules/pdo_duckdb.so | grep -i duckdb && { echo "ERROR: links libduckdb"; exit 1; } || echo "ok: no libduckdb dependency"
+            dep=$(ldd modules/pdo_duckdb.so | grep -i libduckdb || true)
           fi
+          if [ -n "$dep" ]; then echo "ERROR: links libduckdb: $dep"; exit 1; fi
+          echo "ok: no libduckdb dependency"
 
       - name: Load + query (no libduckdb on path)
         shell: bash

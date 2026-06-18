@@ -46,10 +46,11 @@ if test "$PHP_PDO_DUCKDB_STATIC" != "no"; then
   DUCKDB_STATIC_ARCHIVES=`echo $DUCKDB_STATIC_DIR/*.a | tr ' ' ','`
   case `uname -s 2>/dev/null` in
     Darwin)
-      dnl macOS: ld64 is multi-pass (no --start-group) and libc++ is a system
-      dnl library linked dynamically by clang++ (via PHP_REQUIRE_CXX); no static
-      dnl C++ runtime flags.
-      PDO_DUCKDB_SHARED_LIBADD="-Wl,$DUCKDB_STATIC_ARCHIVES"
+      dnl macOS: ld64 is multi-pass (no --start-group). libtool links the bundle
+      dnl with `cc -undefined suppress`, so the DuckDB C++ runtime symbols are
+      dnl NOT auto-resolved — link libc++ explicitly (a system dylib; dynamic is
+      dnl fine, no GLIBCXX-style portability concern on macOS).
+      PDO_DUCKDB_SHARED_LIBADD="-Wl,$DUCKDB_STATIC_ARCHIVES -lc++"
       ;;
     *)
       dnl GNU ld: --start-group resolves the circular references between the
