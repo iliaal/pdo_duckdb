@@ -101,7 +101,12 @@ $db->exec('INSTALL httpfs; LOAD httpfs;');  // downloadable extensions
   Because `:` is reserved for placeholders, inline `STRUCT`/`MAP` literals must
   keep a space after the colon (`{'k': 1}`, not `{'k':1}`) in prepared queries.
 - **Transactions.** `beginTransaction()` / `commit()` / `rollBack()` map to
-  DuckDB `BEGIN TRANSACTION` / `COMMIT` / `ROLLBACK`.
+  DuckDB `BEGIN TRANSACTION` / `COMMIT` / `ROLLBACK`. DuckDB is
+  autocommit-by-default with no session toggle, so `setAttribute(PDO::ATTR_AUTOCOMMIT,
+  false)` is rejected — use `beginTransaction()` for explicit transactions.
+- **`open_basedir`.** When `open_basedir` is set, DuckDB's SQL-level external
+  file access (`read_csv`, `COPY`, `ATTACH`, `httpfs`, …) is disabled so the
+  sandbox holds at the SQL layer, not just for the database file path.
 - **`lastInsertId()`** is not supported — DuckDB has no implicit rowid. Use a
   sequence and `currval()` if you need generated keys.
 - **Type mapping.** Integers up to 64-bit signed return as `int`, `FLOAT`/`DOUBLE`
