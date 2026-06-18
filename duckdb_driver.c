@@ -91,10 +91,16 @@ static void duckdb_handle_closer(pdo_dbh_t *dbh) /* {{{ */
 static bool duckdb_handle_preparer(pdo_dbh_t *dbh, zend_string *sql, pdo_stmt_t *stmt, zval *driver_options)
 {
 	pdo_duckdb_db_handle *H = (pdo_duckdb_db_handle *)dbh->driver_data;
-	pdo_duckdb_stmt *S = ecalloc(1, sizeof(pdo_duckdb_stmt));
+	pdo_duckdb_stmt *S;
 	zend_string *rewritten = NULL;
 	int parse_ret;
 
+	if (!pdo_duckdb_enforce_sandbox(H)) {
+		pdo_duckdb_error(dbh, "Unable to apply the open_basedir sandbox (enable_external_access) to DuckDB");
+		return false;
+	}
+
+	S = ecalloc(1, sizeof(pdo_duckdb_stmt));
 	S->H = H;
 	stmt->driver_data = S;
 	stmt->methods = &duckdb_stmt_methods;
@@ -138,6 +144,11 @@ static zend_long duckdb_handle_doer(pdo_dbh_t *dbh, const zend_string *sql)
 	pdo_duckdb_db_handle *H = (pdo_duckdb_db_handle *)dbh->driver_data;
 	duckdb_result result;
 	zend_long changed;
+
+	if (!pdo_duckdb_enforce_sandbox(H)) {
+		pdo_duckdb_error(dbh, "Unable to apply the open_basedir sandbox (enable_external_access) to DuckDB");
+		return -1;
+	}
 
 	if (duckdb_query(H->conn, ZSTR_VAL(sql), &result) != DuckDBSuccess) {
 		pdo_duckdb_error(dbh, duckdb_result_error(&result));
@@ -255,25 +266,27 @@ static bool pdo_duckdb_disable_external_access(pdo_duckdb_db_handle *H)
 	return true;
 }
 
-/* Persistent handles skip handle_factory on reuse, so a handle opened without
- * the open_basedir sandbox could otherwise be reused once open_basedir is
- * tightened, with external file access still enabled. PDO calls check_liveness
- * on every persistent reuse: if this request needs the sandbox but the cached
- * handle lacks it, escalate by disabling external access on the live connection.
- * (Escalating in place rather than returning FAILURE avoids forcing PDO to
- * discard and rebuild the handle — a path that leaks the discarded persistent
- * dbh in PDO core.) We never re-enable: a handle that ever served a sandboxed
- * request stays sandboxed for its lifetime, the safe direction. */
+/* If the open_basedir sandbox is required for this request but this handle was
+ * opened without it (open_basedir unset at open time, then tightened — whether
+ * across a persistent reuse or mid-request on a normal handle), disable external
+ * access on the live connection before any SQL runs. One-way in DuckDB, so once
+ * applied it stays; the flag short-circuits subsequent calls (one SET per
+ * handle, lifetime). */
+bool pdo_duckdb_enforce_sandbox(pdo_duckdb_db_handle *H)
+{
+	if ((PG(open_basedir) && *PG(open_basedir)) && !H->external_access_disabled) {
+		return pdo_duckdb_disable_external_access(H);
+	}
+	return true;
+}
+
+/* Persistent handles skip handle_factory on reuse, so PDO calls check_liveness
+ * on every reuse — escalate the sandbox there (rather than returning FAILURE,
+ * which forces a rebuild whose discarded persistent dbh leaks in PDO core). */
 static zend_result pdo_duckdb_check_liveness(pdo_dbh_t *dbh)
 {
-	pdo_duckdb_db_handle *H = (pdo_duckdb_db_handle *)dbh->driver_data;
-
-	if ((PG(open_basedir) && *PG(open_basedir)) && !H->external_access_disabled) {
-		if (!pdo_duckdb_disable_external_access(H)) {
-			return FAILURE;
-		}
-	}
-	return SUCCESS;
+	return pdo_duckdb_enforce_sandbox((pdo_duckdb_db_handle *)dbh->driver_data)
+		? SUCCESS : FAILURE;
 }
 
 static int pdo_duckdb_get_attribute(pdo_dbh_t *dbh, zend_long attr, zval *return_value)
