@@ -147,6 +147,7 @@ ZEND_METHOD(Pdo_Duckdb_Appender, appendRow)
 {
 	zval *args = NULL;
 	uint32_t argc = 0, i;
+	idx_t ncols;
 	pdo_duckdb_appender *a;
 
 	ZEND_PARSE_PARAMETERS_START(0, -1)
@@ -157,6 +158,8 @@ ZEND_METHOD(Pdo_Duckdb_Appender, appendRow)
 	if (!a) {
 		RETURN_THROWS();
 	}
+
+	ncols = duckdb_appender_column_count(a->appender);
 
 	for (i = 0; i < argc; i++) {
 		zval *v = &args[i];
@@ -177,9 +180,21 @@ ZEND_METHOD(Pdo_Duckdb_Appender, appendRow)
 			case IS_DOUBLE:
 				st = duckdb_append_double(a->appender, Z_DVAL_P(v));
 				break;
-			case IS_STRING:
-				st = duckdb_append_varchar_length(a->appender, Z_STRVAL_P(v), (idx_t)Z_STRLEN_P(v));
+			case IS_STRING: {
+				/* A PHP string maps to varchar by default, but DuckDB rejects
+				 * non-UTF-8 there. If the target column is BLOB, append raw
+				 * bytes so binary data round-trips. */
+				bool is_blob = false;
+				if (i < ncols) {
+					duckdb_logical_type ct = duckdb_appender_column_type(a->appender, i);
+					is_blob = duckdb_get_type_id(ct) == DUCKDB_TYPE_BLOB;
+					duckdb_destroy_logical_type(&ct);
+				}
+				st = is_blob
+					? duckdb_append_blob(a->appender, Z_STRVAL_P(v), (idx_t)Z_STRLEN_P(v))
+					: duckdb_append_varchar_length(a->appender, Z_STRVAL_P(v), (idx_t)Z_STRLEN_P(v));
 				break;
+			}
 			default:
 				zend_type_error("Pdo\\Duckdb\\Appender::appendRow(): argument #%u is of unsupported type %s",
 					i + 1, zend_zval_value_name(v));
