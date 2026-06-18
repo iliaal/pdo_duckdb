@@ -239,6 +239,43 @@ static bool pdo_duckdb_set_attr(pdo_dbh_t *dbh, zend_long attr, zval *val)
 	}
 }
 
+/* Disable DuckDB external access (read_csv/COPY/ATTACH/httpfs) on the live
+ * connection. This is one-way in DuckDB — it cannot be re-enabled while the
+ * database is running — which is exactly the fail-safe direction we want. */
+static bool pdo_duckdb_disable_external_access(pdo_duckdb_db_handle *H)
+{
+	duckdb_result res;
+
+	if (duckdb_query(H->conn, "SET enable_external_access=false", &res) != DuckDBSuccess) {
+		duckdb_destroy_result(&res);
+		return false;
+	}
+	duckdb_destroy_result(&res);
+	H->external_access_disabled = true;
+	return true;
+}
+
+/* Persistent handles skip handle_factory on reuse, so a handle opened without
+ * the open_basedir sandbox could otherwise be reused once open_basedir is
+ * tightened, with external file access still enabled. PDO calls check_liveness
+ * on every persistent reuse: if this request needs the sandbox but the cached
+ * handle lacks it, escalate by disabling external access on the live connection.
+ * (Escalating in place rather than returning FAILURE avoids forcing PDO to
+ * discard and rebuild the handle — a path that leaks the discarded persistent
+ * dbh in PDO core.) We never re-enable: a handle that ever served a sandboxed
+ * request stays sandboxed for its lifetime, the safe direction. */
+static zend_result pdo_duckdb_check_liveness(pdo_dbh_t *dbh)
+{
+	pdo_duckdb_db_handle *H = (pdo_duckdb_db_handle *)dbh->driver_data;
+
+	if ((PG(open_basedir) && *PG(open_basedir)) && !H->external_access_disabled) {
+		if (!pdo_duckdb_disable_external_access(H)) {
+			return FAILURE;
+		}
+	}
+	return SUCCESS;
+}
+
 static int pdo_duckdb_get_attribute(pdo_dbh_t *dbh, zend_long attr, zval *return_value)
 {
 	switch (attr) {
@@ -272,6 +309,7 @@ static const struct pdo_dbh_methods duckdb_methods = {
 	.set_attribute = pdo_duckdb_set_attr,
 	.fetch_err = pdo_duckdb_fetch_error_func,
 	.get_attribute = pdo_duckdb_get_attribute,
+	.check_liveness = pdo_duckdb_check_liveness,
 	.get_driver_methods = pdo_duckdb_get_driver_methods,
 	/* last_id: DuckDB has no implicit rowid; use sequences + currval(). */
 	/* in_transaction: NULL -> PDO uses its internal transaction tracking. */
@@ -345,6 +383,7 @@ static int pdo_duckdb_handle_factory(pdo_dbh_t *dbh, zval *driver_options) /* {{
 				"Unable to apply the open_basedir sandbox (enable_external_access) to DuckDB");
 			goto cleanup;
 		}
+		H->external_access_disabled = true;
 	}
 
 	open_state = duckdb_open_ext(path, &H->db, config, &open_error);

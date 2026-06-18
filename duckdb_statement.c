@@ -57,6 +57,12 @@ static int pdo_duckdb_stmt_execute(pdo_stmt_t *stmt)
 
 	pdo_duckdb_stmt_reset_result(S);
 
+	/* duckdb_execute_prepared returns a *materialized* result: DuckDB buffers
+	 * the whole result set here, and duckdb_fetch_chunk() below streams chunks
+	 * out of that buffer. So fetching is chunked but memory is bounded by the
+	 * full result, not row-streamed. The only streaming execute variant
+	 * (duckdb_execute_prepared_streaming) is deprecated upstream; true streaming
+	 * would mean migrating to the pending-result API. */
 	if (duckdb_execute_prepared(S->prepared, &S->result) != DuckDBSuccess) {
 		pdo_duckdb_error_stmt(stmt, duckdb_result_error(&S->result));
 		duckdb_destroy_result(&S->result);
