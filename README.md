@@ -5,6 +5,8 @@
 [![License: BSD-3-Clause](https://img.shields.io/badge/License-BSD--3--Clause-green.svg)](LICENSE)
 [![Follow @iliaa](https://img.shields.io/badge/Follow-@iliaa-000000?style=flat&logo=x&logoColor=white)](https://x.com/intent/follow?screen_name=iliaa)
 
+![pdo_duckdb: a PDO driver for DuckDB](images/pdo_duckdb-hero.jpg)
+
 A [PDO](https://www.php.net/pdo) driver for [DuckDB](https://duckdb.org/), the
 in-process analytical (OLAP) database. Connect to DuckDB through the standard
 PDO API you already use for SQLite, MySQL, and PostgreSQL.
