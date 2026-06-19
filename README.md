@@ -1,8 +1,13 @@
 # pdo_duckdb
 
+[![Tests](https://github.com/iliaal/pdo_duckdb/actions/workflows/tests.yml/badge.svg)](https://github.com/iliaal/pdo_duckdb/actions/workflows/tests.yml)
+[![Version](https://img.shields.io/github/v/release/iliaal/pdo_duckdb)](https://github.com/iliaal/pdo_duckdb/releases)
+[![License: BSD-3-Clause](https://img.shields.io/badge/License-BSD--3--Clause-green.svg)](LICENSE)
+[![Follow @iliaa](https://img.shields.io/badge/Follow-@iliaa-000000?style=flat&logo=x&logoColor=white)](https://x.com/intent/follow?screen_name=iliaa)
+
 A [PDO](https://www.php.net/pdo) driver for [DuckDB](https://duckdb.org/), the
 in-process analytical (OLAP) database. Connect to DuckDB through the standard
-PDO API you already use for SQLite, MySQL and PostgreSQL.
+PDO API you already use for SQLite, MySQL, and PostgreSQL.
 
 ```php
 $db = new PDO('duckdb:/path/to/analytics.duckdb');
@@ -18,11 +23,11 @@ foreach ($stmt as $row) {
 ## Requirements
 
 - PHP 8.1 or newer with the `pdo` extension
-- For a source build only: the DuckDB C library (`libduckdb` + `duckdb.h`) —
-  download a prebuilt `libduckdb` bundle from the [DuckDB installation page](https://duckdb.org/docs/installation/)
-  or install it via your package manager. Prebuilt installs (below) need nothing else.
+- For a source build only: the DuckDB C library (`libduckdb` + `duckdb.h`),
+  available as a prebuilt bundle from the [DuckDB installation page](https://duckdb.org/docs/installation/)
+  or via your package manager. Prebuilt installs (below) need nothing else.
 
-## Installation
+## 🚀 Installation
 
 ### PIE
 
@@ -31,7 +36,7 @@ pie install iliaal/pdo_duckdb
 ```
 
 On Linux (x86_64/arm64), macOS (Apple Silicon), and Windows x64, PIE downloads a
-self-contained prebuilt binary — no DuckDB install or build toolchain needed. On
+self-contained prebuilt binary. No DuckDB install or build toolchain needed. On
 other platforms or older PHP it falls back to a source build, which needs
 `libduckdb` + `duckdb.h`; point it at the prefix if they aren't in a standard
 location:
@@ -63,10 +68,10 @@ duckdb::memory:                   # in-memory database
 duckdb:                           # in-memory database (empty path)
 ```
 
-## Bulk insert (Appender)
+## 🛠️ Bulk insert (Appender)
 
 For fast bulk loads, `PDO::duckdbAppender()` returns a `Pdo\Duckdb\Appender`
-wrapping DuckDB's native appender — far faster than row-by-row `INSERT`:
+wrapping DuckDB's native appender, far faster than row-by-row `INSERT`:
 
 ```php
 $db->exec('CREATE TABLE events (id INTEGER, name VARCHAR, ts TIMESTAMP)');
@@ -84,13 +89,13 @@ to DuckDB values; DuckDB casts them to the target column types.
 
 On PHP 8.4+, `PDO::connect('duckdb:…')` returns a `Pdo\Duckdb` instance and
 `duckdbAppender()` lives on that subclass. On `new PDO('duckdb:…')` (and on PHP
-8.1–8.3) the method is available on the PDO object directly; note PHP 8.5 emits a
+8.1-8.3) the method is available on the PDO object directly; note PHP 8.5 emits a
 deprecation for driver methods called on the base `PDO` class, so prefer
 `PDO::connect()` on 8.4+.
 
-## DuckDB extensions
+## 🧩 DuckDB extensions
 
-DuckDB extensions load through ordinary SQL — no special API:
+DuckDB extensions load through ordinary SQL, no special API:
 
 ```php
 $db->exec('LOAD json');                     // bundled extensions load offline
@@ -106,11 +111,11 @@ $db->exec('INSTALL httpfs; LOAD httpfs;');  // downloadable extensions
 - **Transactions.** `beginTransaction()` / `commit()` / `rollBack()` map to
   DuckDB `BEGIN TRANSACTION` / `COMMIT` / `ROLLBACK`. DuckDB is
   autocommit-by-default with no session toggle, so `setAttribute(PDO::ATTR_AUTOCOMMIT,
-  false)` is rejected — use `beginTransaction()` for explicit transactions.
+  false)` is rejected; use `beginTransaction()` for explicit transactions.
 - **`open_basedir`.** When `open_basedir` is set, DuckDB's SQL-level external
   file access (`read_csv`, `COPY`, `ATTACH`, `httpfs`, …) is disabled so the
   sandbox holds at the SQL layer, not just for the database file path.
-- **`lastInsertId()`** is not supported — DuckDB has no implicit rowid. Use a
+- **`lastInsertId()`** is not supported; DuckDB has no implicit rowid. Use a
   sequence and `currval()` if you need generated keys.
 - **Type mapping.** Integers up to 64-bit signed return as `int`, `FLOAT`/`DOUBLE`
   as `float`, `BLOB` as a binary string, and everything else (`VARCHAR`,
@@ -126,6 +131,18 @@ DuckDB buffers the full result set in memory before PDO begins fetching, so a
 large `SELECT` is bounded by available memory rather than streamed row-by-row.
 True streaming (the pending-result API) is a planned follow-up.
 
+## 🔗 PHP Performance Toolkit
+
+Companion native PHP extensions for high-throughput PHP workloads:
+
+- **[php_clickhouse](https://github.com/iliaal/php_clickhouse)**: native ClickHouse client speaking the wire protocol directly. Picks up where SeasClick left off.
+- **[fastchart](https://github.com/iliaal/fastchart)**: native chart-rendering extension. 26 chart types behind one fluent OO API, SVG-canonical with PNG/JPG/WebP output (no libgd dependency).
+- **[php_excel](https://github.com/iliaal/php_excel)**: native Excel I/O. 7-10× faster than PhpSpreadsheet, full XLS/XLSX with formulas, conditional formatting, and rich text. Powered by LibXL.
+
 ## License
 
 BSD 3-Clause. See [LICENSE](LICENSE).
+
+---
+
+[Follow @iliaa on X](https://x.com/iliaa) • [Blog](https://ilia.ws) • If this got DuckDB into your PHP stack, ⭐ star it!
