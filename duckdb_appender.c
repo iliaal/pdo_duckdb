@@ -148,15 +148,17 @@ static void pdo_duckdb_appender_create_impl(INTERNAL_FUNCTION_PARAMETERS)
 {
 	zend_string *table;
 	zend_string *schema = NULL;
+	HashTable *columns = NULL;
 	pdo_dbh_t *dbh;
 	pdo_duckdb_db_handle *H;
 	duckdb_appender ap = NULL;
 	pdo_duckdb_appender *a;
 
-	ZEND_PARSE_PARAMETERS_START(1, 2)
+	ZEND_PARSE_PARAMETERS_START(1, 3)
 		Z_PARAM_STR(table)
 		Z_PARAM_OPTIONAL
 		Z_PARAM_STR_OR_NULL(schema)
+		Z_PARAM_ARRAY_HT_OR_NULL(columns)
 	ZEND_PARSE_PARAMETERS_END();
 
 	dbh = Z_PDO_DBH_P(ZEND_THIS);
@@ -171,12 +173,51 @@ static void pdo_duckdb_appender_create_impl(INTERNAL_FUNCTION_PARAMETERS)
 		RETURN_THROWS();
 	}
 
+	/* Validate the optional column subset up front (before creating the appender):
+	 * a non-empty list of NUL-free strings. Each name is added to the appender's
+	 * active column list below; omitted columns then take their DEFAULT/NULL. */
+	if (columns) {
+		zval *col;
+
+		if (zend_hash_num_elements(columns) == 0) {
+			zend_value_error("Pdo\\Duckdb\\Appender column list must not be empty");
+			RETURN_THROWS();
+		}
+		ZEND_HASH_FOREACH_VAL(columns, col) {
+			ZVAL_DEREF(col);
+			if (Z_TYPE_P(col) != IS_STRING) {
+				zend_type_error("Pdo\\Duckdb\\Appender column names must be strings");
+				RETURN_THROWS();
+			}
+			if (zend_str_has_nul_byte(Z_STR_P(col))) {
+				zend_value_error("Pdo\\Duckdb\\Appender column names must not contain a NUL byte");
+				RETURN_THROWS();
+			}
+		} ZEND_HASH_FOREACH_END();
+	}
+
 	if (duckdb_appender_create(H->conn, schema ? ZSTR_VAL(schema) : NULL, ZSTR_VAL(table), &ap) != DuckDBSuccess) {
 		pdo_duckdb_appender_throw(ap, "Unable to create DuckDB appender");
 		if (ap) {
 			duckdb_appender_destroy(&ap);
 		}
 		RETURN_THROWS();
+	}
+
+	/* Restrict the appender to the requested columns, in order. add_column
+	 * switches the appender from all-columns to the named active set; a bad
+	 * column name fails here (DuckDB reports it). */
+	if (columns) {
+		zval *col;
+
+		ZEND_HASH_FOREACH_VAL(columns, col) {
+			ZVAL_DEREF(col);
+			if (duckdb_appender_add_column(ap, Z_STRVAL_P(col)) != DuckDBSuccess) {
+				pdo_duckdb_appender_throw(ap, "Unable to add appender column");
+				duckdb_appender_destroy(&ap);
+				RETURN_THROWS();
+			}
+		} ZEND_HASH_FOREACH_END();
 	}
 
 	object_init_ex(return_value, pdo_duckdb_appender_ce);
@@ -508,7 +549,7 @@ ZEND_METHOD(Pdo_Duckdb_Appender, appendRow)
 	 * count, and construct every nested value (PHP array → LIST/STRUCT/MAP/ARRAY),
 	 * up front; only once the whole row is known-good do we append. */
 	if (argc != a->ncols) {
-		zend_value_error("Pdo\\Duckdb\\Appender::appendRow(): table has %u column(s), but %u value(s) were given",
+		zend_value_error("Pdo\\Duckdb\\Appender::appendRow(): appender expects %u column(s), but %u value(s) were given",
 			(uint32_t)a->ncols, argc);
 		RETURN_THROWS();
 	}

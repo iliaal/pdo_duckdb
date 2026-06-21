@@ -117,6 +117,17 @@ $app->appendRow(['php', 'duckdb'], ['x' => 1, 'y' => 'hi']);
 $app->flush();
 ```
 
+Pass a column list as the third argument to append only some columns; the rest
+take their `DEFAULT` (or `NULL`). Handy for tables with generated keys or
+timestamps:
+
+```php
+$db->exec("CREATE TABLE events (id BIGINT DEFAULT nextval('seq'), ts TIMESTAMP DEFAULT now(), payload VARCHAR)");
+$app = $db->duckdbAppender('events', null, ['payload']);
+$app->appendRow('hello')->appendRow('world');   // id and ts fill themselves
+$app->flush();
+```
+
 On PHP 8.4+, `PDO::connect('duckdb:…')` returns a `Pdo\Duckdb` instance and
 `duckdbAppender()` lives on that subclass. On `new PDO('duckdb:…')` (and on PHP
 8.1-8.3) the method is available on the PDO object directly; note PHP 8.5 emits a

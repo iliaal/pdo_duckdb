@@ -36,7 +36,11 @@ namespace Pdo {
      */
     class Duckdb extends \PDO
     {
-        /** Create a bulk-insert appender for the given table. */
-        public function duckdbAppender(string $table, ?string $schema = null): \Pdo\Duckdb\Appender {}
+        /**
+         * Create a bulk-insert appender for the given table. When $columns is
+         * given, the appender targets only those columns (in that order) and any
+         * omitted column is filled with its DEFAULT, or NULL.
+         */
+        public function duckdbAppender(string $table, ?string $schema = null, ?array $columns = null): \Pdo\Duckdb\Appender {}
     }
 }

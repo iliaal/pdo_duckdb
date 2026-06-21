@@ -14,6 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `getColumnMeta()` returns the real DuckDB type per column, with `precision` and
   `scale` for `DECIMAL`.
 - The appender accepts PHP arrays for `LIST`, `ARRAY`, `STRUCT`, and `MAP` columns.
+- `duckdbAppender()` takes an optional column list (`duckdbAppender($table, $schema, $columns)`);
+  omitted columns fall back to their `DEFAULT`.
 - Stream large queries instead of buffering them in memory with `PDO::DUCKDB_ATTR_UNBUFFERED`.
 
 ### Fixed
