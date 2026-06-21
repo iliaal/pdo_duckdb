@@ -110,6 +110,21 @@ jobs:
           # would abort at the assignment and hide the diff).
           php run-tests.php --show-diff -g FAIL,BORK,LEAK,XLEAK tests/
 
+      - name: PDO common tests
+        run: |
+          # Run PHP's shared ext/pdo/tests against the driver (generic PDO
+          # contract: fetch modes, bound params, transactions, error modes).
+          # The suite isn't bundled; sparse-checkout it for this PHP version.
+          git clone --depth=1 --branch="PHP-${{ matrix.php }}" --filter=blob:none --sparse \
+            https://github.com/php/php-src.git /tmp/php-src-common
+          git -C /tmp/php-src-common sparse-checkout set ext/pdo/tests
+          PHP="$(which php)" \
+          RUN_TESTS="$PWD/run-tests.php" \
+          COMMON_DIR=/tmp/php-src-common/ext/pdo/tests \
+          DUCKDB_PREFIX="$PWD/duckdb" \
+          EXT="$PWD/modules/pdo_duckdb.so" \
+          bash scripts/pdo-common-tests.sh
+
   asan:
     name: PHP ${{ matrix.php }} - ASAN
     runs-on: ubuntu-latest
