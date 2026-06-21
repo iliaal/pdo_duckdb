@@ -151,9 +151,13 @@ static duckdb_value pdo_duckdb_decimal_value(duckdb_logical_type lt, void *data,
 			break;
 		}
 		case DUCKDB_TYPE_HUGEINT:
-		default:
 			d.value = ((duckdb_hugeint *)data)[row];
 			break;
+		default:
+			/* Unknown internal width — only reachable from a corrupt storage file.
+			 * Don't fall through to a 16-byte HUGEINT read against a possibly
+			 * narrower vector; surface NULL instead. */
+			return duckdb_create_null_value();
 	}
 	return duckdb_create_decimal(d);
 }
@@ -250,6 +254,13 @@ static duckdb_value pdo_duckdb_cell_to_value(duckdb_vector vec, idx_t row)
 			duckdb_bit b;
 			b.data = (uint8_t *)duckdb_string_t_data(&s);
 			b.size = duckdb_string_t_length(s);
+			/* The first byte is a pad-bit-count header; a zero-length BIT (only
+			 * from a corrupt file) would make create_bit read data[0] out of
+			 * bounds. Guard, like the VARINT len < 3 check. */
+			if (b.size == 0) {
+				ret = duckdb_create_null_value();
+				break;
+			}
 			ret = duckdb_create_bit(b);
 			break;
 		}
@@ -292,11 +303,21 @@ static duckdb_value pdo_duckdb_cell_to_value(duckdb_vector vec, idx_t row)
 		case DUCKDB_TYPE_LIST: {
 			duckdb_list_entry e = ((duckdb_list_entry *)data)[row];
 			duckdb_vector child = duckdb_list_vector_get_child(vec);
+			idx_t child_size = duckdb_list_vector_get_size(vec);
 			duckdb_logical_type ct = duckdb_list_type_child_type(lt);
+			duckdb_value *vals;
+			idx_t i;
+			/* {offset,length} is an engine invariant for any chunk DuckDB
+			 * produces; a corrupt storage file could violate it. Clamp before
+			 * indexing the child vector (overflow-safe form). */
+			if (e.offset > child_size || e.length > child_size - e.offset) {
+				duckdb_destroy_logical_type(&ct);
+				ret = duckdb_create_null_value();
+				break;
+			}
 			/* always non-NULL: create_list_value() segfaults on a NULL values
 			 * pointer, so an empty list must still pass a valid buffer. */
-			duckdb_value *vals = emalloc(sizeof(duckdb_value) * (e.length ? e.length : 1));
-			idx_t i;
+			vals = emalloc(sizeof(duckdb_value) * (e.length ? e.length : 1));
 			for (i = 0; i < e.length; i++) {
 				vals[i] = pdo_duckdb_cell_to_value(child, e.offset + i);
 			}
@@ -345,12 +366,20 @@ static duckdb_value pdo_duckdb_cell_to_value(duckdb_vector vec, idx_t row)
 		case DUCKDB_TYPE_MAP: {
 			/* MAP is physically LIST<STRUCT<key, value>>. */
 			duckdb_list_entry e = ((duckdb_list_entry *)data)[row];
-			duckdb_vector entries = duckdb_list_vector_get_child(vec);
-			duckdb_vector kvec = duckdb_struct_vector_get_child(entries, 0);
-			duckdb_vector vvec = duckdb_struct_vector_get_child(entries, 1);
-			duckdb_value *keys = emalloc(sizeof(duckdb_value) * (e.length ? e.length : 1));
-			duckdb_value *vals = emalloc(sizeof(duckdb_value) * (e.length ? e.length : 1));
+			idx_t entries_size = duckdb_list_vector_get_size(vec);
+			duckdb_vector entries, kvec, vvec;
+			duckdb_value *keys, *vals;
 			idx_t i;
+			/* clamp a corrupt {offset,length} against the entries vector. */
+			if (e.offset > entries_size || e.length > entries_size - e.offset) {
+				ret = duckdb_create_null_value();
+				break;
+			}
+			entries = duckdb_list_vector_get_child(vec);
+			kvec = duckdb_struct_vector_get_child(entries, 0);
+			vvec = duckdb_struct_vector_get_child(entries, 1);
+			keys = emalloc(sizeof(duckdb_value) * (e.length ? e.length : 1));
+			vals = emalloc(sizeof(duckdb_value) * (e.length ? e.length : 1));
 			for (i = 0; i < e.length; i++) {
 				keys[i] = pdo_duckdb_cell_to_value(kvec, e.offset + i);
 				vals[i] = pdo_duckdb_cell_to_value(vvec, e.offset + i);
@@ -372,7 +401,16 @@ static duckdb_value pdo_duckdb_cell_to_value(duckdb_vector vec, idx_t row)
 			duckdb_vector tag_vec = duckdb_struct_vector_get_child(vec, 0);
 			void *tag_data = duckdb_vector_get_data(tag_vec);
 			idx_t tag = (idx_t)((uint8_t *)tag_data)[row];
-			duckdb_vector member_vec = duckdb_struct_vector_get_child(vec, tag + 1);
+			duckdb_vector member_vec;
+			/* The tag byte is the one place a raw data byte becomes a structural
+			 * index. duckdb_struct_vector_get_child does no bounds check, so a
+			 * corrupt-file tag past the member count would index out of bounds.
+			 * Validate before indexing (members are children 1..n). */
+			if (tag >= duckdb_union_type_member_count(lt)) {
+				ret = duckdb_create_null_value();
+				break;
+			}
+			member_vec = duckdb_struct_vector_get_child(vec, tag + 1);
 			duckdb_value member = pdo_duckdb_cell_to_value(member_vec, row);
 			ret = duckdb_create_union_value(lt, tag, member);
 			duckdb_destroy_value(&member);
