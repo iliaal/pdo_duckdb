@@ -43,6 +43,12 @@ static zend_always_inline zend_class_entry *zend_register_internal_class_with_fl
 }
 #endif
 
+/* Driver-specific PDO attributes (values must be >= PDO_ATTR_DRIVER_SPECIFIC so
+ * PDO core routes them to the driver and surfaces them in driver_options).
+ * Registered as PDO::DUCKDB_* class constants in MINIT. */
+#define PDO_DUCKDB_ATTR_CONFIG     (PDO_ATTR_DRIVER_SPECIFIC)      /* array, connect-time */
+#define PDO_DUCKDB_ATTR_UNBUFFERED (PDO_ATTR_DRIVER_SPECIFIC + 1)  /* bool, default false */
+
 typedef struct {
 	const char *file;
 	int line;
@@ -58,6 +64,9 @@ typedef struct {
 	 * (the open_basedir SQL sandbox). Recorded so a persistent handle isn't
 	 * reused across a change in open_basedir policy — see check_liveness. */
 	bool external_access_disabled;
+	/* Opt-in unbuffered (streaming) result mode for statements on this handle
+	 * (PDO::DUCKDB_ATTR_UNBUFFERED). Default false = the materialized path. */
+	bool unbuffered;
 } pdo_duckdb_db_handle;
 
 typedef struct {
@@ -82,8 +91,11 @@ extern const struct pdo_stmt_methods duckdb_stmt_methods;
 typedef struct {
 	duckdb_appender appender;
 	bool closed;
-	idx_t ncols;		/* appender target column count */
-	bool *blob_cols;	/* per-column: is the target column BLOB? (NULL if ncols == 0) */
+	idx_t ncols;					/* appender target column count */
+	duckdb_logical_type *col_types;	/* per-column target logical type, owned
+									 * (NULL if ncols == 0). Used to route BLOB
+									 * strings and to build nested values from
+									 * PHP arrays. */
 	zend_object *pdo;	/* PDO object kept alive; it owns the connection */
 	zend_object std;
 } pdo_duckdb_appender;

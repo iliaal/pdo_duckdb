@@ -64,12 +64,38 @@ static int pdo_duckdb_stmt_execute(pdo_stmt_t *stmt)
 		return 0;
 	}
 
+	if (S->H->unbuffered) {
+		/* Opt-in streaming (PDO::DUCKDB_ATTR_UNBUFFERED): the pending-result API
+		 * yields a streaming result that produces chunks lazily as fetch_chunk()
+		 * pulls them, so a huge SELECT isn't buffered whole. DuckDB allows only one
+		 * active streaming result per connection and it can't be mixed with other
+		 * result calls — running a second unbuffered statement before this one is
+		 * consumed surfaces DuckDB's own error. rows_changed is materialized-only,
+		 * so row_count is left unknown here. */
+		duckdb_pending_result pending = NULL;
+
+		if (duckdb_pending_prepared_streaming(S->prepared, &pending) != DuckDBSuccess) {
+			pdo_duckdb_error_stmt(stmt, pending ? duckdb_pending_error(pending) : "Unable to create streaming result");
+			duckdb_destroy_pending(&pending);
+			return 0;
+		}
+		if (duckdb_execute_pending(pending, &S->result) != DuckDBSuccess) {
+			pdo_duckdb_error_stmt(stmt, duckdb_result_error(&S->result));
+			duckdb_destroy_result(&S->result);
+			duckdb_destroy_pending(&pending);
+			return 0;
+		}
+		duckdb_destroy_pending(&pending);
+
+		S->has_result = true;
+		php_pdo_stmt_set_column_count(stmt, (int)duckdb_column_count(&S->result));
+		return 1;
+	}
+
 	/* duckdb_execute_prepared returns a *materialized* result: DuckDB buffers
 	 * the whole result set here, and duckdb_fetch_chunk() below streams chunks
 	 * out of that buffer. So fetching is chunked but memory is bounded by the
-	 * full result, not row-streamed. The only streaming execute variant
-	 * (duckdb_execute_prepared_streaming) is deprecated upstream; true streaming
-	 * would mean migrating to the pending-result API. */
+	 * full result, not row-streamed. */
 	if (duckdb_execute_prepared(S->prepared, &S->result) != DuckDBSuccess) {
 		pdo_duckdb_error_stmt(stmt, duckdb_result_error(&S->result));
 		duckdb_destroy_result(&S->result);
@@ -210,7 +236,9 @@ static duckdb_value pdo_duckdb_cell_to_value(duckdb_vector vec, idx_t row)
 			duckdb_list_entry e = ((duckdb_list_entry *)data)[row];
 			duckdb_vector child = duckdb_list_vector_get_child(vec);
 			duckdb_logical_type ct = duckdb_list_type_child_type(lt);
-			duckdb_value *vals = e.length ? emalloc(sizeof(duckdb_value) * e.length) : NULL;
+			/* always non-NULL: create_list_value() segfaults on a NULL values
+			 * pointer, so an empty list must still pass a valid buffer. */
+			duckdb_value *vals = emalloc(sizeof(duckdb_value) * (e.length ? e.length : 1));
 			idx_t i;
 			for (i = 0; i < e.length; i++) {
 				vals[i] = pdo_duckdb_cell_to_value(child, e.offset + i);
@@ -219,9 +247,7 @@ static duckdb_value pdo_duckdb_cell_to_value(duckdb_vector vec, idx_t row)
 			for (i = 0; i < e.length; i++) {
 				duckdb_destroy_value(&vals[i]);
 			}
-			if (vals) {
-				efree(vals);
-			}
+			efree(vals);
 			duckdb_destroy_logical_type(&ct);
 			break;
 		}
@@ -229,7 +255,7 @@ static duckdb_value pdo_duckdb_cell_to_value(duckdb_vector vec, idx_t row)
 			idx_t n = duckdb_array_type_array_size(lt);
 			duckdb_vector child = duckdb_array_vector_get_child(vec);
 			duckdb_logical_type ct = duckdb_array_type_child_type(lt);
-			duckdb_value *vals = n ? emalloc(sizeof(duckdb_value) * n) : NULL;
+			duckdb_value *vals = emalloc(sizeof(duckdb_value) * (n ? n : 1));
 			idx_t base = row * n, i;
 			for (i = 0; i < n; i++) {
 				vals[i] = pdo_duckdb_cell_to_value(child, base + i);
@@ -238,9 +264,7 @@ static duckdb_value pdo_duckdb_cell_to_value(duckdb_vector vec, idx_t row)
 			for (i = 0; i < n; i++) {
 				duckdb_destroy_value(&vals[i]);
 			}
-			if (vals) {
-				efree(vals);
-			}
+			efree(vals);
 			duckdb_destroy_logical_type(&ct);
 			break;
 		}
@@ -267,8 +291,8 @@ static duckdb_value pdo_duckdb_cell_to_value(duckdb_vector vec, idx_t row)
 			duckdb_vector entries = duckdb_list_vector_get_child(vec);
 			duckdb_vector kvec = duckdb_struct_vector_get_child(entries, 0);
 			duckdb_vector vvec = duckdb_struct_vector_get_child(entries, 1);
-			duckdb_value *keys = e.length ? emalloc(sizeof(duckdb_value) * e.length) : NULL;
-			duckdb_value *vals = e.length ? emalloc(sizeof(duckdb_value) * e.length) : NULL;
+			duckdb_value *keys = emalloc(sizeof(duckdb_value) * (e.length ? e.length : 1));
+			duckdb_value *vals = emalloc(sizeof(duckdb_value) * (e.length ? e.length : 1));
 			idx_t i;
 			for (i = 0; i < e.length; i++) {
 				keys[i] = pdo_duckdb_cell_to_value(kvec, e.offset + i);
@@ -279,12 +303,8 @@ static duckdb_value pdo_duckdb_cell_to_value(duckdb_vector vec, idx_t row)
 				duckdb_destroy_value(&keys[i]);
 				duckdb_destroy_value(&vals[i]);
 			}
-			if (keys) {
-				efree(keys);
-			}
-			if (vals) {
-				efree(vals);
-			}
+			efree(keys);
+			efree(vals);
 			break;
 		}
 
@@ -350,6 +370,15 @@ static int pdo_duckdb_stmt_describe(pdo_stmt_t *stmt, int colno)
 	stmt->columns[colno].name = zend_string_init(name ? name : "", name ? strlen(name) : 0, 0);
 	stmt->columns[colno].maxlen = SIZE_MAX;
 	stmt->columns[colno].precision = 0;
+
+	/* PDO core overwrites getColumnMeta()'s "precision" with col->precision, so a
+	 * DECIMAL's total-digit width has to be reported here (scale is added in
+	 * get_column_meta, where it survives). */
+	if (duckdb_column_type(&S->result, (idx_t)colno) == DUCKDB_TYPE_DECIMAL) {
+		duckdb_logical_type lt = duckdb_column_logical_type(&S->result, (idx_t)colno);
+		stmt->columns[colno].precision = duckdb_decimal_width(lt);
+		duckdb_destroy_logical_type(&lt);
+	}
 
 	return 1;
 }
@@ -457,22 +486,78 @@ static int pdo_duckdb_stmt_get_col(
 	}
 }
 
+/* Canonical DuckDB type name for getColumnMeta()'s native_type. Distinct from
+ * the coarse buckets get_col uses to pick a zval kind: here every type reports
+ * its real name (a DECIMAL is "DECIMAL", not "DOUBLE") so callers can tell, e.g.,
+ * a TIMESTAMP from a UUID. */
+static const char *pdo_duckdb_type_name(duckdb_type t)
+{
+	switch (t) {
+		case DUCKDB_TYPE_BOOLEAN:      return "BOOLEAN";
+		case DUCKDB_TYPE_TINYINT:      return "TINYINT";
+		case DUCKDB_TYPE_SMALLINT:     return "SMALLINT";
+		case DUCKDB_TYPE_INTEGER:      return "INTEGER";
+		case DUCKDB_TYPE_BIGINT:       return "BIGINT";
+		case DUCKDB_TYPE_UTINYINT:     return "UTINYINT";
+		case DUCKDB_TYPE_USMALLINT:    return "USMALLINT";
+		case DUCKDB_TYPE_UINTEGER:     return "UINTEGER";
+		case DUCKDB_TYPE_UBIGINT:      return "UBIGINT";
+		case DUCKDB_TYPE_HUGEINT:      return "HUGEINT";
+		case DUCKDB_TYPE_UHUGEINT:     return "UHUGEINT";
+		case DUCKDB_TYPE_FLOAT:        return "FLOAT";
+		case DUCKDB_TYPE_DOUBLE:       return "DOUBLE";
+		case DUCKDB_TYPE_DECIMAL:      return "DECIMAL";
+		case DUCKDB_TYPE_VARCHAR:      return "VARCHAR";
+		case DUCKDB_TYPE_BLOB:         return "BLOB";
+		case DUCKDB_TYPE_DATE:         return "DATE";
+		case DUCKDB_TYPE_TIME:         return "TIME";
+		case DUCKDB_TYPE_TIME_TZ:      return "TIME_TZ";
+		case DUCKDB_TYPE_TIME_NS:      return "TIME_NS";
+		case DUCKDB_TYPE_TIMESTAMP:    return "TIMESTAMP";
+		case DUCKDB_TYPE_TIMESTAMP_S:  return "TIMESTAMP_S";
+		case DUCKDB_TYPE_TIMESTAMP_MS: return "TIMESTAMP_MS";
+		case DUCKDB_TYPE_TIMESTAMP_NS: return "TIMESTAMP_NS";
+		case DUCKDB_TYPE_TIMESTAMP_TZ: return "TIMESTAMP_TZ";
+		case DUCKDB_TYPE_INTERVAL:     return "INTERVAL";
+		case DUCKDB_TYPE_UUID:         return "UUID";
+		case DUCKDB_TYPE_ENUM:         return "ENUM";
+		case DUCKDB_TYPE_LIST:         return "LIST";
+		case DUCKDB_TYPE_STRUCT:       return "STRUCT";
+		case DUCKDB_TYPE_MAP:          return "MAP";
+		case DUCKDB_TYPE_ARRAY:        return "ARRAY";
+		case DUCKDB_TYPE_UNION:        return "UNION";
+		case DUCKDB_TYPE_BIT:          return "BIT";
+		case DUCKDB_TYPE_BIGNUM:       return "VARINT";
+		case DUCKDB_TYPE_VARIANT:      return "VARIANT";
+		case DUCKDB_TYPE_GEOMETRY:     return "GEOMETRY";
+		case DUCKDB_TYPE_SQLNULL:      return "NULL";
+		default:                       return "VARCHAR";
+	}
+}
+
 static int pdo_duckdb_stmt_col_meta(pdo_stmt_t *stmt, zend_long colno, zval *return_value)
 {
 	pdo_duckdb_stmt *S = (pdo_duckdb_stmt *)stmt->driver_data;
+	duckdb_logical_type lt;
+	duckdb_type tid;
+	enum pdo_param_type pdo_type;
 
 	if (!S->has_result || (idx_t)colno >= duckdb_column_count(&S->result)) {
 		return FAILURE;
 	}
 
+	lt = duckdb_column_logical_type(&S->result, (idx_t)colno);
+	tid = duckdb_get_type_id(lt);
+
 	array_init(return_value);
+	add_assoc_string(return_value, "native_type", (char *)pdo_duckdb_type_name(tid));
 
-	switch (duckdb_column_type(&S->result, (idx_t)colno)) {
+	switch (tid) {
 		case DUCKDB_TYPE_BOOLEAN:
-			add_assoc_string(return_value, "native_type", "BOOLEAN");
-			add_assoc_long(return_value, "pdo_type", PDO_PARAM_BOOL);
+			pdo_type = PDO_PARAM_BOOL;
 			break;
-
+		/* Mirror get_col: the widths it returns as a PHP int. UBIGINT/HUGEINT and
+		 * wider come back as strings, so they stay PDO_PARAM_STR via the default. */
 		case DUCKDB_TYPE_TINYINT:
 		case DUCKDB_TYPE_SMALLINT:
 		case DUCKDB_TYPE_INTEGER:
@@ -480,27 +565,25 @@ static int pdo_duckdb_stmt_col_meta(pdo_stmt_t *stmt, zend_long colno, zval *ret
 		case DUCKDB_TYPE_UTINYINT:
 		case DUCKDB_TYPE_USMALLINT:
 		case DUCKDB_TYPE_UINTEGER:
-			add_assoc_string(return_value, "native_type", "INTEGER");
-			add_assoc_long(return_value, "pdo_type", PDO_PARAM_INT);
+			pdo_type = PDO_PARAM_INT;
 			break;
-
-		case DUCKDB_TYPE_FLOAT:
-		case DUCKDB_TYPE_DOUBLE:
-			add_assoc_string(return_value, "native_type", "DOUBLE");
-			add_assoc_long(return_value, "pdo_type", PDO_PARAM_STR);
-			break;
-
 		case DUCKDB_TYPE_BLOB:
-			add_assoc_string(return_value, "native_type", "BLOB");
-			add_assoc_long(return_value, "pdo_type", PDO_PARAM_LOB);
+			pdo_type = PDO_PARAM_LOB;
 			break;
-
 		default:
-			add_assoc_string(return_value, "native_type", "VARCHAR");
-			add_assoc_long(return_value, "pdo_type", PDO_PARAM_STR);
+			pdo_type = PDO_PARAM_STR;
 			break;
 	}
+	add_assoc_long(return_value, "pdo_type", pdo_type);
 
+	/* DECIMAL scale (digits after the point). The total-digit width is reported
+	 * as "precision" via describe(), since PDO core overwrites any "precision"
+	 * set here from the column struct. */
+	if (tid == DUCKDB_TYPE_DECIMAL) {
+		add_assoc_long(return_value, "scale", duckdb_decimal_scale(lt));
+	}
+
+	duckdb_destroy_logical_type(&lt);
 	return SUCCESS;
 }
 

@@ -70,6 +70,25 @@ duckdb::memory:                   # in-memory database
 duckdb:                           # in-memory database (empty path)
 ```
 
+### Connection options
+
+Append DuckDB configuration as `;key=value` pairs on the DSN, or pass them as a
+`PDO::DUCKDB_ATTR_CONFIG` array:
+
+```php
+// open a database read-only, with a memory cap
+$db = new PDO('duckdb:/data/analytics.duckdb;access_mode=read_only;memory_limit=2GB');
+
+// equivalent, via the options array
+$db = new PDO('duckdb::memory:', null, null, [
+    PDO::DUCKDB_ATTR_CONFIG => ['threads' => 4, 'memory_limit' => '2GB'],
+]);
+```
+
+Any DuckDB setting name works (`access_mode`, `memory_limit`, `threads`,
+`temp_directory`, ...); an unknown option fails the connection. When
+`open_basedir` is set, external file access stays disabled whatever you pass.
+
 ## 🛠️ Bulk insert (Appender)
 
 For fast bulk loads, `PDO::duckdbAppender()` returns a `Pdo\Duckdb\Appender`
@@ -87,7 +106,16 @@ $app->flush();                              // or $app->close() to finalize
 
 `appendRow(...$values)` takes one argument per column (left to right) and
 returns the appender for chaining. PHP `null`/`bool`/`int`/`float`/`string` map
-to DuckDB values; DuckDB casts them to the target column types.
+to DuckDB values; DuckDB casts them to the target column types. For nested
+columns, pass a PHP array: a list fills `LIST`/`ARRAY`, and an associative array
+fills `STRUCT` (by field name) or `MAP`.
+
+```php
+$db->exec('CREATE TABLE t (tags VARCHAR[], attrs STRUCT(x INTEGER, y VARCHAR))');
+$app = $db->duckdbAppender('t');
+$app->appendRow(['php', 'duckdb'], ['x' => 1, 'y' => 'hi']);
+$app->flush();
+```
 
 On PHP 8.4+, `PDO::connect('duckdb:…')` returns a `Pdo\Duckdb` instance and
 `duckdbAppender()` lives on that subclass. On `new PDO('duckdb:…')` (and on PHP
@@ -122,16 +150,25 @@ $db->exec('INSTALL httpfs; LOAD httpfs;');  // downloadable extensions
 - **Type mapping.** Integers up to 64-bit signed return as `int`, `FLOAT`/`DOUBLE`
   as `float`, `BLOB` as a binary string, and everything else (`VARCHAR`,
   `DATE`/`TIME`/`TIMESTAMP`, `DECIMAL`, `HUGEINT`/`UBIGINT`, nested types) as its
-  canonical string form.
+  canonical string form. `getColumnMeta()` reports the real DuckDB type name per
+  column, plus `precision`/`scale` for `DECIMAL`.
+- **Streaming results.** By default `execute()` returns a materialized result:
+  DuckDB buffers the full result set before PDO fetches, so a large `SELECT` is
+  bounded by available memory. For large scans, set `PDO::DUCKDB_ATTR_UNBUFFERED`
+  to fetch chunks lazily through DuckDB's pending-result API instead:
+
+  ```php
+  $db->setAttribute(PDO::DUCKDB_ATTR_UNBUFFERED, true);
+  ```
+
+  DuckDB keeps one streaming result active per connection at a time, so consume a
+  statement before running the next on the same handle.
 
 ## Status
 
-Early release. Result columns are decoded with DuckDB's data-chunk/vector API
-(native scalars straight to PHP values; nested/extended types via their
-canonical string form). Note that `execute()` returns a **materialized** result:
-DuckDB buffers the full result set in memory before PDO begins fetching, so a
-large `SELECT` is bounded by available memory rather than streamed row-by-row.
-True streaming (the pending-result API) is a planned follow-up.
+Early release. Result columns are decoded with DuckDB's data-chunk/vector API:
+native scalars go straight to PHP values, nested and extended types via their
+canonical string form.
 
 ## 🔗 PHP Performance Toolkit
 
