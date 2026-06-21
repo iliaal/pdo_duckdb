@@ -51,7 +51,7 @@ static zend_object *pdo_duckdb_appender_new(zend_class_entry *ce)
 	a->appender = NULL;
 	a->closed = false;
 	a->ncols = 0;
-	a->blob_cols = NULL;
+	a->col_types = NULL;
 	a->pdo = NULL;
 
 	return &a->std;
@@ -69,9 +69,13 @@ static void pdo_duckdb_appender_free(zend_object *obj)
 		duckdb_appender_destroy(&a->appender);
 		a->appender = NULL;
 	}
-	if (a->blob_cols) {
-		efree(a->blob_cols);
-		a->blob_cols = NULL;
+	if (a->col_types) {
+		idx_t c;
+		for (c = 0; c < a->ncols; c++) {
+			duckdb_destroy_logical_type(&a->col_types[c]);
+		}
+		efree(a->col_types);
+		a->col_types = NULL;
 	}
 	if (a->pdo) {
 		OBJ_RELEASE(a->pdo);
@@ -182,16 +186,15 @@ static void pdo_duckdb_appender_create_impl(INTERNAL_FUNCTION_PARAMETERS)
 	a->pdo = Z_OBJ_P(ZEND_THIS);
 	GC_ADDREF(a->pdo);
 
-	/* Cache which target columns are BLOB once, so appendRow() doesn't allocate
-	 * a logical type per string cell on the bulk-load hot path. */
+	/* Cache the target column logical types once, so appendRow() doesn't allocate
+	 * one per cell on the bulk-load hot path. Used to route BLOB strings (binary
+	 * vs UTF-8 varchar) and to build nested values from PHP arrays. */
 	a->ncols = duckdb_appender_column_count(ap);
 	if (a->ncols) {
 		idx_t c;
-		a->blob_cols = emalloc(sizeof(bool) * a->ncols);
+		a->col_types = emalloc(sizeof(duckdb_logical_type) * a->ncols);
 		for (c = 0; c < a->ncols; c++) {
-			duckdb_logical_type ct = duckdb_appender_column_type(ap, c);
-			a->blob_cols[c] = duckdb_get_type_id(ct) == DUCKDB_TYPE_BLOB;
-			duckdb_destroy_logical_type(&ct);
+			a->col_types[c] = duckdb_appender_column_type(ap, c);
 		}
 	}
 }
@@ -225,6 +228,263 @@ static pdo_duckdb_appender *pdo_duckdb_appender_live(zval *zthis)
 	return a;
 }
 
+/* Build a scalar leaf duckdb_value from a PHP scalar, targeting type `tid`.
+ * Integer leaves are built at the column's exact width (range-checked, since
+ * unlike the direct scalar append path DuckDB does not validate the cast for a
+ * constructed value — an out-of-range narrow/unsigned value would silently wrap)
+ * and float leaves match FLOAT vs DOUBLE; BLOB strings are built as a blob so
+ * binary data round-trips; everything else (DATE/TIMESTAMP/DECIMAL/UUID via a
+ * string) is built as its natural PHP form and cast by DuckDB when the row is
+ * appended. Returns NULL on an unsupported zval type or an out-of-range integer
+ * (throwing in the latter case); `argpos` is for the error message. */
+static duckdb_value pdo_duckdb_make_leaf(zval *z, duckdb_type tid, uint32_t argpos)
+{
+	switch (Z_TYPE_P(z)) {
+		case IS_NULL:  return duckdb_create_null_value();
+		case IS_TRUE:  return duckdb_create_bool(true);
+		case IS_FALSE: return duckdb_create_bool(false);
+		case IS_DOUBLE:
+			return tid == DUCKDB_TYPE_FLOAT
+				? duckdb_create_float((float)Z_DVAL_P(z))
+				: duckdb_create_double(Z_DVAL_P(z));
+		case IS_STRING:
+			return tid == DUCKDB_TYPE_BLOB
+				? duckdb_create_blob((const uint8_t *)Z_STRVAL_P(z), (idx_t)Z_STRLEN_P(z))
+				: duckdb_create_varchar_length(Z_STRVAL_P(z), (idx_t)Z_STRLEN_P(z));
+		case IS_LONG: {
+			zend_long l = Z_LVAL_P(z);
+			switch (tid) {
+				case DUCKDB_TYPE_BOOLEAN:   return duckdb_create_bool(l != 0);
+				case DUCKDB_TYPE_TINYINT:
+					if (l < INT8_MIN || l > INT8_MAX) break;
+					return duckdb_create_int8((int8_t)l);
+				case DUCKDB_TYPE_SMALLINT:
+					if (l < INT16_MIN || l > INT16_MAX) break;
+					return duckdb_create_int16((int16_t)l);
+				case DUCKDB_TYPE_INTEGER:
+					if (l < INT32_MIN || l > INT32_MAX) break;
+					return duckdb_create_int32((int32_t)l);
+				case DUCKDB_TYPE_UTINYINT:
+					if (l < 0 || l > UINT8_MAX) break;
+					return duckdb_create_uint8((uint8_t)l);
+				case DUCKDB_TYPE_USMALLINT:
+					if (l < 0 || l > UINT16_MAX) break;
+					return duckdb_create_uint16((uint16_t)l);
+				case DUCKDB_TYPE_UINTEGER:
+					if (l < 0 || (uint64_t)l > UINT32_MAX) break;
+					return duckdb_create_uint32((uint32_t)l);
+				case DUCKDB_TYPE_UBIGINT:
+					if (l < 0) break;
+					return duckdb_create_uint64((uint64_t)l);
+				case DUCKDB_TYPE_FLOAT:     return duckdb_create_float((float)l);
+				case DUCKDB_TYPE_DOUBLE:    return duckdb_create_double((double)l);
+				case DUCKDB_TYPE_HUGEINT: {
+					duckdb_hugeint h;
+					h.lower = (uint64_t)l;
+					h.upper = l < 0 ? -1 : 0;
+					return duckdb_create_hugeint(h);
+				}
+				case DUCKDB_TYPE_UHUGEINT: {
+					duckdb_uhugeint h;
+					if (l < 0) break;
+					h.lower = (uint64_t)l;
+					h.upper = 0;
+					return duckdb_create_uhugeint(h);
+				}
+				default:                    return duckdb_create_int64((int64_t)l);
+			}
+			/* reached only via break from an out-of-range narrow/unsigned case */
+			zend_value_error("Pdo\\Duckdb\\Appender::appendRow(): argument #%u integer "
+				ZEND_LONG_FMT " is out of range for the target column type", argpos, l);
+			return NULL;
+		}
+		default:
+			return NULL;
+	}
+}
+
+/* Build a duckdb_value matching (or castable to) logical type `lt` from a PHP
+ * value. A PHP array maps to LIST/ARRAY (sequential values) or STRUCT/MAP (per
+ * the column type, keyed by field/key name); scalars map to leaves. Throws and
+ * returns NULL on a structural mismatch (array for a scalar column, scalar for a
+ * nested column, missing struct field, or wrong fixed-array length). `argpos` is
+ * the 1-based appendRow() argument number, for error messages. */
+static duckdb_value pdo_duckdb_build_value(zval *z, duckdb_logical_type lt, uint32_t argpos)
+{
+	duckdb_type tid = duckdb_get_type_id(lt);
+	HashTable *ht;
+
+	ZVAL_DEREF(z);
+
+	if (Z_TYPE_P(z) == IS_NULL) {
+		return duckdb_create_null_value();
+	}
+
+	if (Z_TYPE_P(z) != IS_ARRAY) {
+		duckdb_value v;
+		if (tid == DUCKDB_TYPE_LIST || tid == DUCKDB_TYPE_ARRAY ||
+			tid == DUCKDB_TYPE_STRUCT || tid == DUCKDB_TYPE_MAP) {
+			zend_type_error("Pdo\\Duckdb\\Appender::appendRow(): argument #%u expects an array for a nested column", argpos);
+			return NULL;
+		}
+		v = pdo_duckdb_make_leaf(z, tid, argpos);
+		if (!v && !EG(exception)) {
+			/* make_leaf throws on an out-of-range integer; only report an
+			 * unsupported type when it returned NULL without throwing. */
+			zend_type_error("Pdo\\Duckdb\\Appender::appendRow(): argument #%u is of unsupported type %s",
+				argpos, zend_zval_value_name(z));
+		}
+		return v;
+	}
+
+	ht = Z_ARRVAL_P(z);
+
+	switch (tid) {
+		case DUCKDB_TYPE_LIST:
+		case DUCKDB_TYPE_ARRAY: {
+			duckdb_logical_type ct = (tid == DUCKDB_TYPE_LIST)
+				? duckdb_list_type_child_type(lt)
+				: duckdb_array_type_child_type(lt);
+			idx_t n = zend_hash_num_elements(ht);
+			/* always non-NULL (even for an empty list) — create_list_value rejects
+			 * a NULL values pointer. */
+			duckdb_value *vals = emalloc(sizeof(duckdb_value) * (n ? n : 1));
+			idx_t built = 0;
+			duckdb_value ret = NULL;
+			bool ok = true;
+			zval *elem;
+
+			if (tid == DUCKDB_TYPE_ARRAY) {
+				idx_t want = duckdb_array_type_array_size(lt);
+				if (n != want) {
+					zend_value_error("Pdo\\Duckdb\\Appender::appendRow(): argument #%u expects %u fixed-array element(s), got %u",
+						argpos, (uint32_t)want, (uint32_t)n);
+					ok = false;
+				}
+			}
+
+			if (ok) {
+				ZEND_HASH_FOREACH_VAL(ht, elem) {
+					duckdb_value cv = pdo_duckdb_build_value(elem, ct, argpos);
+					if (!cv) { ok = false; break; }
+					vals[built++] = cv;
+				} ZEND_HASH_FOREACH_END();
+			}
+
+			if (ok) {
+				ret = (tid == DUCKDB_TYPE_LIST)
+					? duckdb_create_list_value(ct, vals, n)
+					: duckdb_create_array_value(ct, vals, n);
+				if (!ret) {
+					zend_value_error("Pdo\\Duckdb\\Appender::appendRow(): argument #%u could not be built as a nested value", argpos);
+				}
+			}
+			while (built > 0) {
+				duckdb_destroy_value(&vals[--built]);
+			}
+			efree(vals);
+			duckdb_destroy_logical_type(&ct);
+			return ret;
+		}
+
+		case DUCKDB_TYPE_STRUCT: {
+			idx_t cnt = duckdb_struct_type_child_count(lt);
+			duckdb_value *vals = cnt ? emalloc(sizeof(duckdb_value) * cnt) : NULL;
+			idx_t i, built = 0;
+			duckdb_value ret = NULL;
+			bool ok = true;
+
+			for (i = 0; i < cnt; i++) {
+				char *fname = duckdb_struct_type_child_name(lt, i);
+				duckdb_logical_type ft = duckdb_struct_type_child_type(lt, i);
+				zval *fv = fname ? zend_hash_str_find(ht, fname, strlen(fname)) : NULL;
+				duckdb_value cv;
+
+				if (!fv) {
+					zend_value_error("Pdo\\Duckdb\\Appender::appendRow(): argument #%u is missing struct field \"%s\"",
+						argpos, fname ? fname : "");
+					if (fname) { duckdb_free(fname); }
+					duckdb_destroy_logical_type(&ft);
+					ok = false;
+					break;
+				}
+				cv = pdo_duckdb_build_value(fv, ft, argpos);
+				if (fname) { duckdb_free(fname); }
+				duckdb_destroy_logical_type(&ft);
+				if (!cv) { ok = false; break; }
+				vals[built++] = cv;
+			}
+
+			if (ok) {
+				ret = duckdb_create_struct_value(lt, vals);
+				if (!ret) {
+					zend_value_error("Pdo\\Duckdb\\Appender::appendRow(): argument #%u could not be built as a struct", argpos);
+				}
+			}
+			while (built > 0) {
+				duckdb_destroy_value(&vals[--built]);
+			}
+			if (vals) {
+				efree(vals);
+			}
+			return ret;
+		}
+
+		case DUCKDB_TYPE_MAP: {
+			duckdb_logical_type kt = duckdb_map_type_key_type(lt);
+			duckdb_logical_type vt = duckdb_map_type_value_type(lt);
+			idx_t n = zend_hash_num_elements(ht);
+			duckdb_value *keys = emalloc(sizeof(duckdb_value) * (n ? n : 1));
+			duckdb_value *vals = emalloc(sizeof(duckdb_value) * (n ? n : 1));
+			idx_t built = 0;
+			duckdb_value ret = NULL;
+			bool ok = true;
+			zend_string *skey;
+			zend_ulong nkey;
+			zval *val;
+
+			ZEND_HASH_FOREACH_KEY_VAL(ht, nkey, skey, val) {
+				duckdb_value kv, vv;
+				zval ztmp;
+
+				if (skey) {
+					ZVAL_STR(&ztmp, skey);
+				} else {
+					ZVAL_LONG(&ztmp, (zend_long)nkey);
+				}
+				kv = pdo_duckdb_build_value(&ztmp, kt, argpos);
+				if (!kv) { ok = false; break; }
+				vv = pdo_duckdb_build_value(val, vt, argpos);
+				if (!vv) { duckdb_destroy_value(&kv); ok = false; break; }
+				keys[built] = kv;
+				vals[built] = vv;
+				built++;
+			} ZEND_HASH_FOREACH_END();
+
+			if (ok) {
+				ret = duckdb_create_map_value(lt, keys, vals, n);
+				if (!ret) {
+					zend_value_error("Pdo\\Duckdb\\Appender::appendRow(): argument #%u could not be built as a map", argpos);
+				}
+			}
+			while (built > 0) {
+				--built;
+				duckdb_destroy_value(&keys[built]);
+				duckdb_destroy_value(&vals[built]);
+			}
+			efree(keys);
+			efree(vals);
+			duckdb_destroy_logical_type(&kt);
+			duckdb_destroy_logical_type(&vt);
+			return ret;
+		}
+
+		default:
+			zend_type_error("Pdo\\Duckdb\\Appender::appendRow(): argument #%u is an array but the target column is not a nested type", argpos);
+			return NULL;
+	}
+}
+
 ZEND_METHOD(Pdo_Duckdb_Appender, appendRow)
 {
 	zval *args = NULL;
@@ -240,32 +500,61 @@ ZEND_METHOD(Pdo_Duckdb_Appender, appendRow)
 		RETURN_THROWS();
 	}
 
-	/* Validate the whole row before touching the native appender. DuckDB appends
-	 * value-by-value with no rollback: a failure partway through (a PHP value of
-	 * an unsupported type, or the wrong column count caught at end_row) leaves
-	 * the appender mid-row and poisons it — later appends fail with "too many
-	 * appends for chunk" and flush with "incomplete append to row". So check the
-	 * column count and every value's type up front, before any native append. */
+	/* Validate and pre-build the whole row before touching the native appender.
+	 * DuckDB appends value-by-value with no rollback: a failure partway through
+	 * (an unsupported PHP value, the wrong column count at end_row) leaves the
+	 * appender mid-row and poisons it — later appends fail with "too many appends
+	 * for chunk" and flush with "incomplete append to row". So check the column
+	 * count, and construct every nested value (PHP array → LIST/STRUCT/MAP/ARRAY),
+	 * up front; only once the whole row is known-good do we append. */
 	if (argc != a->ncols) {
 		zend_value_error("Pdo\\Duckdb\\Appender::appendRow(): table has %u column(s), but %u value(s) were given",
 			(uint32_t)a->ncols, argc);
 		RETURN_THROWS();
 	}
+
+	/* built[i] holds a constructed duckdb_value for nested (array) cells, NULL for
+	 * scalars handled directly on the append fast path below. */
+	duckdb_value *built = argc ? ecalloc(argc, sizeof(duckdb_value)) : NULL;
+
 	for (i = 0; i < argc; i++) {
 		zval *v = &args[i];
 		ZVAL_DEREF(v);
 		switch (Z_TYPE_P(v)) {
-			case IS_NULL:
 			case IS_TRUE:
 			case IS_FALSE:
 			case IS_LONG:
 			case IS_DOUBLE:
-			case IS_STRING:
+			case IS_STRING: {
+				/* A non-NULL scalar for a nested column would otherwise reach the
+				 * native append fast path and fail there — poisoning the appender
+				 * if an earlier column in the row was already appended. Reject it
+				 * up front, before anything is appended. (NULL is fine: it appends
+				 * as a NULL of any column type.) */
+				duckdb_type ctid = duckdb_get_type_id(a->col_types[i]);
+				if (ctid == DUCKDB_TYPE_LIST || ctid == DUCKDB_TYPE_ARRAY ||
+					ctid == DUCKDB_TYPE_STRUCT || ctid == DUCKDB_TYPE_MAP) {
+					zend_type_error("Pdo\\Duckdb\\Appender::appendRow(): argument #%u expects an array for a nested column",
+						i + 1);
+					goto build_failed;
+				}
+				break;
+			}
+			case IS_NULL:
+				break;
+			case IS_ARRAY:
+				/* nested column: build the value now; build_value throws on a
+				 * structural mismatch. Nothing has been appended yet, so the
+				 * appender is still pristine — just free what we built. */
+				built[i] = pdo_duckdb_build_value(v, a->col_types[i], i + 1);
+				if (!built[i]) {
+					goto build_failed;
+				}
 				break;
 			default:
 				zend_type_error("Pdo\\Duckdb\\Appender::appendRow(): argument #%u is of unsupported type %s",
 					i + 1, zend_zval_value_name(v));
-				RETURN_THROWS();
+				goto build_failed;
 		}
 	}
 
@@ -273,31 +562,34 @@ ZEND_METHOD(Pdo_Duckdb_Appender, appendRow)
 		zval *v = &args[i];
 		duckdb_state st;
 
-		ZVAL_DEREF(v);
-		switch (Z_TYPE_P(v)) {
-			case IS_NULL:
-				st = duckdb_append_null(a->appender);
-				break;
-			case IS_TRUE:
-			case IS_FALSE:
-				st = duckdb_append_bool(a->appender, Z_TYPE_P(v) == IS_TRUE);
-				break;
-			case IS_LONG:
-				st = duckdb_append_int64(a->appender, (int64_t)Z_LVAL_P(v));
-				break;
-			case IS_DOUBLE:
-				st = duckdb_append_double(a->appender, Z_DVAL_P(v));
-				break;
-			default: {
-				/* IS_STRING (the only remaining type after validation above). A
-				 * PHP string maps to varchar by default, but DuckDB rejects
-				 * non-UTF-8 there. If the target column is BLOB, append raw bytes
-				 * so binary data round-trips. */
-				bool is_blob = (i < a->ncols) && a->blob_cols[i];
-				st = is_blob
-					? duckdb_append_blob(a->appender, Z_STRVAL_P(v), (idx_t)Z_STRLEN_P(v))
-					: duckdb_append_varchar_length(a->appender, Z_STRVAL_P(v), (idx_t)Z_STRLEN_P(v));
-				break;
+		if (built[i]) {
+			st = duckdb_append_value(a->appender, built[i]);
+		} else {
+			ZVAL_DEREF(v);
+			switch (Z_TYPE_P(v)) {
+				case IS_NULL:
+					st = duckdb_append_null(a->appender);
+					break;
+				case IS_TRUE:
+				case IS_FALSE:
+					st = duckdb_append_bool(a->appender, Z_TYPE_P(v) == IS_TRUE);
+					break;
+				case IS_LONG:
+					st = duckdb_append_int64(a->appender, (int64_t)Z_LVAL_P(v));
+					break;
+				case IS_DOUBLE:
+					st = duckdb_append_double(a->appender, Z_DVAL_P(v));
+					break;
+				default: {
+					/* IS_STRING. A PHP string maps to varchar by default, but
+					 * DuckDB rejects non-UTF-8 there. If the target column is BLOB,
+					 * append raw bytes so binary data round-trips. */
+					bool is_blob = duckdb_get_type_id(a->col_types[i]) == DUCKDB_TYPE_BLOB;
+					st = is_blob
+						? duckdb_append_blob(a->appender, Z_STRVAL_P(v), (idx_t)Z_STRLEN_P(v))
+						: duckdb_append_varchar_length(a->appender, Z_STRVAL_P(v), (idx_t)Z_STRLEN_P(v));
+					break;
+				}
 			}
 		}
 		if (st != DuckDBSuccess) {
@@ -306,8 +598,17 @@ ZEND_METHOD(Pdo_Duckdb_Appender, appendRow)
 			 * appends against a poisoned row. */
 			a->closed = true;
 			pdo_duckdb_appender_throw(a->appender, "Failed to append value");
-			RETURN_THROWS();
+			goto build_failed;
 		}
+	}
+
+	for (i = 0; i < argc; i++) {
+		if (built[i]) {
+			duckdb_destroy_value(&built[i]);
+		}
+	}
+	if (built) {
+		efree(built);
 	}
 
 	if (duckdb_appender_end_row(a->appender) != DuckDBSuccess) {
@@ -317,6 +618,19 @@ ZEND_METHOD(Pdo_Duckdb_Appender, appendRow)
 	}
 
 	RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
+
+build_failed:
+	/* Free any nested values constructed before the failure. An exception is
+	 * already pending (build_value / the unsupported-type / append-failure path). */
+	if (built) {
+		for (i = 0; i < argc; i++) {
+			if (built[i]) {
+				duckdb_destroy_value(&built[i]);
+			}
+		}
+		efree(built);
+	}
+	RETURN_THROWS();
 }
 
 ZEND_METHOD(Pdo_Duckdb_Appender, flush)

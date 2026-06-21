@@ -53,9 +53,21 @@ ZEND_GET_MODULE(pdo_duckdb)
 /* {{{ PHP_MINIT_FUNCTION */
 PHP_MINIT_FUNCTION(pdo_duckdb)
 {
+	zend_class_entry *pdo_ce;
+
 	if (php_pdo_register_driver(&pdo_duckdb_driver) == FAILURE) {
 		return FAILURE;
 	}
+
+	/* Driver-specific attributes as PDO::DUCKDB_* constants. Declared on the base
+	 * PDO class (not the 8.4+ Pdo\Duckdb subclass) so they resolve on the 8.1
+	 * floor too, matching how the other driver methods stay cross-version. */
+	pdo_ce = php_pdo_get_dbh_ce();
+	zend_declare_class_constant_long(pdo_ce,
+		ZEND_STRL("DUCKDB_ATTR_CONFIG"), PDO_DUCKDB_ATTR_CONFIG);
+	zend_declare_class_constant_long(pdo_ce,
+		ZEND_STRL("DUCKDB_ATTR_UNBUFFERED"), PDO_DUCKDB_ATTR_UNBUFFERED);
+
 	return pdo_duckdb_appender_minit();
 }
 /* }}} */

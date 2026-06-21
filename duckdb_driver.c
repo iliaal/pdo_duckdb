@@ -260,6 +260,18 @@ static bool pdo_duckdb_set_attr(pdo_dbh_t *dbh, zend_long attr, zval *val)
 			 * constructor option without raising IM001. */
 			return true;
 
+		case PDO_DUCKDB_ATTR_UNBUFFERED:
+			((pdo_duckdb_db_handle *)dbh->driver_data)->unbuffered = zend_is_true(val);
+			return true;
+
+		case PDO_DUCKDB_ATTR_CONFIG:
+			/* Consumed at open time by the handle factory (DuckDB config is
+			 * open-time only). PDO core re-applies every constructor driver-option
+			 * through set_attribute after the factory, so accept it here as a
+			 * no-op rather than failing the connection. A later runtime
+			 * setAttribute() likewise can't reconfigure an open database. */
+			return true;
+
 		default:
 			return false;
 	}
@@ -316,6 +328,10 @@ static int pdo_duckdb_get_attribute(pdo_dbh_t *dbh, zend_long attr, zval *return
 			ZVAL_STRINGL(return_value, "duckdb", sizeof("duckdb") - 1);
 			break;
 
+		case PDO_DUCKDB_ATTR_UNBUFFERED:
+			ZVAL_BOOL(return_value, ((pdo_duckdb_db_handle *)dbh->driver_data)->unbuffered);
+			break;
+
 		default:
 			return 0;
 	}
@@ -370,11 +386,143 @@ static char *duckdb_make_path_safe(const char *data_source, bool *denied)
 	return fullpath;
 }
 
+/* Set one DuckDB config option, throwing a clear error (and destroying the
+ * config) on an invalid name/value so the caller can fail the open. */
+static bool pdo_duckdb_set_one_config(duckdb_config *config, const char *key, const char *value)
+{
+	if (duckdb_set_config(*config, key, value) != DuckDBSuccess) {
+		duckdb_destroy_config(config);
+		*config = NULL;
+		zend_throw_exception_ex(php_pdo_get_exception(), 0,
+			"Invalid DuckDB configuration option \"%s\" (value \"%s\")", key, value);
+		return false;
+	}
+	return true;
+}
+
+/* Build the DuckDB open-time config from user options and the open_basedir
+ * sandbox. Sources, applied in this order so the sandbox always wins:
+ *   1. DSN "key=value;..." pairs (everything after the first ';' in the DSN)
+ *   2. the PDO::DUCKDB_ATTR_CONFIG array from driver_options (overrides DSN)
+ *   3. if open_basedir is set: enable_external_access=false, applied LAST so a
+ *      user attempt to re-enable external access can't defeat the sandbox.
+ * *out_config is NULL when nothing needs setting. Returns false (with an
+ * exception thrown) on a bad option, so the caller refuses to open. */
+static bool pdo_duckdb_build_config(pdo_dbh_t *dbh, const char *dsn_opts,
+		zval *driver_options, duckdb_config *out_config)
+{
+	duckdb_config config = NULL;
+	bool sandbox = (PG(open_basedir) && *PG(open_basedir));
+
+	*out_config = NULL;
+
+#define DUCKDB_ENSURE_CONFIG() do { \
+		if (!config) { \
+			if (duckdb_create_config(&config) != DuckDBSuccess) { \
+				zend_throw_exception_ex(php_pdo_get_exception(), 0, \
+					"Unable to allocate DuckDB configuration"); \
+				return false; \
+			} \
+		} \
+	} while (0)
+
+	/* 1. DSN key=value pairs */
+	if (dsn_opts && *dsn_opts) {
+		char *copy = estrdup(dsn_opts);
+		char *save = NULL;
+		char *pair = php_strtok_r(copy, ";", &save);
+
+		while (pair) {
+			char *eq = strchr(pair, '=');
+			if (eq && eq != pair) {
+				*eq = '\0';
+				DUCKDB_ENSURE_CONFIG();
+				if (!pdo_duckdb_set_one_config(&config, pair, eq + 1)) {
+					efree(copy);
+					return false;
+				}
+			} else if (*pair) {
+				/* a non-empty segment without '=' is malformed; a valid option may
+				 * already have allocated config, so destroy it before bailing. */
+				efree(copy);
+				if (config) {
+					duckdb_destroy_config(&config);
+				}
+				zend_throw_exception_ex(php_pdo_get_exception(), 0,
+					"Malformed DuckDB DSN option \"%s\" (expected key=value)", pair);
+				return false;
+			}
+			pair = php_strtok_r(NULL, ";", &save);
+		}
+		efree(copy);
+	}
+
+	/* 2. PDO::DUCKDB_ATTR_CONFIG => [ "key" => value, ... ] */
+	if (driver_options && Z_TYPE_P(driver_options) == IS_ARRAY) {
+		zval *cfg = zend_hash_index_find(Z_ARRVAL_P(driver_options), PDO_DUCKDB_ATTR_CONFIG);
+		if (cfg) {
+			zend_string *key;
+			zval *val;
+
+			ZVAL_DEREF(cfg);
+			if (Z_TYPE_P(cfg) != IS_ARRAY) {
+				if (config) {
+					duckdb_destroy_config(&config);
+				}
+				zend_throw_exception_ex(php_pdo_get_exception(), 0,
+					"PDO::DUCKDB_ATTR_CONFIG must be an array of option => value");
+				return false;
+			}
+
+			ZEND_HASH_FOREACH_STR_KEY_VAL(Z_ARRVAL_P(cfg), key, val) {
+				zend_string *sval;
+
+				if (!key) {
+					if (config) {
+						duckdb_destroy_config(&config);
+					}
+					zend_throw_exception_ex(php_pdo_get_exception(), 0,
+						"PDO::DUCKDB_ATTR_CONFIG keys must be option-name strings");
+					return false;
+				}
+				ZVAL_DEREF(val);
+				sval = zval_get_string(val);
+				DUCKDB_ENSURE_CONFIG();
+				if (!pdo_duckdb_set_one_config(&config, ZSTR_VAL(key), ZSTR_VAL(sval))) {
+					zend_string_release(sval);
+					return false;
+				}
+				zend_string_release(sval);
+			} ZEND_HASH_FOREACH_END();
+		}
+	}
+
+	/* 3. open_basedir sandbox — applied last so it overrides any user setting.
+	 * This is a security boundary: fail closed if it can't be applied. */
+	if (sandbox) {
+		DUCKDB_ENSURE_CONFIG();
+		if (duckdb_set_config(config, "enable_external_access", "false") != DuckDBSuccess) {
+			duckdb_destroy_config(&config);
+			zend_throw_exception_ex(php_pdo_get_exception(), 0,
+				"Unable to apply the open_basedir sandbox (enable_external_access) to DuckDB");
+			return false;
+		}
+	}
+
+#undef DUCKDB_ENSURE_CONFIG
+
+	*out_config = config;
+	return true;
+}
+
 static int pdo_duckdb_handle_factory(pdo_dbh_t *dbh, zval *driver_options) /* {{{ */
 {
 	pdo_duckdb_db_handle *H;
 	int ret = 0;
 	char *path;
+	char *path_dsn = NULL;
+	const char *dsn_opts = NULL;
+	const char *semi;
 	char *open_error = NULL;
 	bool denied;
 	duckdb_config config = NULL;
@@ -385,33 +533,49 @@ static int pdo_duckdb_handle_factory(pdo_dbh_t *dbh, zval *driver_options) /* {{
 	H->einfo.errmsg = NULL;
 	dbh->driver_data = H;
 
-	path = duckdb_make_path_safe(dbh->data_source, &denied);
+	/* Split the DSN at the first ';': the path is the part before it, and any
+	 * "key=value;..." tail is DuckDB config (handled by pdo_duckdb_build_config).
+	 * ":memory:" and bare file paths contain no ';', so existing DSNs are
+	 * unaffected. */
+	semi = strchr(dbh->data_source, ';');
+	if (semi) {
+		path_dsn = estrndup(dbh->data_source, semi - dbh->data_source);
+		dsn_opts = semi + 1;
+	}
+
+	path = duckdb_make_path_safe(path_dsn ? path_dsn : dbh->data_source, &denied);
+	if (path_dsn) {
+		efree(path_dsn);
+	}
 	if (denied) {
 		zend_throw_exception_ex(php_pdo_get_exception(), 0,
 			"open_basedir prohibits opening %s", dbh->data_source);
 		goto cleanup;
 	}
 
-	/* open_basedir guards only the DB file path above; DuckDB SQL (read_csv,
-	 * COPY, ATTACH, httpfs, ...) can otherwise reach the filesystem/network
-	 * directly. When open_basedir is in effect, disable that external access so
-	 * the sandbox holds at the SQL layer too. This is a security boundary, so
-	 * fail closed: if the config can't be built or applied, refuse to open
-	 * rather than silently connecting with external access still enabled. */
-	if (PG(open_basedir) && *PG(open_basedir)) {
-		if (duckdb_create_config(&config) != DuckDBSuccess ||
-			duckdb_set_config(config, "enable_external_access", "false") != DuckDBSuccess) {
-			if (config) {
-				duckdb_destroy_config(&config);
-			}
-			if (path) {
-				efree(path);
-			}
-			zend_throw_exception_ex(php_pdo_get_exception(), 0,
-				"Unable to apply the open_basedir sandbox (enable_external_access) to DuckDB");
-			goto cleanup;
+	/* Build the open-time config from user DSN/attr options plus the open_basedir
+	 * sandbox. open_basedir guards only the DB file path above; DuckDB SQL
+	 * (read_csv, COPY, ATTACH, httpfs, ...) can otherwise reach the filesystem
+	 * directly, so the sandbox disables external access and is applied last. A
+	 * security boundary: fail closed — if the config can't be built, refuse to
+	 * open rather than connect unsandboxed. */
+	if (!pdo_duckdb_build_config(dbh, dsn_opts, driver_options, &config)) {
+		if (path) {
+			efree(path);
 		}
+		goto cleanup;  /* exception already thrown */
+	}
+	if (PG(open_basedir) && *PG(open_basedir)) {
 		H->external_access_disabled = true;
+	}
+
+	/* Carry an opt-in unbuffered request through to statements on this handle. */
+	if (driver_options && Z_TYPE_P(driver_options) == IS_ARRAY) {
+		zval *unbuf = zend_hash_index_find(Z_ARRVAL_P(driver_options), PDO_DUCKDB_ATTR_UNBUFFERED);
+		if (unbuf) {
+			ZVAL_DEREF(unbuf);
+			H->unbuffered = zend_is_true(unbuf);
+		}
 	}
 
 	open_state = duckdb_open_ext(path, &H->db, config, &open_error);

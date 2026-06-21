@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Connection configuration passthrough. DuckDB config options can be set via the
+  DSN (`duckdb:<path>;access_mode=read_only;memory_limit=512MB`) or the
+  `PDO::DUCKDB_ATTR_CONFIG => [...]` driver-option array. The open_basedir sandbox
+  is always applied last, so it can't be overridden. An invalid option fails the
+  connection with a clear error.
+- `getColumnMeta()` now reports the real DuckDB type for every column
+  (`DECIMAL`, `DATE`, `TIMESTAMP`, `UUID`, `LIST`, `STRUCT`, ...) instead of
+  collapsing everything into five buckets, and includes `precision`/`scale` for
+  `DECIMAL`.
+- Appender (`Pdo\Duckdb\Appender::appendRow()`) accepts PHP arrays for nested
+  columns: sequential arrays map to `LIST`/`ARRAY`, associative arrays to
+  `STRUCT` (by field name) and `MAP`, with arbitrary nesting.
+- Opt-in unbuffered (streaming) result mode via `PDO::DUCKDB_ATTR_UNBUFFERED`.
+  When enabled, large result sets stream chunk-by-chunk through DuckDB's
+  pending-result API instead of being materialized whole. Default stays buffered.
+
+### Fixed
+- Reading an empty nested collection (an empty `LIST`/`ARRAY`/`MAP`, e.g.
+  `SELECT CAST([] AS INTEGER[])`) no longer crashes — a NULL values pointer was
+  reaching `duckdb_create_list_value`, making the subsequent `duckdb_get_varchar`
+  segfault.
+
 ## [0.2.1] - 2026-06-18
 
 ### Fixed
