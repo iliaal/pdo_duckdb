@@ -299,6 +299,25 @@ static duckdb_value pdo_duckdb_cell_to_value(duckdb_vector vec, idx_t row)
 			}
 			break;
 		}
+		case DUCKDB_TYPE_GEOMETRY: {
+			/* GEOMETRY is stored as a flat WKB blob (duckdb_string_t in the
+			 * vector). The C API has no WKB->WKT renderer, so expose the bytes
+			 * as an uppercase hex string: lossless and round-trippable via
+			 * ST_GeomFromHEXWKB(). Use ST_AsText() in SQL for WKT. */
+			static const char hexd[] = "0123456789ABCDEF";
+			duckdb_string_t s = ((duckdb_string_t *)data)[row];
+			const uint8_t *raw = (const uint8_t *)duckdb_string_t_data(&s);
+			idx_t len = duckdb_string_t_length(s);
+			char *hex = emalloc(len * 2 + 1);
+			idx_t i;
+			for (i = 0; i < len; i++) {
+				hex[i * 2]     = hexd[raw[i] >> 4];
+				hex[i * 2 + 1] = hexd[raw[i] & 0x0F];
+			}
+			ret = duckdb_create_varchar_length(hex, len * 2);
+			efree(hex);
+			break;
+		}
 
 		case DUCKDB_TYPE_LIST: {
 			duckdb_list_entry e = ((duckdb_list_entry *)data)[row];

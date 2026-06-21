@@ -42,6 +42,10 @@ libstdcpp=$(ldd "$DUCKDB_PREFIX/lib/libduckdb.so" 2>/dev/null | awk '/libstdc\+\
 export LD_LIBRARY_PATH="$DUCKDB_PREFIX/lib:${LD_LIBRARY_PATH:-}"
 export LD_PRELOAD="$libasan${libstdcpp:+ $libstdcpp}"
 export ASAN_OPTIONS="${ASAN_OPTIONS:-detect_leaks=1:abort_on_error=1}"
+# Mirror CI's narrow library-scoped leak suppressions (libduckdb init state, the
+# spatial extension's bundled sqlite3/GDAL) so a local run matches the ASan job.
+SUPP="$(pwd)/.github/lsan-suppressions.txt"
+[ -f "$SUPP" ] && export LSAN_OPTIONS="${LSAN_OPTIONS:-suppressions=$SUPP:print_suppressions=0}"
 # Disable ZendMM so emalloc/efree hit the real allocator: otherwise ASan can't
 # see a use-after-efree (ZendMM pools the freed block), and such bugs slip past
 # locally only to fail in CI's USE_ZEND_ALLOC=0 ASan build.

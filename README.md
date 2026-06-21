@@ -162,7 +162,9 @@ $db->exec('INSTALL httpfs; LOAD httpfs;');  // downloadable extensions
   as `float`, `BLOB` as a binary string, and everything else (`VARCHAR`,
   `DATE`/`TIME`/`TIMESTAMP`, `DECIMAL`, `HUGEINT`/`UBIGINT`, nested types) as its
   canonical string form. `getColumnMeta()` reports the real DuckDB type name per
-  column, plus `precision`/`scale` for `DECIMAL`.
+  column, plus `precision`/`scale` for `DECIMAL`. `GEOMETRY` (from the spatial
+  extension) returns its WKB bytes as a hex string; call `ST_AsText()` in SQL if
+  you want WKT.
 - **Streaming results.** By default `execute()` returns a materialized result:
   DuckDB buffers the full result set before PDO fetches, so a large `SELECT` is
   bounded by available memory. For large scans, set `PDO::DUCKDB_ATTR_UNBUFFERED`
