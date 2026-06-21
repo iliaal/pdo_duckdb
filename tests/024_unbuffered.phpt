@@ -27,6 +27,12 @@ var_dump($a === $b);
 // nested types also reconstruct correctly under streaming
 echo $db->query('SELECT [1, 2, 3] AS c')->fetchColumn(), "\n";
 
+// DML reports rowCount() under streaming too (affected rows, like the buffered path)
+$db->exec('CREATE TABLE t (i INTEGER)');
+$ins = $db->prepare('INSERT INTO t VALUES (1), (2), (3)');
+$ins->execute();
+echo "unbuffered INSERT rowCount=", $ins->rowCount(), "\n";
+
 // toggling the attribute off returns to buffered execution
 $db->setAttribute(PDO::DUCKDB_ATTR_UNBUFFERED, false);
 var_dump($db->getAttribute(PDO::DUCKDB_ATTR_UNBUFFERED));
@@ -37,6 +43,7 @@ bool(true)
 rows=50000 sum=1249975000
 bool(true)
 [1, 2, 3]
+unbuffered INSERT rowCount=3
 bool(false)
 42
 --CLEAN--
