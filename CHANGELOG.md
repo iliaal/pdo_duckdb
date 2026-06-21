@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-06-20
+
 ### Added
 - Set DuckDB config options on the DSN (`duckdb:file.db;access_mode=read_only;memory_limit=2GB`)
   or with a `PDO::DUCKDB_ATTR_CONFIG` array. `open_basedir` still disables external
@@ -22,6 +24,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Reading an empty `LIST`, `ARRAY`, or `MAP` no longer crashes.
 - `TIMESTAMP_S`/`TIMESTAMP_MS`/`TIMESTAMP_NS`, `TIME_NS`, `UNION`, and `VARINT`
   columns now return their value instead of `NULL`.
+
+### Security
+- Bounds-check the result decoder against malformed storage files: a `UNION`
+  tag, a `DECIMAL` internal-width, a zero-length `BIT`, and `LIST`/`MAP`
+  `{offset,length}` entries are validated before use, so a crafted `.duckdb`
+  file can no longer drive an out-of-bounds read on fetch. Not reachable from
+  ordinary SQL or user rows.
 
 ## [0.2.1] - 2026-06-18
 
@@ -79,7 +88,8 @@ Initial release. A PDO driver for DuckDB.
   table/schema names are rejected, rather than silently truncating the statement
   or identifier at the NUL.
 
-[Unreleased]: https://github.com/iliaal/pdo_duckdb/compare/0.2.1...HEAD
+[Unreleased]: https://github.com/iliaal/pdo_duckdb/compare/0.3.0...HEAD
+[0.3.0]: https://github.com/iliaal/pdo_duckdb/releases/tag/0.3.0
 [0.2.1]: https://github.com/iliaal/pdo_duckdb/releases/tag/0.2.1
 [0.2.0]: https://github.com/iliaal/pdo_duckdb/releases/tag/0.2.0
 [0.1.0]: https://github.com/iliaal/pdo_duckdb/releases/tag/0.1.0
