@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `GEOMETRY` columns (from the spatial extension) now return the WKB bytes as an
+  uppercase hex string instead of `NULL`. The value round-trips via
+  `ST_GeomFromHEXWKB()`; use `ST_AsText()` in SQL for WKT.
+
 ## [0.3.0] - 2026-06-20
 
 ### Added

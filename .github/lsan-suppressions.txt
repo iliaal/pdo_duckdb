@@ -8,3 +8,6 @@
 # registry, type catalogs, static singletons) that is intentionally never freed
 # before exit. Those are out of this driver's control.
 leak:libduckdb
+# The prebuilt spatial extension bundles its own sqlite3/GDAL, which leak
+# process-lifetime allocations at exit. Loaded only by the GEOMETRY test.
+leak:spatial
