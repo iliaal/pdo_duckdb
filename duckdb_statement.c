@@ -202,6 +202,25 @@ static duckdb_value pdo_duckdb_cell_to_value(duckdb_vector vec, idx_t row)
 		case DUCKDB_TYPE_TIMESTAMP: ret = duckdb_create_timestamp(((duckdb_timestamp *)data)[row]); break;
 		case DUCKDB_TYPE_TIMESTAMP_TZ: ret = duckdb_create_timestamp_tz(((duckdb_timestamp *)data)[row]); break;
 		case DUCKDB_TYPE_INTERVAL:  ret = duckdb_create_interval(((duckdb_interval *)data)[row]); break;
+		/* Sub-/super-second precision variants store a single int64 (seconds /
+		 * millis / nanos since the epoch, nanos since midnight). Without these the
+		 * default branch would render them as a silent SQL NULL. */
+		case DUCKDB_TYPE_TIMESTAMP_S: {
+			duckdb_timestamp_s t; t.seconds = ((int64_t *)data)[row];
+			ret = duckdb_create_timestamp_s(t); break;
+		}
+		case DUCKDB_TYPE_TIMESTAMP_MS: {
+			duckdb_timestamp_ms t; t.millis = ((int64_t *)data)[row];
+			ret = duckdb_create_timestamp_ms(t); break;
+		}
+		case DUCKDB_TYPE_TIMESTAMP_NS: {
+			duckdb_timestamp_ns t; t.nanos = ((int64_t *)data)[row];
+			ret = duckdb_create_timestamp_ns(t); break;
+		}
+		case DUCKDB_TYPE_TIME_NS: {
+			duckdb_time_ns t; t.nanos = ((int64_t *)data)[row];
+			ret = duckdb_create_time_ns(t); break;
+		}
 		case DUCKDB_TYPE_UUID: {
 			/* DuckDB stores UUIDs as int128 with the sign bit flipped so they
 			 * sort correctly; duckdb_create_uuid() wants the logical value. */
@@ -229,6 +248,41 @@ static duckdb_value pdo_duckdb_cell_to_value(duckdb_vector vec, idx_t row)
 			b.data = (uint8_t *)duckdb_string_t_data(&s);
 			b.size = duckdb_string_t_length(s);
 			ret = duckdb_create_bit(b);
+			break;
+		}
+		case DUCKDB_TYPE_BIGNUM: {	/* the VARINT SQL type */
+			/* DuckDB stores VARINT as a blob: a 3-byte header whose top bit is the
+			 * sign (1 = positive), then the big-endian magnitude. Negative values
+			 * are stored bitwise-complemented so byte order matches numeric order,
+			 * so flip the magnitude bytes back. duckdb_create_bignum wants the plain
+			 * big-endian absolute value + is_negative. */
+			duckdb_string_t s = ((duckdb_string_t *)data)[row];
+			const uint8_t *raw = (const uint8_t *)duckdb_string_t_data(&s);
+			idx_t len = duckdb_string_t_length(s);
+
+			if (len < 3) {
+				ret = duckdb_create_null_value();
+			} else {
+				bool is_negative = (raw[0] & 0x80) == 0;
+				idx_t mlen = len - 3;
+				uint8_t *mag = emalloc(mlen ? mlen : 1);
+				duckdb_bignum bn;
+				idx_t i;
+
+				for (i = 0; i < mlen; i++) {
+					mag[i] = is_negative ? (uint8_t)~raw[3 + i] : raw[3 + i];
+				}
+				if (mlen == 0) {	/* zero magnitude */
+					mag[0] = 0;
+					mlen = 1;
+					is_negative = false;
+				}
+				bn.data = mag;
+				bn.size = mlen;
+				bn.is_negative = is_negative;
+				ret = duckdb_create_bignum(bn);
+				efree(mag);
+			}
 			break;
 		}
 
@@ -305,6 +359,20 @@ static duckdb_value pdo_duckdb_cell_to_value(duckdb_vector vec, idx_t row)
 			}
 			efree(keys);
 			efree(vals);
+			break;
+		}
+
+		case DUCKDB_TYPE_UNION: {
+			/* UNION is physically a STRUCT whose child 0 is the UTINYINT tag and
+			 * children 1..n are the members. Read the tag, then reconstruct the
+			 * active member (child tag+1) and wrap it. */
+			duckdb_vector tag_vec = duckdb_struct_vector_get_child(vec, 0);
+			void *tag_data = duckdb_vector_get_data(tag_vec);
+			idx_t tag = (idx_t)((uint8_t *)tag_data)[row];
+			duckdb_vector member_vec = duckdb_struct_vector_get_child(vec, tag + 1);
+			duckdb_value member = pdo_duckdb_cell_to_value(member_vec, row);
+			ret = duckdb_create_union_value(lt, tag, member);
+			duckdb_destroy_value(&member);
 			break;
 		}
 
