@@ -8,14 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- `GEOMETRY` columns (from the spatial extension) now return the WKB bytes as an
-  uppercase hex string instead of `NULL`. The value round-trips via
-  `ST_GeomFromHEXWKB()`; use `ST_AsText()` in SQL for WKT.
+- `GEOMETRY` columns now return WKB bytes as an uppercase hex string instead of `NULL`
+  (round-trips via `ST_GeomFromHEXWKB()`; use `ST_AsText()` for WKT).
 - `duckdbTableNames(string $query, bool $qualified = false)` returns the tables a
   query references, using DuckDB's parser.
-- `duckdbLastProfile()` returns the last executed query's profiling tree (operator
-  timings, cardinalities) as a nested array, or `null` until you run
-  `PRAGMA enable_profiling`.
+- `duckdbLastProfile()` returns the last query's profiling tree (operator timings,
+  cardinalities) as a nested array, or `null` until `PRAGMA enable_profiling` is set.
 
 ### Fixed
 - A connection that fails because the database path can't be resolved no longer
