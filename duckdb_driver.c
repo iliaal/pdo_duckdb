@@ -443,13 +443,14 @@ static bool pdo_duckdb_build_config(pdo_dbh_t *dbh, const char *dsn_opts,
 				}
 			} else if (*pair) {
 				/* a non-empty segment without '=' is malformed; a valid option may
-				 * already have allocated config, so destroy it before bailing. */
-				efree(copy);
+				 * already have allocated config, so destroy it before bailing.
+				 * Throw before freeing `copy`: `pair` points into it. */
 				if (config) {
 					duckdb_destroy_config(&config);
 				}
 				zend_throw_exception_ex(php_pdo_get_exception(), 0,
 					"Malformed DuckDB DSN option \"%s\" (expected key=value)", pair);
+				efree(copy);
 				return false;
 			}
 			pair = php_strtok_r(NULL, ";", &save);
