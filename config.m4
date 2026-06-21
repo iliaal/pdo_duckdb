@@ -80,7 +80,7 @@ if test "$PHP_PDO_DUCKDB_STATIC" != "no"; then
       LIBSTDCXX_A=`${CXX:-g++} -print-file-name=libstdc++.a 2>/dev/null`
       LIBGCC_EH_A=`${CC:-gcc} -print-file-name=libgcc_eh.a 2>/dev/null`
       if test ! -f "$LIBSTDCXX_A"; then
-        AC_MSG_ERROR([static libstdc++.a not found via '${CXX:-g++} -print-file-name=libstdc++.a'. A self-contained static build needs the static libstdc++ (e.g. the libstdc++-*-dev / libstdc++-static package). Refusing to build a module that would not load on a clean host.])
+        AC_MSG_ERROR([static libstdc++.a not found via '${CXX:-g++} -print-file-name=libstdc++.a'. This self-contained static Linux build requires a GNU toolchain with the static libstdc++ archive. On GNU/gcc, install the static libstdc++ (the libstdc++-*-dev / libstdc++-static package). If CXX is a non-GNU compiler such as clang++ (which uses libc++, not libstdc++), this link mode is unsupported -- set CXX=g++. Refusing to build a module that would not load on a clean host.])
       fi
       PDO_DUCKDB_SHARED_LIBADD="-Wl,--start-group,$DUCKDB_STATIC_ARCHIVES,$LIBSTDCXX_A,$LIBGCC_EH_A,--end-group -static-libgcc"
       ;;
