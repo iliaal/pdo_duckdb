@@ -9,7 +9,6 @@ build_matrix:
   - PHP-8.3
   - PHP-8.4
   - PHP-8.5
-  - PHP-8.6-vanilla
 
 # DuckDB is linked, not vendored. The matrix build needs libduckdb + duckdb.h;
 # if they are not on a standard search path, append =DIR (the DuckDB install
