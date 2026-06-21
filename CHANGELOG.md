@@ -18,6 +18,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - Reading an empty `LIST`, `ARRAY`, or `MAP` no longer crashes.
+- `TIMESTAMP_S`/`TIMESTAMP_MS`/`TIMESTAMP_NS`, `TIME_NS`, `UNION`, and `VARINT`
+  columns now return their value instead of `NULL`.
 
 ## [0.2.1] - 2026-06-18
 
