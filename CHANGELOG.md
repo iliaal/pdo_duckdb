@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-06-21
+
 ### Added
 - `GEOMETRY` columns now return WKB bytes as an uppercase hex string instead of `NULL`
   (round-trips via `ST_GeomFromHEXWKB()`; use `ST_AsText()` for WKT).
@@ -100,7 +102,8 @@ Initial release. A PDO driver for DuckDB.
   table/schema names are rejected, rather than silently truncating the statement
   or identifier at the NUL.
 
-[Unreleased]: https://github.com/iliaal/pdo_duckdb/compare/0.3.0...HEAD
+[Unreleased]: https://github.com/iliaal/pdo_duckdb/compare/0.4.0...HEAD
+[0.4.0]: https://github.com/iliaal/pdo_duckdb/releases/tag/0.4.0
 [0.3.0]: https://github.com/iliaal/pdo_duckdb/releases/tag/0.3.0
 [0.2.1]: https://github.com/iliaal/pdo_duckdb/releases/tag/0.2.1
 [0.2.0]: https://github.com/iliaal/pdo_duckdb/releases/tag/0.2.0
