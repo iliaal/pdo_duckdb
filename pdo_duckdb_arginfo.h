@@ -1,5 +1,5 @@
 /* This is a generated file, edit pdo_duckdb.stub.php instead.
- * Stub hash: 9309cc69b15bcf0ec2edf530d138f68a9d4d017a */
+ * Stub hash: b3871d92675b09ed5055c88a51e429b0e2e95aba */
 
 ZEND_BEGIN_ARG_INFO_EX(arginfo_class_Pdo_Duckdb_Appender___construct, 0, 0, 0)
 ZEND_END_ARG_INFO()
@@ -16,6 +16,7 @@ ZEND_END_ARG_INFO()
 ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_class_Pdo_Duckdb_duckdbAppender, 0, 1, Pdo\\Duckdb\\Appender, 0)
 	ZEND_ARG_TYPE_INFO(0, table, IS_STRING, 0)
 	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, schema, IS_STRING, 1, "null")
+	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, columns, IS_ARRAY, 1, "null")
 ZEND_END_ARG_INFO()
 
 ZEND_METHOD(Pdo_Duckdb_Appender, __construct);
