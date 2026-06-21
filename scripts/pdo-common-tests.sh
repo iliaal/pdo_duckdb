@@ -68,7 +68,7 @@ out="$work/out.log"
 # allowlist comparison.
 set +e
 TEST_PHP_EXECUTABLE="$PHP" NO_INTERACTION=1 "$PHP" "$RUN_TESTS" "${ext_args[@]}" \
-    -g FAIL,BORK,LEAK,XLEAK -p "$PHP" "$work/common.phpt" 2>&1 | tee "$out"
+    --show-diff -g FAIL,BORK,LEAK,XLEAK -p "$PHP" "$work/common.phpt" 2>&1 | tee "$out"
 
 clean="$work/clean.log"
 sed -E 's/\x1b\[[0-9;]*m//g' "$out" | tr '\r' '\n' > "$clean"
