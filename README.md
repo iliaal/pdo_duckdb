@@ -134,6 +134,28 @@ On PHP 8.4+, `PDO::connect('duckdb:…')` returns a `Pdo\Duckdb` instance and
 deprecation for driver methods called on the base `PDO` class, so prefer
 `PDO::connect()` on 8.4+.
 
+## 🔍 Query helpers
+
+Two driver-specific methods, available on the same object as `duckdbAppender()`:
+
+```php
+// Tables a query references, resolved by DuckDB's parser (read queries only;
+// DML returns []). Pass true to include a non-default schema.
+$db->duckdbTableNames('SELECT * FROM users u JOIN s.orders o ON u.id = o.id');
+// ['orders', 'users']
+$db->duckdbTableNames('SELECT * FROM s.orders', true);   // ['s.orders']
+
+// Profiling tree of the last executed query. Enable profiling first; the method
+// reads the recorded profile and runs nothing itself. Returns null until then.
+$db->exec("PRAGMA enable_profiling='no_output'");
+$db->query('SELECT count(*) FROM events WHERE ts > now() - INTERVAL 1 DAY');
+$profile = $db->duckdbLastProfile();
+// ['metrics' => ['QUERY_NAME' => '…', 'LATENCY' => '0.004', …],
+//  'children' => [ ['metrics' => ['OPERATOR_NAME' => 'SEQ_SCAN', …], 'children' => […]] ]]
+```
+
+Profiling metric values are strings; cast the numeric ones as needed.
+
 ## 🧩 DuckDB extensions
 
 DuckDB extensions load through ordinary SQL, no special API:

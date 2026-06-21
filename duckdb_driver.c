@@ -361,11 +361,13 @@ static const struct pdo_dbh_methods duckdb_methods = {
 
 /* Resolve the DSN to a path DuckDB can open, enforcing open_basedir for plain
  * filesystem paths. Returns an emalloc'd string the caller must efree, or NULL
- * for in-memory (the empty / ":memory:" data source). On policy failure sets
- * *denied and returns NULL. */
-static char *duckdb_make_path_safe(const char *data_source, bool *denied)
+ * for in-memory (the empty / ":memory:" data source). On failure returns NULL
+ * and sets *deny_reason to a message describing why (otherwise *deny_reason is
+ * NULL); the two failure modes — unresolvable path vs open_basedir denial — get
+ * distinct messages so the error isn't misattributed. */
+static char *duckdb_make_path_safe(const char *data_source, const char **deny_reason)
 {
-	*denied = false;
+	*deny_reason = NULL;
 
 	if (!data_source || !*data_source || strcmp(data_source, ":memory:") == 0) {
 		return NULL;  /* in-memory database */
@@ -373,13 +375,13 @@ static char *duckdb_make_path_safe(const char *data_source, bool *denied)
 
 	char *fullpath = expand_filepath(data_source, NULL);
 	if (!fullpath) {
-		*denied = true;
+		*deny_reason = "the path could not be resolved";
 		return NULL;
 	}
 
 	if (php_check_open_basedir(fullpath)) {
 		efree(fullpath);
-		*denied = true;
+		*deny_reason = "open_basedir prohibits it";
 		return NULL;
 	}
 
@@ -525,7 +527,7 @@ static int pdo_duckdb_handle_factory(pdo_dbh_t *dbh, zval *driver_options) /* {{
 	const char *dsn_opts = NULL;
 	const char *semi;
 	char *open_error = NULL;
-	bool denied;
+	const char *deny_reason = NULL;
 	duckdb_config config = NULL;
 	duckdb_state open_state;
 
@@ -544,13 +546,13 @@ static int pdo_duckdb_handle_factory(pdo_dbh_t *dbh, zval *driver_options) /* {{
 		dsn_opts = semi + 1;
 	}
 
-	path = duckdb_make_path_safe(path_dsn ? path_dsn : dbh->data_source, &denied);
+	path = duckdb_make_path_safe(path_dsn ? path_dsn : dbh->data_source, &deny_reason);
 	if (path_dsn) {
 		efree(path_dsn);
 	}
-	if (denied) {
+	if (deny_reason) {
 		zend_throw_exception_ex(php_pdo_get_exception(), 0,
-			"open_basedir prohibits opening %s", dbh->data_source);
+			"Cannot open DuckDB database %s: %s", dbh->data_source, deny_reason);
 		goto cleanup;
 	}
 
@@ -615,6 +617,185 @@ cleanup:
 	dbh->methods = &duckdb_methods;
 
 	return ret;
+}
+/* }}} */
+
+/* {{{ Driver-specific helper methods.
+ * Shared by the Pdo\Duckdb subclass (8.4+) and the base-PDO get_driver_methods
+ * vehicle (8.1-8.3); the ZEND_METHOD wrappers for both classes delegate here.
+ * The method tables live in the regenerated arginfo (included by
+ * duckdb_appender.c). */
+
+/* DuckDB's qualified table names append the query alias as " AS <alias>"
+ * (e.g. "s.orders AS o"); the unaliased form is "s.orders". An unquoted
+ * identifier cannot contain a space, so any top-level " AS " is unambiguously
+ * the alias separator (a quoted identifier that contained it would be inside
+ * double quotes). Strip it so the result is a usable schema.table name. */
+static zend_string *pdo_duckdb_strip_table_alias(const char *s, size_t len)
+{
+	bool in_quote = false;
+	size_t i, cut = len;
+
+	for (i = 0; i + 4 <= len; i++) {
+		if (s[i] == '"') {
+			in_quote = !in_quote;
+		} else if (!in_quote && s[i] == ' ' && s[i + 1] == 'A' && s[i + 2] == 'S' && s[i + 3] == ' ') {
+			cut = i;
+		}
+	}
+	return zend_string_init(s, cut, 0);
+}
+
+static void pdo_duckdb_table_names_impl(INTERNAL_FUNCTION_PARAMETERS)
+{
+	zend_string *query;
+	bool qualified = false;
+	pdo_dbh_t *dbh;
+	pdo_duckdb_db_handle *H;
+	duckdb_value list;
+	idx_t n, i;
+
+	ZEND_PARSE_PARAMETERS_START(1, 2)
+		Z_PARAM_STR(query)
+		Z_PARAM_OPTIONAL
+		Z_PARAM_BOOL(qualified)
+	ZEND_PARSE_PARAMETERS_END();
+
+	dbh = Z_PDO_DBH_P(ZEND_THIS);
+	PDO_CONSTRUCT_CHECK;
+	H = (pdo_duckdb_db_handle *)dbh->driver_data;
+
+	/* duckdb_get_table_names() takes a NUL-terminated const char*; an embedded
+	 * NUL would silently truncate the query. Reject it. */
+	if (zend_str_has_nul_byte(query)) {
+		zend_value_error("PDO::duckdbTableNames(): query must not contain a NUL byte");
+		RETURN_THROWS();
+	}
+
+	/* get_table_names parses and catalog-binds the query, so treat it as a SQL
+	 * entry point: latch the open_basedir sandbox first (one-way, idempotent) so
+	 * the invariant holds unconditionally rather than relying on get_table_names
+	 * never touching the filesystem during bind. */
+	if (!pdo_duckdb_enforce_sandbox(H)) {
+		zend_throw_exception_ex(php_pdo_get_exception(), 0,
+			"PDO::duckdbTableNames(): unable to apply the open_basedir sandbox");
+		RETURN_THROWS();
+	}
+
+	list = duckdb_get_table_names(H->conn, ZSTR_VAL(query), qualified);
+	if (!list) {
+		/* NULL means the query did not parse. get_table_names exposes no error
+		 * detail; prepare() the query for the specific message. */
+		zend_throw_exception_ex(php_pdo_get_exception(), 0,
+			"PDO::duckdbTableNames(): could not parse the query");
+		RETURN_THROWS();
+	}
+
+	array_init(return_value);
+	n = duckdb_get_list_size(list);
+	for (i = 0; i < n; i++) {
+		duckdb_value e = duckdb_get_list_child(list, i);
+		char *s = duckdb_get_varchar(e);
+		if (s) {
+			add_next_index_str(return_value,
+				qualified ? pdo_duckdb_strip_table_alias(s, strlen(s))
+				          : zend_string_init(s, strlen(s), 0));
+			duckdb_free(s);
+		}
+		duckdb_destroy_value(&e);
+	}
+	duckdb_destroy_value(&list);
+}
+
+/* Render a duckdb_profiling_info node (and its subtree) into a PHP array shaped
+ * ['metrics' => array<string,string>, 'children' => list]. Metrics arrive as a
+ * MAP<VARCHAR,VARCHAR>, so every value is a string the caller casts as needed. */
+static void pdo_duckdb_build_profile_node(duckdb_profiling_info info, zval *out)
+{
+	zval metrics, children;
+	duckdb_value m;
+	idx_t nchild, i;
+
+	array_init(out);
+
+	array_init(&metrics);
+	m = duckdb_profiling_info_get_metrics(info);
+	if (m) {
+		idx_t ms = duckdb_get_map_size(m);
+		for (i = 0; i < ms; i++) {
+			duckdb_value k = duckdb_get_map_key(m, i);
+			duckdb_value v = duckdb_get_map_value(m, i);
+			/* duckdb_get_varchar() aborts the process on a NULL value (it throws
+			 * a C++ InternalException), so guard with is_null first — like
+			 * pdo_duckdb_col_to_string. A NULL-valued metric becomes PHP null. */
+			if (!duckdb_is_null_value(k)) {
+				char *ks = duckdb_get_varchar(k);
+				if (ks) {
+					if (duckdb_is_null_value(v)) {
+						add_assoc_null(&metrics, ks);
+					} else {
+						char *vs = duckdb_get_varchar(v);
+						if (vs) {
+							add_assoc_string(&metrics, ks, vs);
+							duckdb_free(vs);
+						}
+					}
+					duckdb_free(ks);
+				}
+			}
+			duckdb_destroy_value(&k);
+			duckdb_destroy_value(&v);
+		}
+		duckdb_destroy_value(&m);
+	}
+	add_assoc_zval(out, "metrics", &metrics);
+
+	array_init(&children);
+	nchild = duckdb_profiling_info_get_child_count(info);
+	for (i = 0; i < nchild; i++) {
+		zval child;
+		pdo_duckdb_build_profile_node(duckdb_profiling_info_get_child(info, i), &child);
+		add_next_index_zval(&children, &child);
+	}
+	add_assoc_zval(out, "children", &children);
+}
+
+static void pdo_duckdb_last_profile_impl(INTERNAL_FUNCTION_PARAMETERS)
+{
+	pdo_dbh_t *dbh;
+	pdo_duckdb_db_handle *H;
+	duckdb_profiling_info info;
+
+	ZEND_PARSE_PARAMETERS_NONE();
+
+	dbh = Z_PDO_DBH_P(ZEND_THIS);
+	PDO_CONSTRUCT_CHECK;
+	H = (pdo_duckdb_db_handle *)dbh->driver_data;
+
+	/* Reads the profile of the last query already run on this connection; it
+	 * executes nothing. NULL when profiling was never enabled. */
+	info = duckdb_get_profiling_info(H->conn);
+	if (!info) {
+		RETURN_NULL();
+	}
+	pdo_duckdb_build_profile_node(info, return_value);
+}
+
+ZEND_METHOD(Pdo_Duckdb, duckdbTableNames)
+{
+	pdo_duckdb_table_names_impl(INTERNAL_FUNCTION_PARAM_PASSTHRU);
+}
+ZEND_METHOD(PdoDuckDb_Ext, duckdbTableNames)
+{
+	pdo_duckdb_table_names_impl(INTERNAL_FUNCTION_PARAM_PASSTHRU);
+}
+ZEND_METHOD(Pdo_Duckdb, duckdbLastProfile)
+{
+	pdo_duckdb_last_profile_impl(INTERNAL_FUNCTION_PARAM_PASSTHRU);
+}
+ZEND_METHOD(PdoDuckDb_Ext, duckdbLastProfile)
+{
+	pdo_duckdb_last_profile_impl(INTERNAL_FUNCTION_PARAM_PASSTHRU);
 }
 /* }}} */
 

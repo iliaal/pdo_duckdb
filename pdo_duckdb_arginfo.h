@@ -1,5 +1,5 @@
 /* This is a generated file, edit pdo_duckdb.stub.php instead.
- * Stub hash: b3871d92675b09ed5055c88a51e429b0e2e95aba */
+ * Stub hash: a6783b337e71df7c8f81e37717088f5b59b3de95 */
 
 ZEND_BEGIN_ARG_INFO_EX(arginfo_class_Pdo_Duckdb_Appender___construct, 0, 0, 0)
 ZEND_END_ARG_INFO()
@@ -19,11 +19,21 @@ ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_class_Pdo_Duckdb_duckdbAppender, 
 	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, columns, IS_ARRAY, 1, "null")
 ZEND_END_ARG_INFO()
 
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_Pdo_Duckdb_duckdbTableNames, 0, 1, IS_ARRAY, 0)
+	ZEND_ARG_TYPE_INFO(0, query, IS_STRING, 0)
+	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, qualified, _IS_BOOL, 0, "false")
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_Pdo_Duckdb_duckdbLastProfile, 0, 0, IS_ARRAY, 1)
+ZEND_END_ARG_INFO()
+
 ZEND_METHOD(Pdo_Duckdb_Appender, __construct);
 ZEND_METHOD(Pdo_Duckdb_Appender, appendRow);
 ZEND_METHOD(Pdo_Duckdb_Appender, flush);
 ZEND_METHOD(Pdo_Duckdb_Appender, close);
 ZEND_METHOD(Pdo_Duckdb, duckdbAppender);
+ZEND_METHOD(Pdo_Duckdb, duckdbTableNames);
+ZEND_METHOD(Pdo_Duckdb, duckdbLastProfile);
 
 static const zend_function_entry class_Pdo_Duckdb_Appender_methods[] = {
 	ZEND_ME(Pdo_Duckdb_Appender, __construct, arginfo_class_Pdo_Duckdb_Appender___construct, ZEND_ACC_PRIVATE)
@@ -35,6 +45,8 @@ static const zend_function_entry class_Pdo_Duckdb_Appender_methods[] = {
 
 static const zend_function_entry class_Pdo_Duckdb_methods[] = {
 	ZEND_ME(Pdo_Duckdb, duckdbAppender, arginfo_class_Pdo_Duckdb_duckdbAppender, ZEND_ACC_PUBLIC)
+	ZEND_ME(Pdo_Duckdb, duckdbTableNames, arginfo_class_Pdo_Duckdb_duckdbTableNames, ZEND_ACC_PUBLIC)
+	ZEND_ME(Pdo_Duckdb, duckdbLastProfile, arginfo_class_Pdo_Duckdb_duckdbLastProfile, ZEND_ACC_PUBLIC)
 	ZEND_FE_END
 };
 

@@ -42,5 +42,21 @@ namespace Pdo {
          * omitted column is filled with its DEFAULT, or NULL.
          */
         public function duckdbAppender(string $table, ?string $schema = null, ?array $columns = null): \Pdo\Duckdb\Appender {}
+
+        /**
+         * Return the tables a query references, using DuckDB's parser. Read
+         * queries only; DML (INSERT/UPDATE/DELETE) yields an empty array. With
+         * $qualified, a non-default schema is included (e.g. "s.orders").
+         * Throws if the query cannot be parsed.
+         */
+        public function duckdbTableNames(string $query, bool $qualified = false): array {}
+
+        /**
+         * Return the profiling tree of the last executed query as a nested
+         * array shaped ['metrics' => array<string,string>, 'children' => list],
+         * or null if profiling is not enabled. Enable it first with
+         * PRAGMA enable_profiling (the method does not execute any query).
+         */
+        public function duckdbLastProfile(): ?array {}
     }
 }
