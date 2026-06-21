@@ -55,10 +55,14 @@ EOF
 export LD_LIBRARY_PATH="$DUCKDB_PREFIX/lib:${LD_LIBRARY_PATH:-}"
 
 ext_args=()
-# setup-php builds pdo statically (no pdo.so); only add it when present as a
-# shared module. A locally-built shared pdo.so may still load RTLD_LOCAL and fail
-# pdo_dbh_new/pdo_parse_params at load — use a pdo-static PHP for local runs.
-if [ -n "$EXTDIR" ] && [ -f "$EXTDIR/pdo.so" ]; then
+# Add pdo.so only when PDO is not already loaded by the default ini. Many
+# distro/CI PHP builds load it via php.ini/conf.d (or statically); adding it
+# again prints 'Module "PDO" is already loaded', which lands at the top of every
+# test's output and fails the whole suite on the diff. (A locally-built shared
+# pdo.so may still load RTLD_LOCAL and fail pdo_dbh_new — use a pdo-static PHP
+# locally.)
+if ! "$PHP" -m 2>/dev/null | grep -qix pdo \
+    && [ -n "$EXTDIR" ] && [ -f "$EXTDIR/pdo.so" ]; then
     ext_args+=(-d "extension=$EXTDIR/pdo.so")
 fi
 ext_args+=(-d "extension=${EXT:-$EXTDIR/pdo_duckdb.so}")
