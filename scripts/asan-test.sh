@@ -42,6 +42,10 @@ libstdcpp=$(ldd "$DUCKDB_PREFIX/lib/libduckdb.so" 2>/dev/null | awk '/libstdc\+\
 export LD_LIBRARY_PATH="$DUCKDB_PREFIX/lib:${LD_LIBRARY_PATH:-}"
 export LD_PRELOAD="$libasan${libstdcpp:+ $libstdcpp}"
 export ASAN_OPTIONS="${ASAN_OPTIONS:-detect_leaks=1:abort_on_error=1}"
+# Disable ZendMM so emalloc/efree hit the real allocator: otherwise ASan can't
+# see a use-after-efree (ZendMM pools the freed block), and such bugs slip past
+# locally only to fail in CI's USE_ZEND_ALLOC=0 ASan build.
+export USE_ZEND_ALLOC=0
 
 echo "PHP=$PHP"
 echo "LD_PRELOAD=$LD_PRELOAD"
