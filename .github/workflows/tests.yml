@@ -111,10 +111,12 @@ jobs:
           php run-tests.php --show-diff -g FAIL,BORK,LEAK,XLEAK tests/
 
       - name: PDO common tests
-        # Advisory while the cross-version expected-fail allowlist is being
-        # validated against stock setup-php builds (several error-reporting
-        # tests behave differently there than on a local debug build).
-        continue-on-error: true
+        # Only on 8.4/8.5: the suite runs clean there (the 2 DuckDB SQL-dialect
+        # fails in the allowlist). On 8.1-8.3 the older ext/pdo/tests files have
+        # poor isolation (generic table names, no --CLEAN--, unmarked XFAIL) that
+        # adds test-artifact noise against a shared DSN — not driver bugs, so not
+        # worth gating on. The PDO contract is version-stable; 8.4+8.5 cover it.
+        if: matrix.php == '8.4' || matrix.php == '8.5'
         run: |
           # Run PHP's shared ext/pdo/tests against the driver (generic PDO
           # contract: fetch modes, bound params, transactions, error modes).
