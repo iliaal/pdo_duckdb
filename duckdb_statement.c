@@ -70,8 +70,7 @@ static int pdo_duckdb_stmt_execute(pdo_stmt_t *stmt)
 		 * pulls them, so a huge SELECT isn't buffered whole. DuckDB allows only one
 		 * active streaming result per connection and it can't be mixed with other
 		 * result calls — running a second unbuffered statement before this one is
-		 * consumed surfaces DuckDB's own error. rows_changed is materialized-only,
-		 * so row_count is left unknown here. */
+		 * consumed surfaces DuckDB's own error. */
 		duckdb_pending_result pending = NULL;
 
 		if (duckdb_pending_prepared_streaming(S->prepared, &pending) != DuckDBSuccess) {
@@ -89,6 +88,10 @@ static int pdo_duckdb_stmt_execute(pdo_stmt_t *stmt)
 
 		S->has_result = true;
 		php_pdo_stmt_set_column_count(stmt, (int)duckdb_column_count(&S->result));
+		/* rows_changed is the affected-row count for DML, available on the streaming
+		 * result as metadata (it's 0 for a SELECT, matching the buffered path); the
+		 * lazy chunk stream is untouched by reading it. */
+		stmt->row_count = (zend_long)duckdb_rows_changed(&S->result);
 		return 1;
 	}
 
