@@ -51,10 +51,13 @@ In scope:
 - Type-conversion and appender bugs (`Pdo\Duckdb\Appender::appendRow()`
   and the DuckDB-value-to-PHP marshaling) when a result or bound
   parameter declares unusual types, widths, or NULL patterns.
-- `open_basedir` bypasses. The driver enforces `open_basedir` to gate
-  DuckDB's local file access and external-file loading; a bypass that
-  lets a `duckdb:` DSN or config option reach files outside the allowed
-  paths is in scope.
+- `open_basedir` bypasses. On the database file, the driver runs the
+  `duckdb:` DSN path through `php_check_open_basedir()` before opening
+  it. When `open_basedir` is set, it also disables DuckDB's external
+  file access wholesale (`enable_external_access=false`), so SQL-level
+  reads such as `read_csv`, `COPY`, `ATTACH`, and extension loading are
+  blocked entirely, including for paths inside `open_basedir`. A bypass
+  of either gate is in scope.
 - Parameter-binding flaws that break the prepared-statement boundary (a
   bound value altering statement structure).
 - Arginfo / ZPP mismatches that cause undefined behavior reachable from
