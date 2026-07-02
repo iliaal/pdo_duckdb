@@ -396,7 +396,7 @@ static bool pdo_duckdb_set_one_config(duckdb_config *config, const char *key, co
 		duckdb_destroy_config(config);
 		*config = NULL;
 		zend_throw_exception_ex(php_pdo_get_exception(), 0,
-			"Invalid DuckDB configuration option \"%s\" (value \"%s\")", key, value);
+			"Invalid DuckDB configuration option \"%s\"", key);
 		return false;
 	}
 	return true;
@@ -446,12 +446,12 @@ static bool pdo_duckdb_build_config(pdo_dbh_t *dbh, const char *dsn_opts,
 			} else if (*pair) {
 				/* a non-empty segment without '=' is malformed; a valid option may
 				 * already have allocated config, so destroy it before bailing.
-				 * Throw before freeing `copy`: `pair` points into it. */
+				 * Do not echo the raw segment: DSN option tails can contain secrets. */
 				if (config) {
 					duckdb_destroy_config(&config);
 				}
 				zend_throw_exception_ex(php_pdo_get_exception(), 0,
-					"Malformed DuckDB DSN option \"%s\" (expected key=value)", pair);
+					"Malformed DuckDB DSN option (expected key=value)");
 				efree(copy);
 				return false;
 			}
@@ -526,6 +526,7 @@ static int pdo_duckdb_handle_factory(pdo_dbh_t *dbh, zval *driver_options) /* {{
 	char *path_dsn = NULL;
 	const char *dsn_opts = NULL;
 	const char *semi;
+	const char *display_source;
 	char *open_error = NULL;
 	const char *deny_reason = NULL;
 	duckdb_config config = NULL;
@@ -546,14 +547,18 @@ static int pdo_duckdb_handle_factory(pdo_dbh_t *dbh, zval *driver_options) /* {{
 		dsn_opts = semi + 1;
 	}
 
-	path = duckdb_make_path_safe(path_dsn ? path_dsn : dbh->data_source, &deny_reason);
-	if (path_dsn) {
-		efree(path_dsn);
-	}
+	display_source = path_dsn ? path_dsn : dbh->data_source;
+	path = duckdb_make_path_safe(display_source, &deny_reason);
 	if (deny_reason) {
 		zend_throw_exception_ex(php_pdo_get_exception(), 0,
-			"Cannot open DuckDB database %s: %s", dbh->data_source, deny_reason);
+			"Cannot open DuckDB database %s: %s", display_source, deny_reason);
+		if (path_dsn) {
+			efree(path_dsn);
+		}
 		goto cleanup;
+	}
+	if (path_dsn) {
+		efree(path_dsn);
 	}
 
 	/* Build the open-time config from user DSN/attr options plus the open_basedir
