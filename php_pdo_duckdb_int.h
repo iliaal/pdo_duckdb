@@ -82,6 +82,12 @@ typedef struct {
 	idx_t cur;					/* current row within the chunk (valid after a fetch) */
 	bool started;				/* has the first chunk been fetched? */
 	bool done;					/* all chunks consumed */
+	/* Per-execute latch. DuckDB keeps prepared-statement bindings across
+	 * executes, so re-executing with fewer params would silently reuse the
+	 * previous values. Cleared once per execute round — on the first EXEC_PRE
+	 * bind, or in the executer when no param was bound (execute([])) — so a
+	 * now-missing param surfaces instead of a stale value. */
+	bool binds_cleared;
 } pdo_duckdb_stmt;
 
 extern const pdo_driver_t pdo_duckdb_driver;

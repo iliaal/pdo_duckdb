@@ -71,6 +71,14 @@ static int pdo_duckdb_stmt_execute(pdo_stmt_t *stmt)
 		return 0;
 	}
 
+	/* If no parameter was bound this round (execute([]) or a params-less
+	 * re-execute), the first-EXEC_PRE clear never ran, so drop any bindings left
+	 * from a prior execute here. Then arm the latch for the next round. */
+	if (!S->binds_cleared) {
+		duckdb_clear_bindings(S->prepared);
+	}
+	S->binds_cleared = false;
+
 	if (S->H->unbuffered) {
 		/* Opt-in streaming (PDO::DUCKDB_ATTR_UNBUFFERED): the pending-result API
 		 * yields a streaming result that produces chunks lazily as fetch_chunk()
@@ -756,6 +764,14 @@ static int pdo_duckdb_stmt_param_hook(pdo_stmt_t *stmt, struct pdo_bound_param_d
 		pdo_duckdb_error_stmt(stmt, "Cannot bind a parameter without a position");
 		return 0;
 	}
+
+	/* First bind of this execute round: clear the bindings DuckDB kept from the
+	 * previous execute so a param omitted this time isn't reused stale. */
+	if (!S->binds_cleared) {
+		duckdb_clear_bindings(S->prepared);
+		S->binds_cleared = true;
+	}
+
 	idx = (idx_t)(param->paramno + 1);
 
 	if (Z_ISREF(param->parameter)) {
