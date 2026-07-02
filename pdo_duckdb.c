@@ -68,7 +68,14 @@ PHP_MINIT_FUNCTION(pdo_duckdb)
 	zend_declare_class_constant_long(pdo_ce,
 		ZEND_STRL("DUCKDB_ATTR_UNBUFFERED"), PDO_DUCKDB_ATTR_UNBUFFERED);
 
-	return pdo_duckdb_appender_minit();
+	if (pdo_duckdb_appender_minit() == FAILURE) {
+		/* Don't leave a half-initialized module: PDO would keep a "duckdb" driver
+		 * entry for a module that reported startup FAILURE. */
+		php_pdo_unregister_driver(&pdo_duckdb_driver);
+		return FAILURE;
+	}
+
+	return SUCCESS;
 }
 /* }}} */
 

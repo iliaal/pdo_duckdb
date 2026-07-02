@@ -490,6 +490,18 @@ static bool pdo_duckdb_build_config(pdo_dbh_t *dbh, const char *dsn_opts,
 				}
 				ZVAL_DEREF(val);
 				sval = zval_get_string(val);
+				/* duckdb_set_config() takes NUL-terminated strings; an embedded NUL
+				 * in the option name or value would be silently truncated, applying
+				 * a different (possibly security-relevant) option than requested. */
+				if (zend_str_has_nul_byte(key) || zend_str_has_nul_byte(sval)) {
+					zend_string_release(sval);
+					if (config) {
+						duckdb_destroy_config(&config);
+					}
+					zend_throw_exception_ex(php_pdo_get_exception(), 0,
+						"PDO::DUCKDB_ATTR_CONFIG option names and values must not contain a NUL byte");
+					return false;
+				}
 				DUCKDB_ENSURE_CONFIG();
 				if (!pdo_duckdb_set_one_config(&config, ZSTR_VAL(key), ZSTR_VAL(sval))) {
 					zend_string_release(sval);
