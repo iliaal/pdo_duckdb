@@ -27,6 +27,8 @@ PHP="${PHP:?set PHP to an ASan-built php binary}"
 RUN_TESTS="${RUN_TESTS:?set RUN_TESTS to a run-tests.php path}"
 DUCKDB_PREFIX="${DUCKDB_PREFIX:-$HOME/duckdb}"
 EXT="${EXT:-$(pwd)/modules/pdo_duckdb.so}"
+EXT_DIR="$(cd "$(dirname "$EXT")" && pwd -P)"
+EXT="$EXT_DIR/$(basename "$EXT")"
 
 libasan=$(ldd "$PHP" | awk '/libasan/ {print $3; exit}')
 if [ -z "$libasan" ]; then
@@ -56,4 +58,5 @@ echo "LD_PRELOAD=$LD_PRELOAD"
 echo "ASAN_OPTIONS=$ASAN_OPTIONS"
 
 # pdo_duckdb may be built into PHP or loaded as a shared module from EXT.
+export TEST_PHP_ARGS="-d extension_dir=$EXT_DIR${TEST_PHP_ARGS:+ $TEST_PHP_ARGS}"
 TEST_PHP_EXECUTABLE="$PHP" "$PHP" -d extension="$EXT" "$RUN_TESTS" -p "$PHP" tests/

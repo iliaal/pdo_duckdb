@@ -269,6 +269,40 @@ static pdo_duckdb_appender *pdo_duckdb_appender_live(zval *zthis)
 	return a;
 }
 
+static bool pdo_duckdb_validate_integer_range(zend_long l, duckdb_type tid, uint32_t argpos)
+{
+	switch (tid) {
+		case DUCKDB_TYPE_TINYINT:
+			if (l >= INT8_MIN && l <= INT8_MAX) { return true; }
+			break;
+		case DUCKDB_TYPE_SMALLINT:
+			if (l >= INT16_MIN && l <= INT16_MAX) { return true; }
+			break;
+		case DUCKDB_TYPE_INTEGER:
+			if (l >= INT32_MIN && l <= INT32_MAX) { return true; }
+			break;
+		case DUCKDB_TYPE_UTINYINT:
+			if (l >= 0 && l <= UINT8_MAX) { return true; }
+			break;
+		case DUCKDB_TYPE_USMALLINT:
+			if (l >= 0 && l <= UINT16_MAX) { return true; }
+			break;
+		case DUCKDB_TYPE_UINTEGER:
+			if (l >= 0 && (uint64_t)l <= UINT32_MAX) { return true; }
+			break;
+		case DUCKDB_TYPE_UBIGINT:
+		case DUCKDB_TYPE_UHUGEINT:
+			if (l >= 0) { return true; }
+			break;
+		default:
+			return true;
+	}
+
+	zend_value_error("Pdo\\Duckdb\\Appender::appendRow(): argument #%u integer "
+		ZEND_LONG_FMT " is out of range for the target column type", argpos, l);
+	return false;
+}
+
 /* Build a scalar leaf duckdb_value from a PHP scalar, targeting type `tid`.
  * Integer leaves are built at the column's exact width (range-checked, since
  * unlike the direct scalar append path DuckDB does not validate the cast for a
@@ -294,29 +328,18 @@ static duckdb_value pdo_duckdb_make_leaf(zval *z, duckdb_type tid, uint32_t argp
 				: duckdb_create_varchar_length(Z_STRVAL_P(z), (idx_t)Z_STRLEN_P(z));
 		case IS_LONG: {
 			zend_long l = Z_LVAL_P(z);
+			if (!pdo_duckdb_validate_integer_range(l, tid, argpos)) {
+				return NULL;
+			}
 			switch (tid) {
 				case DUCKDB_TYPE_BOOLEAN:   return duckdb_create_bool(l != 0);
-				case DUCKDB_TYPE_TINYINT:
-					if (l < INT8_MIN || l > INT8_MAX) break;
-					return duckdb_create_int8((int8_t)l);
-				case DUCKDB_TYPE_SMALLINT:
-					if (l < INT16_MIN || l > INT16_MAX) break;
-					return duckdb_create_int16((int16_t)l);
-				case DUCKDB_TYPE_INTEGER:
-					if (l < INT32_MIN || l > INT32_MAX) break;
-					return duckdb_create_int32((int32_t)l);
-				case DUCKDB_TYPE_UTINYINT:
-					if (l < 0 || l > UINT8_MAX) break;
-					return duckdb_create_uint8((uint8_t)l);
-				case DUCKDB_TYPE_USMALLINT:
-					if (l < 0 || l > UINT16_MAX) break;
-					return duckdb_create_uint16((uint16_t)l);
-				case DUCKDB_TYPE_UINTEGER:
-					if (l < 0 || (uint64_t)l > UINT32_MAX) break;
-					return duckdb_create_uint32((uint32_t)l);
-				case DUCKDB_TYPE_UBIGINT:
-					if (l < 0) break;
-					return duckdb_create_uint64((uint64_t)l);
+				case DUCKDB_TYPE_TINYINT:   return duckdb_create_int8((int8_t)l);
+				case DUCKDB_TYPE_SMALLINT:  return duckdb_create_int16((int16_t)l);
+				case DUCKDB_TYPE_INTEGER:   return duckdb_create_int32((int32_t)l);
+				case DUCKDB_TYPE_UTINYINT:  return duckdb_create_uint8((uint8_t)l);
+				case DUCKDB_TYPE_USMALLINT: return duckdb_create_uint16((uint16_t)l);
+				case DUCKDB_TYPE_UINTEGER:  return duckdb_create_uint32((uint32_t)l);
+				case DUCKDB_TYPE_UBIGINT:   return duckdb_create_uint64((uint64_t)l);
 				case DUCKDB_TYPE_FLOAT:     return duckdb_create_float((float)l);
 				case DUCKDB_TYPE_DOUBLE:    return duckdb_create_double((double)l);
 				case DUCKDB_TYPE_HUGEINT: {
@@ -327,17 +350,12 @@ static duckdb_value pdo_duckdb_make_leaf(zval *z, duckdb_type tid, uint32_t argp
 				}
 				case DUCKDB_TYPE_UHUGEINT: {
 					duckdb_uhugeint h;
-					if (l < 0) break;
 					h.lower = (uint64_t)l;
 					h.upper = 0;
 					return duckdb_create_uhugeint(h);
 				}
 				default:                    return duckdb_create_int64((int64_t)l);
 			}
-			/* reached only via break from an out-of-range narrow/unsigned case */
-			zend_value_error("Pdo\\Duckdb\\Appender::appendRow(): argument #%u integer "
-				ZEND_LONG_FMT " is out of range for the target column type", argpos, l);
-			return NULL;
 		}
 		default:
 			return NULL;
@@ -577,6 +595,10 @@ ZEND_METHOD(Pdo_Duckdb_Appender, appendRow)
 					ctid == DUCKDB_TYPE_STRUCT || ctid == DUCKDB_TYPE_MAP) {
 					zend_type_error("Pdo\\Duckdb\\Appender::appendRow(): argument #%u expects an array for a nested column",
 						i + 1);
+					goto build_failed;
+				}
+				if (Z_TYPE_P(v) == IS_LONG &&
+					!pdo_duckdb_validate_integer_range(Z_LVAL_P(v), ctid, i + 1)) {
 					goto build_failed;
 				}
 				break;

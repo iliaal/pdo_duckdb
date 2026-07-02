@@ -38,6 +38,13 @@ static void pdo_duckdb_stmt_reset_result(pdo_duckdb_stmt *S)
 	S->done = false;
 }
 
+static zend_long pdo_duckdb_stmt_rows_changed(duckdb_result *result)
+{
+	return duckdb_result_return_type(*result) == DUCKDB_RESULT_TYPE_CHANGED_ROWS
+		? (zend_long)duckdb_rows_changed(result)
+		: 0;
+}
+
 static int pdo_duckdb_stmt_dtor(pdo_stmt_t *stmt)
 {
 	pdo_duckdb_stmt *S = (pdo_duckdb_stmt *)stmt->driver_data;
@@ -88,10 +95,7 @@ static int pdo_duckdb_stmt_execute(pdo_stmt_t *stmt)
 
 		S->has_result = true;
 		php_pdo_stmt_set_column_count(stmt, (int)duckdb_column_count(&S->result));
-		/* rows_changed is the affected-row count for DML, available on the streaming
-		 * result as metadata (it's 0 for a SELECT, matching the buffered path); the
-		 * lazy chunk stream is untouched by reading it. */
-		stmt->row_count = (zend_long)duckdb_rows_changed(&S->result);
+		stmt->row_count = pdo_duckdb_stmt_rows_changed(&S->result);
 		return 1;
 	}
 
@@ -107,7 +111,7 @@ static int pdo_duckdb_stmt_execute(pdo_stmt_t *stmt)
 
 	S->has_result = true;
 	php_pdo_stmt_set_column_count(stmt, (int)duckdb_column_count(&S->result));
-	stmt->row_count = (zend_long)duckdb_rows_changed(&S->result);
+	stmt->row_count = pdo_duckdb_stmt_rows_changed(&S->result);
 
 	return 1;
 }
