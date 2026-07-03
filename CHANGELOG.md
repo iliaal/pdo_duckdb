@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-07-03
+
+### Fixed
+- Reject embedded NUL bytes in `PDO::DUCKDB_ATTR_CONFIG` option names and values,
+  which previously truncated silently and could apply an unintended option.
+- Clear DuckDB prepared-statement bindings once per `execute()`, so re-running with
+  fewer parameters reports the missing parameter instead of reusing a stale value.
+- Unregister the PDO driver in MINIT when appender initialization fails, instead
+  of leaving a half-registered `duckdb` driver.
+- Report `rowCount()` as 0 for a non-DML statement in unbuffered mode instead of
+  reading `rows_changed` on a streaming SELECT result.
+- Prevalidate scalar integer ranges in the appender so an out-of-range value is
+  rejected before it poisons the native appender state.
+
+### Security
+- Redact DSN and config values from all connection-error messages, so secrets in
+  the DSN tail or `PDO::DUCKDB_ATTR_CONFIG` no longer leak into exception text.
+
+### Performance
+- Cache result column types and add a stack-buffer fast path for string-rendered
+  types (HUGEINT, DECIMAL, UUID, DATE/TIME/TIMESTAMP, ENUM), cutting per-cell
+  allocations (~3.6x faster conversion of large results of these types). The
+  appender also skips a per-cell type-id lookup.
+
 ## [0.4.0] - 2026-06-21
 
 ### Added
@@ -102,7 +126,8 @@ Initial release. A PDO driver for DuckDB.
   table/schema names are rejected, rather than silently truncating the statement
   or identifier at the NUL.
 
-[Unreleased]: https://github.com/iliaal/pdo_duckdb/compare/0.4.0...HEAD
+[Unreleased]: https://github.com/iliaal/pdo_duckdb/compare/0.4.1...HEAD
+[0.4.1]: https://github.com/iliaal/pdo_duckdb/releases/tag/0.4.1
 [0.4.0]: https://github.com/iliaal/pdo_duckdb/releases/tag/0.4.0
 [0.3.0]: https://github.com/iliaal/pdo_duckdb/releases/tag/0.3.0
 [0.2.1]: https://github.com/iliaal/pdo_duckdb/releases/tag/0.2.1
