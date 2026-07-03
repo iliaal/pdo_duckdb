@@ -431,24 +431,6 @@ static bool pdo_duckdb_fast_col_to_string(duckdb_type tid, duckdb_logical_type l
 	size_t len;
 
 	switch (tid) {
-		case DUCKDB_TYPE_BIGINT: {
-			char tmp[32];
-			int n = snprintf(tmp, sizeof(tmp), "%" PRId64, ((int64_t *)data)[row]);
-			if (n < 0 || n >= (int)sizeof(tmp)) {
-				return false;
-			}
-			ZVAL_STRINGL(result, tmp, (size_t)n);
-			return true;
-		}
-		case DUCKDB_TYPE_UINTEGER: {
-			char tmp[16];
-			int n = snprintf(tmp, sizeof(tmp), "%" PRIu32, ((uint32_t *)data)[row]);
-			if (n < 0 || n >= (int)sizeof(tmp)) {
-				return false;
-			}
-			ZVAL_STRINGL(result, tmp, (size_t)n);
-			return true;
-		}
 		case DUCKDB_TYPE_UBIGINT: {
 			char tmp[32];
 			int n = snprintf(tmp, sizeof(tmp), "%" PRIu64, ((uint64_t *)data)[row]);
