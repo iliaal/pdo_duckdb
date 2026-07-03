@@ -80,6 +80,9 @@ typedef struct {
 	duckdb_data_chunk chunk;	/* current chunk, NULL when none is loaded */
 	idx_t chunk_size;			/* rows in the current chunk */
 	idx_t cur;					/* current row within the chunk (valid after a fetch) */
+	idx_t col_count;			/* cached result column count */
+	duckdb_type *col_types;		/* cached result column type ids */
+	duckdb_logical_type *col_logical_types; /* cached result logical types */
 	bool started;				/* has the first chunk been fetched? */
 	bool done;					/* all chunks consumed */
 	/* Per-execute latch. DuckDB keeps prepared-statement bindings across
@@ -99,9 +102,11 @@ typedef struct {
 	bool closed;
 	idx_t ncols;					/* appender target column count */
 	duckdb_logical_type *col_types;	/* per-column target logical type, owned
-									 * (NULL if ncols == 0). Used to route BLOB
-									 * strings and to build nested values from
-									 * PHP arrays. */
+										 * (NULL if ncols == 0). Used to route BLOB
+										 * strings and to build nested values from
+										 * PHP arrays. */
+	duckdb_type *col_type_ids;		/* per-column duckdb_get_type_id(col_types[i]) */
+	unsigned char *col_flags;		/* per-column fast-path flags */
 	zend_object *pdo;	/* PDO object kept alive; it owns the connection */
 	zend_object std;
 } pdo_duckdb_appender;

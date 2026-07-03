@@ -29,6 +29,9 @@ zend_class_entry *pdo_duckdb_appender_ce;
 static zend_object_handlers pdo_duckdb_appender_handlers;
 static zend_class_entry *pdo_duckdb_ce; /* the Pdo\Duckdb PDO subclass */
 
+#define PDO_DUCKDB_APPENDER_COL_NESTED 1u
+#define PDO_DUCKDB_APPENDER_COL_BLOB   2u
+
 static void pdo_duckdb_appender_throw(duckdb_appender ap, const char *what)
 {
 	duckdb_error_data ed = ap ? duckdb_appender_error_data(ap) : NULL;
@@ -52,6 +55,8 @@ static zend_object *pdo_duckdb_appender_new(zend_class_entry *ce)
 	a->closed = false;
 	a->ncols = 0;
 	a->col_types = NULL;
+	a->col_type_ids = NULL;
+	a->col_flags = NULL;
 	a->pdo = NULL;
 
 	return &a->std;
@@ -76,6 +81,14 @@ static void pdo_duckdb_appender_free(zend_object *obj)
 		}
 		efree(a->col_types);
 		a->col_types = NULL;
+	}
+	if (a->col_type_ids) {
+		efree(a->col_type_ids);
+		a->col_type_ids = NULL;
+	}
+	if (a->col_flags) {
+		efree(a->col_flags);
+		a->col_flags = NULL;
 	}
 	if (a->pdo) {
 		OBJ_RELEASE(a->pdo);
@@ -234,8 +247,20 @@ static void pdo_duckdb_appender_create_impl(INTERNAL_FUNCTION_PARAMETERS)
 	if (a->ncols) {
 		idx_t c;
 		a->col_types = emalloc(sizeof(duckdb_logical_type) * a->ncols);
+		a->col_type_ids = emalloc(sizeof(duckdb_type) * a->ncols);
+		a->col_flags = ecalloc(a->ncols, sizeof(unsigned char));
 		for (c = 0; c < a->ncols; c++) {
+			duckdb_type tid;
 			a->col_types[c] = duckdb_appender_column_type(ap, c);
+			tid = duckdb_get_type_id(a->col_types[c]);
+			a->col_type_ids[c] = tid;
+			if (tid == DUCKDB_TYPE_LIST || tid == DUCKDB_TYPE_ARRAY ||
+				tid == DUCKDB_TYPE_STRUCT || tid == DUCKDB_TYPE_MAP) {
+				a->col_flags[c] |= PDO_DUCKDB_APPENDER_COL_NESTED;
+			}
+			if (tid == DUCKDB_TYPE_BLOB) {
+				a->col_flags[c] |= PDO_DUCKDB_APPENDER_COL_BLOB;
+			}
 		}
 	}
 }
@@ -574,7 +599,7 @@ ZEND_METHOD(Pdo_Duckdb_Appender, appendRow)
 
 	/* built[i] holds a constructed duckdb_value for nested (array) cells, NULL for
 	 * scalars handled directly on the append fast path below. */
-	duckdb_value *built = argc ? ecalloc(argc, sizeof(duckdb_value)) : NULL;
+	duckdb_value *built = NULL;
 
 	for (i = 0; i < argc; i++) {
 		zval *v = &args[i];
@@ -590,9 +615,8 @@ ZEND_METHOD(Pdo_Duckdb_Appender, appendRow)
 				 * if an earlier column in the row was already appended. Reject it
 				 * up front, before anything is appended. (NULL is fine: it appends
 				 * as a NULL of any column type.) */
-				duckdb_type ctid = duckdb_get_type_id(a->col_types[i]);
-				if (ctid == DUCKDB_TYPE_LIST || ctid == DUCKDB_TYPE_ARRAY ||
-					ctid == DUCKDB_TYPE_STRUCT || ctid == DUCKDB_TYPE_MAP) {
+				duckdb_type ctid = a->col_type_ids[i];
+				if (a->col_flags[i] & PDO_DUCKDB_APPENDER_COL_NESTED) {
 					zend_type_error("Pdo\\Duckdb\\Appender::appendRow(): argument #%u expects an array for a nested column",
 						i + 1);
 					goto build_failed;
@@ -609,6 +633,9 @@ ZEND_METHOD(Pdo_Duckdb_Appender, appendRow)
 				/* nested column: build the value now; build_value throws on a
 				 * structural mismatch. Nothing has been appended yet, so the
 				 * appender is still pristine — just free what we built. */
+				if (!built) {
+					built = ecalloc(argc, sizeof(duckdb_value));
+				}
 				built[i] = pdo_duckdb_build_value(v, a->col_types[i], i + 1);
 				if (!built[i]) {
 					goto build_failed;
@@ -625,7 +652,7 @@ ZEND_METHOD(Pdo_Duckdb_Appender, appendRow)
 		zval *v = &args[i];
 		duckdb_state st;
 
-		if (built[i]) {
+		if (built && built[i]) {
 			st = duckdb_append_value(a->appender, built[i]);
 		} else {
 			ZVAL_DEREF(v);
@@ -647,8 +674,7 @@ ZEND_METHOD(Pdo_Duckdb_Appender, appendRow)
 					/* IS_STRING. A PHP string maps to varchar by default, but
 					 * DuckDB rejects non-UTF-8 there. If the target column is BLOB,
 					 * append raw bytes so binary data round-trips. */
-					bool is_blob = duckdb_get_type_id(a->col_types[i]) == DUCKDB_TYPE_BLOB;
-					st = is_blob
+					st = (a->col_flags[i] & PDO_DUCKDB_APPENDER_COL_BLOB)
 						? duckdb_append_blob(a->appender, Z_STRVAL_P(v), (idx_t)Z_STRLEN_P(v))
 						: duckdb_append_varchar_length(a->appender, Z_STRVAL_P(v), (idx_t)Z_STRLEN_P(v));
 					break;
@@ -666,7 +692,7 @@ ZEND_METHOD(Pdo_Duckdb_Appender, appendRow)
 	}
 
 	for (i = 0; i < argc; i++) {
-		if (built[i]) {
+		if (built && built[i]) {
 			duckdb_destroy_value(&built[i]);
 		}
 	}
