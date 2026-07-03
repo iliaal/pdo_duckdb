@@ -11,5 +11,5 @@ var_dump(in_array('duckdb', PDO::getAvailableDrivers(), true));
 ?>
 --EXPECT--
 bool(true)
-string(5) "0.4.0"
+string(5) "0.4.1"
 bool(true)
