@@ -31,7 +31,7 @@ namespace Pdo {
      * Driver-specific PDO subclass for DuckDB. On PHP 8.4+ a duckdb: DSN
      * yields an instance of this class (registered as the driver-specific CE),
      * so its methods do not trip the 8.5 deprecation of base-PDO driver methods.
-     * On 8.3 the same method is exposed on the base PDO object via
+     * On 8.1-8.3 the same method is exposed on the base PDO object via
      * get_driver_methods instead.
      */
     class Duckdb extends \PDO

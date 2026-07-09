@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Clear partial DuckDB parameter bindings after a failed bind round, so the next
+  `execute([])` cannot reuse values from the failed attempt.
+- Keep native error messages statement-local, so one statement's `errorInfo()`
+  is not overwritten by a later failure on another statement.
+- Apply the `open_basedir` sandbox latch before creating an appender, matching
+  the other SQL/catalog entry points.
+- Return `UNKNOWN` rather than `VARCHAR` from `getColumnMeta()` for future
+  DuckDB type ids the driver does not know yet.
+- Release unbuffered results from `closeCursor()`, allowing another statement
+  to run while a streaming result is partially consumed.
+- Surface DuckDB fetch errors that arrive when `duckdb_fetch_chunk()` returns no
+  chunk, rather than treating them as ordinary end-of-result.
+
+### Security
+- Harden the `open_basedir` DuckDB sandbox profile by rejecting path and
+  extension-loading config keys, clearing runtime path allowlists before
+  disabling external access, and locking further DuckDB configuration changes.
+- Redact raw `duckdb_open_ext()` failure details from connection exceptions, so
+  filesystem paths and OS error text from DuckDB are not exposed.
+
+### Performance
+- Add direct string renderers for `TIME_TZ`, `TIMESTAMP_TZ`, monthless
+  `INTERVAL`, and `BIT` result cells, avoiding per-cell `duckdb_value`
+  reconstruction on those scalar types.
+- Add a cached direct renderer for nested `LIST`/`ARRAY`/`STRUCT`/`MAP`/`UNION`
+  values whose leaves are safe to render without DuckDB's quoting rules
+  (booleans, integers, `DECIMAL`, `DATE`, and `UUID`). Nested string-like,
+  floating-point, and time-like leaves keep the DuckDB renderer.
+
+### Tests
+- Add regression coverage for `PDO::quote()`, sandbox config and allowlists,
+  persistent-option reuse, unbuffered cursor cleanup, appender destructor
+  warnings, statement-execute sandboxing, interleaved unbuffered streams,
+  extended scalar rendering, nested direct rendering, statement-local error
+  messages, and failed-bind cleanup.
+
 ## [0.4.1] - 2026-07-03
 
 ### Fixed

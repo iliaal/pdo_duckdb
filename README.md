@@ -85,9 +85,21 @@ $db = new PDO('duckdb::memory:', null, null, [
 ]);
 ```
 
-Any DuckDB setting name works (`access_mode`, `memory_limit`, `threads`,
-`temp_directory`, ...); an unknown option fails the connection. When
-`open_basedir` is set, external file access stays disabled whatever you pass.
+Any DuckDB setting name works (`access_mode`, `memory_limit`, `threads`, ...);
+an unknown option fails the connection. `PDO::DUCKDB_ATTR_CONFIG` is connect-time
+only and is refused with persistent handles, because PDO's persistent key does
+not include driver option arrays.
+
+Persistent connections reuse the same DuckDB connection for a matching DSN.
+DuckDB session/catalog state such as temporary tables, `SET` options, attachments,
+and `:memory:` contents can therefore survive across requests in the same PHP
+process; do not use persistence as a tenant or request isolation boundary.
+
+When `open_basedir` is set, external file access stays disabled whatever you
+pass. The driver also rejects path/security-sensitive DuckDB settings such as
+`allowed_directories`, `allowed_paths`, `temp_directory`, `extension_directory`,
+and extension auto-install/load knobs, and locks DuckDB configuration after the
+sandbox profile is applied.
 
 ## 🛠️ Bulk insert (Appender)
 
@@ -177,16 +189,26 @@ $db->exec('INSTALL httpfs; LOAD httpfs;');  // downloadable extensions
   false)` is rejected; use `beginTransaction()` for explicit transactions.
 - **`open_basedir`.** When `open_basedir` is set, DuckDB's SQL-level external
   file access (`read_csv`, `COPY`, `ATTACH`, `httpfs`, …) is disabled so the
-  sandbox holds at the SQL layer, not just for the database file path.
+  sandbox holds at the SQL layer, not just for the database file path. If
+  `open_basedir` is tightened after a handle already exists, the driver clears
+  DuckDB path allowlists before disabling external access and locks the
+  connection configuration.
 - **`lastInsertId()`** is not supported; DuckDB has no implicit rowid. Use a
   sequence and `currval()` if you need generated keys.
 - **Type mapping.** Integers up to 64-bit signed return as `int`, `FLOAT`/`DOUBLE`
   as `float`, `BLOB` as a binary string, and everything else (`VARCHAR`,
   `DATE`/`TIME`/`TIMESTAMP`, `DECIMAL`, `HUGEINT`/`UBIGINT`, nested types) as its
   canonical string form. `getColumnMeta()` reports the real DuckDB type name per
-  column, plus `precision`/`scale` for `DECIMAL`. `GEOMETRY` (from the spatial
-  extension) returns its WKB bytes as a hex string; call `ST_AsText()` in SQL if
-  you want WKT.
+  column, plus `precision`/`scale` for `DECIMAL`. Nested values with boolean,
+  integer, `DECIMAL`, `DATE`, and `UUID` leaves use a direct renderer; nested
+  values whose leaves need DuckDB's quoting rules keep DuckDB's own renderer.
+  Nested fetches intentionally return canonical strings, not PHP arrays; use SQL
+  projections such as `unnest`, `struct_extract`, or `json` when you want a
+  different PHP-facing shape.
+  `GEOMETRY` (from the spatial extension) returns its WKB bytes as a hex string;
+  call `ST_AsText()` in SQL if you want WKT. `TIMESTAMPTZ` native fetches render
+  the instant in UTC (`+00`); select `CAST(col AS VARCHAR)` if you need DuckDB's
+  session-`TimeZone` rendering.
 - **Streaming results.** By default `execute()` returns a materialized result:
   DuckDB buffers the full result set before PDO fetches, so a large `SELECT` is
   bounded by available memory. For large scans, set `PDO::DUCKDB_ATTR_UNBUFFERED`
@@ -196,8 +218,10 @@ $db->exec('INSTALL httpfs; LOAD httpfs;');  // downloadable extensions
   $db->setAttribute(PDO::DUCKDB_ATTR_UNBUFFERED, true);
   ```
 
-  DuckDB keeps one streaming result active per connection at a time, so consume a
-  statement before running the next on the same handle.
+  The driver does not add a one-active-stream guard. With the tested DuckDB C API,
+  another statement can run while an unbuffered result is partially consumed, and
+  the first result can continue afterward. Use `PDOStatement::closeCursor()` when
+  you want to release the native result early.
 
 ## Status
 

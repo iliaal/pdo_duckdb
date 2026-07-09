@@ -1,5 +1,5 @@
-/* This is a generated file, edit pdo_duckdb.stub.php instead.
- * Stub hash: a6783b337e71df7c8f81e37717088f5b59b3de95 */
+/* This is a generated file, edit the .stub.php file instead.
+ * Stub hash: 4be41ff0415f3ba413e18c3511d6254e3191ef55 */
 
 ZEND_BEGIN_ARG_INFO_EX(arginfo_class_Pdo_Duckdb_Appender___construct, 0, 0, 0)
 ZEND_END_ARG_INFO()

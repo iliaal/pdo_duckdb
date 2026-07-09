@@ -19,6 +19,7 @@
 #include "ext/standard/info.h"
 #include "ext/pdo/php_pdo.h"
 #include "ext/pdo/php_pdo_driver.h"
+#include "zend_smart_str.h"
 #include "php_pdo_duckdb.h"
 #include "php_pdo_duckdb_int.h"
 #include <inttypes.h>
@@ -28,6 +29,8 @@
 #else
 # define PDO_DUCKDB_HAVE_INT128 0
 #endif
+
+static bool pdo_duckdb_nested_col_type_fast_safe(duckdb_type tid, duckdb_logical_type lt);
 
 static void pdo_duckdb_stmt_reset_result(pdo_duckdb_stmt *S)
 {
@@ -42,6 +45,10 @@ static void pdo_duckdb_stmt_reset_result(pdo_duckdb_stmt *S)
 	if (S->col_types) {
 		efree(S->col_types);
 		S->col_types = NULL;
+	}
+	if (S->col_fast_nested) {
+		efree(S->col_fast_nested);
+		S->col_fast_nested = NULL;
 	}
 	S->col_count = 0;
 
@@ -77,9 +84,11 @@ static void pdo_duckdb_stmt_cache_columns(pdo_duckdb_stmt *S)
 
 	S->col_types = emalloc(sizeof(duckdb_type) * S->col_count);
 	S->col_logical_types = emalloc(sizeof(duckdb_logical_type) * S->col_count);
+	S->col_fast_nested = emalloc(sizeof(unsigned char) * S->col_count);
 	for (c = 0; c < S->col_count; c++) {
 		S->col_types[c] = duckdb_column_type(&S->result, c);
 		S->col_logical_types[c] = duckdb_column_logical_type(&S->result, c);
+		S->col_fast_nested[c] = pdo_duckdb_nested_col_type_fast_safe(S->col_types[c], S->col_logical_types[c]) ? 1 : 0;
 	}
 }
 
@@ -91,6 +100,10 @@ static int pdo_duckdb_stmt_dtor(pdo_stmt_t *stmt)
 	if (S->prepared) {
 		duckdb_destroy_prepare(&S->prepared);
 		S->prepared = NULL;
+	}
+	if (S->einfo.errmsg) {
+		efree(S->einfo.errmsg);
+		S->einfo.errmsg = NULL;
 	}
 	efree(S);
 	return 1;
@@ -105,7 +118,7 @@ static int pdo_duckdb_stmt_execute(pdo_stmt_t *stmt)
 	/* open_basedir may have been tightened after this statement was prepared;
 	 * apply the sandbox to the connection before re-executing. */
 	if (!pdo_duckdb_enforce_sandbox(S->H)) {
-		pdo_duckdb_error_stmt(stmt, "Unable to apply the open_basedir sandbox (enable_external_access) to DuckDB");
+		pdo_duckdb_error_stmt(stmt, "Unable to apply the open_basedir sandbox profile to DuckDB");
 		return 0;
 	}
 
@@ -425,6 +438,131 @@ static size_t pdo_duckdb_format_time_part(duckdb_time_struct ts, char *buf)
 	return pdo_duckdb_append_fraction(buf, len, ts.micros, 6);
 }
 
+static size_t pdo_duckdb_format_tz_offset(int32_t offset, char *buf)
+{
+	int64_t off = offset;
+	char sign = '+';
+	int64_t hours, minutes, seconds;
+	int n;
+
+	if (off < 0) {
+		sign = '-';
+		off = -off;
+	}
+
+	hours = off / 3600;
+	minutes = (off % 3600) / 60;
+	seconds = off % 60;
+	if (seconds) {
+		n = snprintf(buf, 16, "%c%02" PRId64 ":%02" PRId64 ":%02" PRId64, sign, hours, minutes, seconds);
+	} else if (minutes) {
+		n = snprintf(buf, 16, "%c%02" PRId64 ":%02" PRId64, sign, hours, minutes);
+	} else {
+		n = snprintf(buf, 16, "%c%02" PRId64, sign, hours);
+	}
+	return (n > 0 && n < 16) ? (size_t)n : 0;
+}
+
+static uint64_t pdo_duckdb_abs_i64(int64_t v)
+{
+	return v < 0 ? ((uint64_t) -(v + 1)) + 1 : (uint64_t)v;
+}
+
+static size_t pdo_duckdb_format_interval_time_part(int64_t micros, char *buf)
+{
+	uint64_t abs_micros = pdo_duckdb_abs_i64(micros);
+	uint64_t hours = abs_micros / 3600000000ULL;
+	uint64_t minutes, seconds, frac;
+	size_t pos = 0;
+	int n;
+
+	abs_micros %= 3600000000ULL;
+	minutes = abs_micros / 60000000ULL;
+	abs_micros %= 60000000ULL;
+	seconds = abs_micros / 1000000ULL;
+	frac = abs_micros % 1000000ULL;
+
+	if (micros < 0) {
+		buf[pos++] = '-';
+	}
+	n = snprintf(buf + pos, 64 - pos, "%02" PRIu64 ":%02" PRIu64 ":%02" PRIu64, hours, minutes, seconds);
+	if (n < 0 || n >= (int)(64 - pos)) {
+		return 0;
+	}
+	pos += (size_t)n;
+	return pdo_duckdb_append_fraction(buf, pos, (int64_t)frac, 6);
+}
+
+static bool pdo_duckdb_interval_to_string(duckdb_interval iv, zval *result)
+{
+	char buf[96];
+	size_t len = 0;
+	int n;
+
+	if (iv.months != 0) {
+		return false;
+	}
+	if (iv.days != 0) {
+		n = snprintf(buf, sizeof(buf), "%d day%s", iv.days,
+			(iv.days == 1 || iv.days == -1) ? "" : "s");
+		if (n < 0 || n >= (int)sizeof(buf)) {
+			return false;
+		}
+		len = (size_t)n;
+		if (iv.micros != 0) {
+			size_t tlen;
+
+			buf[len++] = ' ';
+			tlen = pdo_duckdb_format_interval_time_part(iv.micros, buf + len);
+			if (tlen == 0 || len + tlen >= sizeof(buf)) {
+				return false;
+			}
+			len += tlen;
+		}
+	} else {
+		len = pdo_duckdb_format_interval_time_part(iv.micros, buf);
+		if (len == 0 || len >= sizeof(buf)) {
+			return false;
+		}
+	}
+
+	ZVAL_STRINGL(result, buf, len);
+	return true;
+}
+
+static bool pdo_duckdb_bit_to_string(duckdb_string_t s, zval *result)
+{
+	const uint8_t *raw = (const uint8_t *)duckdb_string_t_data(&s);
+	idx_t size = duckdb_string_t_length(s);
+	uint8_t padding;
+	idx_t payload_bits, bit_count, i;
+	zend_string *out;
+
+	if (size == 0) {
+		return false;
+	}
+	padding = raw[0];
+	if (padding > 7 || size - 1 > (idx_t)SIZE_MAX / 8) {
+		return false;
+	}
+	payload_bits = (size - 1) * 8;
+	if (padding > payload_bits) {
+		return false;
+	}
+	bit_count = payload_bits - padding;
+
+	out = zend_string_alloc((size_t)bit_count, 0);
+	for (i = 0; i < bit_count; i++) {
+		idx_t payload_bit = padding + i;
+		uint8_t byte = raw[1 + payload_bit / 8];
+		uint8_t mask = (uint8_t)(1u << (7 - (payload_bit % 8)));
+		ZSTR_VAL(out)[i] = (byte & mask) ? '1' : '0';
+	}
+	ZSTR_VAL(out)[bit_count] = '\0';
+	ZVAL_STR(result, out);
+	return true;
+}
+
 static bool pdo_duckdb_fast_col_to_string(duckdb_type tid, duckdb_logical_type lt, void *data, idx_t row, zval *result)
 {
 	char buf[64];
@@ -466,6 +604,18 @@ static bool pdo_duckdb_fast_col_to_string(duckdb_type tid, duckdb_logical_type l
 			len = pdo_duckdb_format_time_part(duckdb_from_time(((duckdb_time *)data)[row]), buf);
 			ZVAL_STRINGL(result, buf, len);
 			return true;
+		case DUCKDB_TYPE_TIME_TZ: {
+			duckdb_time_tz_struct ts = duckdb_from_time_tz(((duckdb_time_tz *)data)[row]);
+			size_t olen;
+
+			len = pdo_duckdb_format_time_part(ts.time, buf);
+			olen = pdo_duckdb_format_tz_offset(ts.offset, buf + len);
+			if (olen == 0 || len + olen >= sizeof(buf)) {
+				return false;
+			}
+			ZVAL_STRINGL(result, buf, len + olen);
+			return true;
+		}
 		case DUCKDB_TYPE_TIME_NS: {
 			int64_t nanos = ((int64_t *)data)[row];
 			duckdb_time_struct ts;
@@ -499,6 +649,26 @@ static bool pdo_duckdb_fast_col_to_string(duckdb_type tid, duckdb_logical_type l
 			ZVAL_STRINGL(result, buf, dlen + len);
 			return true;
 		}
+		case DUCKDB_TYPE_TIMESTAMP_TZ: {
+			duckdb_timestamp ts = ((duckdb_timestamp *)data)[row];
+			duckdb_timestamp_struct parts;
+			size_t dlen;
+
+			if (!duckdb_is_finite_timestamp(ts)) {
+				return false;
+			}
+			parts = duckdb_from_timestamp(ts);
+			if (!pdo_duckdb_format_date_part(duckdb_to_date(parts.date), buf, &dlen)) {
+				return false;
+			}
+			buf[dlen++] = ' ';
+			len = pdo_duckdb_format_time_part(parts.time, buf + dlen);
+			memcpy(buf + dlen + len, "+00", 3);
+			ZVAL_STRINGL(result, buf, dlen + len + 3);
+			return true;
+		}
+		case DUCKDB_TYPE_INTERVAL:
+			return pdo_duckdb_interval_to_string(((duckdb_interval *)data)[row], result);
 		case DUCKDB_TYPE_ENUM: {
 			uint64_t idx;
 			char *s;
@@ -535,9 +705,399 @@ static bool pdo_duckdb_fast_col_to_string(duckdb_type tid, duckdb_logical_type l
 			ZVAL_STRINGL(result, buf, 36);
 			return true;
 		}
+		case DUCKDB_TYPE_BIT:
+			return pdo_duckdb_bit_to_string(((duckdb_string_t *)data)[row], result);
 		default:
 			return false;
 	}
+}
+
+static void pdo_duckdb_smart_append_u64(smart_str *out, uint64_t value)
+{
+	char digits[40];
+	size_t len = pdo_duckdb_format_u128(0, value, digits);
+	smart_str_appendl(out, digits, len);
+}
+
+static void pdo_duckdb_smart_append_i64(smart_str *out, int64_t value)
+{
+	if (value < 0) {
+		smart_str_appendc(out, '-');
+		pdo_duckdb_smart_append_u64(out, pdo_duckdb_abs_i64(value));
+	} else {
+		pdo_duckdb_smart_append_u64(out, (uint64_t)value);
+	}
+}
+
+static bool pdo_duckdb_smart_append_fast_scalar(duckdb_type tid, duckdb_logical_type lt, void *data, idx_t row, smart_str *out)
+{
+	zval tmp;
+
+	switch (tid) {
+		case DUCKDB_TYPE_SQLNULL:
+			smart_str_appends(out, "NULL");
+			return true;
+		case DUCKDB_TYPE_BOOLEAN:
+			smart_str_appends(out, ((bool *)data)[row] ? "true" : "false");
+			return true;
+		case DUCKDB_TYPE_TINYINT:
+			pdo_duckdb_smart_append_i64(out, ((int8_t *)data)[row]);
+			return true;
+		case DUCKDB_TYPE_SMALLINT:
+			pdo_duckdb_smart_append_i64(out, ((int16_t *)data)[row]);
+			return true;
+		case DUCKDB_TYPE_INTEGER:
+			pdo_duckdb_smart_append_i64(out, ((int32_t *)data)[row]);
+			return true;
+		case DUCKDB_TYPE_BIGINT:
+			pdo_duckdb_smart_append_i64(out, ((int64_t *)data)[row]);
+			return true;
+		case DUCKDB_TYPE_UTINYINT:
+			pdo_duckdb_smart_append_u64(out, ((uint8_t *)data)[row]);
+			return true;
+		case DUCKDB_TYPE_USMALLINT:
+			pdo_duckdb_smart_append_u64(out, ((uint16_t *)data)[row]);
+			return true;
+		case DUCKDB_TYPE_UINTEGER:
+			pdo_duckdb_smart_append_u64(out, ((uint32_t *)data)[row]);
+			return true;
+		default:
+			break;
+	}
+
+	switch (tid) {
+		case DUCKDB_TYPE_UBIGINT:
+		case DUCKDB_TYPE_HUGEINT:
+		case DUCKDB_TYPE_UHUGEINT:
+		case DUCKDB_TYPE_DECIMAL:
+		case DUCKDB_TYPE_DATE:
+		case DUCKDB_TYPE_UUID:
+			ZVAL_UNDEF(&tmp);
+			if (!pdo_duckdb_fast_col_to_string(tid, lt, data, row, &tmp)) {
+				return false;
+			}
+			if (Z_TYPE(tmp) != IS_STRING) {
+				zval_ptr_dtor(&tmp);
+				return false;
+			}
+			smart_str_appendl(out, Z_STRVAL(tmp), Z_STRLEN(tmp));
+			zval_ptr_dtor(&tmp);
+			return true;
+		default:
+			return false;
+	}
+}
+
+static bool pdo_duckdb_struct_name_is_fast_safe(const char *name)
+{
+	const unsigned char *p = (const unsigned char *)name;
+
+	if (!name) {
+		return false;
+	}
+	while (*p) {
+		if (!((*p >= 'a' && *p <= 'z') ||
+				(*p >= 'A' && *p <= 'Z') ||
+				(*p >= '0' && *p <= '9') ||
+				*p == '_')) {
+			return false;
+		}
+		p++;
+	}
+	return true;
+}
+
+static bool pdo_duckdb_decimal_type_fast_safe(duckdb_logical_type lt)
+{
+	switch (duckdb_decimal_internal_type(lt)) {
+		case DUCKDB_TYPE_SMALLINT:
+		case DUCKDB_TYPE_INTEGER:
+		case DUCKDB_TYPE_BIGINT:
+			return true;
+		case DUCKDB_TYPE_HUGEINT:
+			return PDO_DUCKDB_HAVE_INT128;
+		default:
+			return false;
+	}
+}
+
+static bool pdo_duckdb_nested_type_fast_safe(duckdb_type tid, duckdb_logical_type lt)
+{
+	switch (tid) {
+		case DUCKDB_TYPE_LIST: {
+			duckdb_logical_type ct = duckdb_list_type_child_type(lt);
+			bool ok = pdo_duckdb_nested_type_fast_safe(duckdb_get_type_id(ct), ct);
+			duckdb_destroy_logical_type(&ct);
+			return ok;
+		}
+		case DUCKDB_TYPE_ARRAY: {
+			duckdb_logical_type ct = duckdb_array_type_child_type(lt);
+			bool ok = pdo_duckdb_nested_type_fast_safe(duckdb_get_type_id(ct), ct);
+			duckdb_destroy_logical_type(&ct);
+			return ok;
+		}
+		case DUCKDB_TYPE_STRUCT: {
+			idx_t n = duckdb_struct_type_child_count(lt);
+			idx_t i;
+			for (i = 0; i < n; i++) {
+				duckdb_logical_type ct = duckdb_struct_type_child_type(lt, i);
+				char *name = duckdb_struct_type_child_name(lt, i);
+				bool ok = pdo_duckdb_struct_name_is_fast_safe(name) &&
+					pdo_duckdb_nested_type_fast_safe(duckdb_get_type_id(ct), ct);
+				duckdb_destroy_logical_type(&ct);
+				if (name) {
+					duckdb_free(name);
+				}
+				if (!ok) {
+					return false;
+				}
+			}
+			return true;
+		}
+		case DUCKDB_TYPE_MAP: {
+			duckdb_logical_type kt = duckdb_map_type_key_type(lt);
+			duckdb_logical_type vt = duckdb_map_type_value_type(lt);
+			bool ok = pdo_duckdb_nested_type_fast_safe(duckdb_get_type_id(kt), kt) &&
+				pdo_duckdb_nested_type_fast_safe(duckdb_get_type_id(vt), vt);
+			duckdb_destroy_logical_type(&kt);
+			duckdb_destroy_logical_type(&vt);
+			return ok;
+		}
+		case DUCKDB_TYPE_UNION: {
+			idx_t n = duckdb_union_type_member_count(lt);
+			idx_t i;
+			for (i = 0; i < n; i++) {
+				duckdb_logical_type mt = duckdb_union_type_member_type(lt, i);
+				bool ok = pdo_duckdb_nested_type_fast_safe(duckdb_get_type_id(mt), mt);
+				duckdb_destroy_logical_type(&mt);
+				if (!ok) {
+					return false;
+				}
+			}
+			return true;
+		}
+		case DUCKDB_TYPE_SQLNULL:
+		case DUCKDB_TYPE_BOOLEAN:
+		case DUCKDB_TYPE_TINYINT:
+		case DUCKDB_TYPE_SMALLINT:
+		case DUCKDB_TYPE_INTEGER:
+		case DUCKDB_TYPE_BIGINT:
+		case DUCKDB_TYPE_UTINYINT:
+		case DUCKDB_TYPE_USMALLINT:
+		case DUCKDB_TYPE_UINTEGER:
+		case DUCKDB_TYPE_UBIGINT:
+		case DUCKDB_TYPE_DATE:
+		case DUCKDB_TYPE_UUID:
+			return true;
+		case DUCKDB_TYPE_DECIMAL:
+			return pdo_duckdb_decimal_type_fast_safe(lt);
+		case DUCKDB_TYPE_HUGEINT:
+		case DUCKDB_TYPE_UHUGEINT:
+			return PDO_DUCKDB_HAVE_INT128;
+		default:
+			return false;
+	}
+}
+
+static bool pdo_duckdb_nested_col_type_fast_safe(duckdb_type tid, duckdb_logical_type lt)
+{
+	switch (tid) {
+		case DUCKDB_TYPE_LIST:
+		case DUCKDB_TYPE_ARRAY:
+		case DUCKDB_TYPE_STRUCT:
+		case DUCKDB_TYPE_MAP:
+		case DUCKDB_TYPE_UNION:
+			return pdo_duckdb_nested_type_fast_safe(tid, lt);
+		default:
+			return false;
+	}
+}
+
+static bool pdo_duckdb_fast_nested_cell_to_smart_str(duckdb_vector vec, idx_t row, duckdb_logical_type lt, smart_str *out)
+{
+	duckdb_type tid = duckdb_get_type_id(lt);
+	uint64_t *validity = duckdb_vector_get_validity(vec);
+	void *data;
+
+	if (validity && !duckdb_validity_row_is_valid(validity, row)) {
+		smart_str_appends(out, "NULL");
+		return true;
+	}
+
+	data = duckdb_vector_get_data(vec);
+
+	switch (tid) {
+		case DUCKDB_TYPE_LIST: {
+			duckdb_list_entry e = ((duckdb_list_entry *)data)[row];
+			duckdb_vector child = duckdb_list_vector_get_child(vec);
+			idx_t child_size = duckdb_list_vector_get_size(vec);
+			duckdb_logical_type ct;
+			idx_t i;
+
+			if (e.offset > child_size || e.length > child_size - e.offset) {
+				return false;
+			}
+
+			ct = duckdb_list_type_child_type(lt);
+			smart_str_appendc(out, '[');
+			for (i = 0; i < e.length; i++) {
+				if (i) {
+					smart_str_appends(out, ", ");
+				}
+				if (!pdo_duckdb_fast_nested_cell_to_smart_str(child, e.offset + i, ct, out)) {
+					duckdb_destroy_logical_type(&ct);
+					return false;
+				}
+			}
+			smart_str_appendc(out, ']');
+			duckdb_destroy_logical_type(&ct);
+			return true;
+		}
+		case DUCKDB_TYPE_ARRAY: {
+			idx_t n = duckdb_array_type_array_size(lt);
+			duckdb_vector child = duckdb_array_vector_get_child(vec);
+			duckdb_logical_type ct;
+			idx_t base, i;
+
+			if (n && row > (idx_t)-1 / n) {
+				return false;
+			}
+
+			base = row * n;
+			ct = duckdb_array_type_child_type(lt);
+			smart_str_appendc(out, '[');
+			for (i = 0; i < n; i++) {
+				if (i) {
+					smart_str_appends(out, ", ");
+				}
+				if (!pdo_duckdb_fast_nested_cell_to_smart_str(child, base + i, ct, out)) {
+					duckdb_destroy_logical_type(&ct);
+					return false;
+				}
+			}
+			smart_str_appendc(out, ']');
+			duckdb_destroy_logical_type(&ct);
+			return true;
+		}
+		case DUCKDB_TYPE_STRUCT: {
+			idx_t n = duckdb_struct_type_child_count(lt);
+			idx_t i;
+
+			smart_str_appendc(out, '{');
+			for (i = 0; i < n; i++) {
+				duckdb_vector child = duckdb_struct_vector_get_child(vec, i);
+				duckdb_logical_type ct = duckdb_struct_type_child_type(lt, i);
+				char *name = duckdb_struct_type_child_name(lt, i);
+
+				if (!pdo_duckdb_struct_name_is_fast_safe(name)) {
+					duckdb_destroy_logical_type(&ct);
+					if (name) {
+						duckdb_free(name);
+					}
+					return false;
+				}
+
+				if (i) {
+					smart_str_appends(out, ", ");
+				}
+				smart_str_appendc(out, '\'');
+				smart_str_appends(out, name);
+				smart_str_appends(out, "': ");
+				if (!pdo_duckdb_fast_nested_cell_to_smart_str(child, row, ct, out)) {
+					duckdb_destroy_logical_type(&ct);
+					duckdb_free(name);
+					return false;
+				}
+				duckdb_destroy_logical_type(&ct);
+				duckdb_free(name);
+			}
+			smart_str_appendc(out, '}');
+			return true;
+		}
+		case DUCKDB_TYPE_MAP: {
+			duckdb_list_entry e = ((duckdb_list_entry *)data)[row];
+			idx_t entries_size = duckdb_list_vector_get_size(vec);
+			duckdb_vector entries, kvec, vvec;
+			duckdb_logical_type kt, vt;
+			idx_t i;
+
+			if (e.offset > entries_size || e.length > entries_size - e.offset) {
+				return false;
+			}
+
+			entries = duckdb_list_vector_get_child(vec);
+			kvec = duckdb_struct_vector_get_child(entries, 0);
+			vvec = duckdb_struct_vector_get_child(entries, 1);
+			kt = duckdb_map_type_key_type(lt);
+			vt = duckdb_map_type_value_type(lt);
+
+			smart_str_appendc(out, '{');
+			for (i = 0; i < e.length; i++) {
+				if (i) {
+					smart_str_appends(out, ", ");
+				}
+				if (!pdo_duckdb_fast_nested_cell_to_smart_str(kvec, e.offset + i, kt, out)) {
+					duckdb_destroy_logical_type(&kt);
+					duckdb_destroy_logical_type(&vt);
+					return false;
+				}
+				smart_str_appendc(out, '=');
+				if (!pdo_duckdb_fast_nested_cell_to_smart_str(vvec, e.offset + i, vt, out)) {
+					duckdb_destroy_logical_type(&kt);
+					duckdb_destroy_logical_type(&vt);
+					return false;
+				}
+			}
+			smart_str_appendc(out, '}');
+			duckdb_destroy_logical_type(&kt);
+			duckdb_destroy_logical_type(&vt);
+			return true;
+		}
+		case DUCKDB_TYPE_UNION: {
+			duckdb_vector tag_vec = duckdb_struct_vector_get_child(vec, 0);
+			void *tag_data = duckdb_vector_get_data(tag_vec);
+			idx_t tag = (idx_t)((uint8_t *)tag_data)[row];
+			duckdb_vector member_vec;
+			duckdb_logical_type mt;
+			bool ok;
+
+			if (tag >= duckdb_union_type_member_count(lt)) {
+				return false;
+			}
+
+			member_vec = duckdb_struct_vector_get_child(vec, tag + 1);
+			mt = duckdb_union_type_member_type(lt, tag);
+			ok = pdo_duckdb_fast_nested_cell_to_smart_str(member_vec, row, mt, out);
+			duckdb_destroy_logical_type(&mt);
+			return ok;
+		}
+		default:
+			return pdo_duckdb_smart_append_fast_scalar(tid, lt, data, row, out);
+	}
+}
+
+static bool pdo_duckdb_fast_nested_col_to_string(duckdb_type tid, duckdb_vector vec, idx_t row, duckdb_logical_type lt, zval *result)
+{
+	smart_str out = {0};
+
+	switch (tid) {
+		case DUCKDB_TYPE_LIST:
+		case DUCKDB_TYPE_ARRAY:
+		case DUCKDB_TYPE_STRUCT:
+		case DUCKDB_TYPE_MAP:
+		case DUCKDB_TYPE_UNION:
+			break;
+		default:
+			return false;
+	}
+
+	if (!pdo_duckdb_fast_nested_cell_to_smart_str(vec, row, lt, &out)) {
+		smart_str_free(&out);
+		return false;
+	}
+
+	ZVAL_STR(result, smart_str_extract(&out));
+	return true;
 }
 
 static duckdb_value pdo_duckdb_cell_to_value_typed(duckdb_vector vec, idx_t row, duckdb_logical_type lt, bool destroy_lt)
@@ -675,8 +1235,13 @@ static duckdb_value pdo_duckdb_cell_to_value_typed(duckdb_vector vec, idx_t row,
 			duckdb_string_t s = ((duckdb_string_t *)data)[row];
 			const uint8_t *raw = (const uint8_t *)duckdb_string_t_data(&s);
 			idx_t len = duckdb_string_t_length(s);
-			char *hex = emalloc(len * 2 + 1);
+			char *hex;
 			idx_t i;
+			if (len > ((idx_t)SIZE_MAX - 1) / 2) {
+				ret = duckdb_create_null_value();
+				break;
+			}
+			hex = emalloc((size_t)len * 2 + 1);
 			for (i = 0; i < len; i++) {
 				hex[i * 2]     = hexd[raw[i] >> 4];
 				hex[i * 2 + 1] = hexd[raw[i] & 0x0F];
@@ -851,6 +1416,12 @@ static int pdo_duckdb_stmt_fetch(pdo_stmt_t *stmt,
 		}
 		S->chunk = duckdb_fetch_chunk(S->result);
 		if (!S->chunk) {
+			const char *err = duckdb_result_error(&S->result);
+			if (err && *err) {
+				S->done = true;
+				pdo_duckdb_error_stmt(stmt, err);
+				return 0;
+			}
 			S->done = true;
 			return 0;
 		}
@@ -895,7 +1466,7 @@ static void pdo_duckdb_col_to_string(duckdb_vector vec, idx_t row, duckdb_logica
 	/* duckdb_get_varchar() on a NULL value throws a C++ InternalException that
 	 * aborts the process; guard with is_null (also covers any unhandled type
 	 * cell_to_value falls back to a NULL value for). */
-	if (duckdb_is_null_value(v)) {
+	if (!v || duckdb_is_null_value(v)) {
 		ZVAL_NULL(result);
 	} else {
 		char *s = duckdb_get_varchar(v);
@@ -979,9 +1550,11 @@ static int pdo_duckdb_stmt_get_col(
 		}
 
 		default:
-			/* UBIGINT/HUGEINT/DECIMAL/temporal/UUID/ENUM/BIT and the nested
-			 * types are returned as their canonical DuckDB string form. */
-			if (!pdo_duckdb_fast_col_to_string(tid, S->col_logical_types[colno], data, row, result)) {
+			/* Extended scalar and nested types are returned as their canonical
+			 * DuckDB string form; common scalar formats use fast renderers first. */
+			if (!(S->col_fast_nested[colno] &&
+						pdo_duckdb_fast_nested_col_to_string(tid, vec, row, S->col_logical_types[colno], result)) &&
+					!pdo_duckdb_fast_col_to_string(tid, S->col_logical_types[colno], data, row, result)) {
 				pdo_duckdb_col_to_string(vec, row, S->col_logical_types[colno], result);
 			}
 			return 1;
@@ -1033,7 +1606,7 @@ static const char *pdo_duckdb_type_name(duckdb_type t)
 		case DUCKDB_TYPE_VARIANT:      return "VARIANT";
 		case DUCKDB_TYPE_GEOMETRY:     return "GEOMETRY";
 		case DUCKDB_TYPE_SQLNULL:      return "NULL";
-		default:                       return "VARCHAR";
+		default:                       return "UNKNOWN";
 	}
 }
 
@@ -1088,6 +1661,12 @@ static int pdo_duckdb_stmt_col_meta(pdo_stmt_t *stmt, zend_long colno, zval *ret
 	return SUCCESS;
 }
 
+static int pdo_duckdb_stmt_bind_failure(pdo_duckdb_stmt *S)
+{
+	S->binds_cleared = false;
+	return 0;
+}
+
 static int pdo_duckdb_stmt_param_hook(pdo_stmt_t *stmt, struct pdo_bound_param_data *param,
 		enum pdo_param_event event_type)
 {
@@ -1123,7 +1702,7 @@ static int pdo_duckdb_stmt_param_hook(pdo_stmt_t *stmt, struct pdo_bound_param_d
 
 	if (param->paramno < 0) {
 		pdo_duckdb_error_stmt(stmt, "Cannot bind a parameter without a position");
-		return 0;
+		return pdo_duckdb_stmt_bind_failure(S);
 	}
 
 	/* First bind of this execute round: clear the bindings DuckDB kept from the
@@ -1143,14 +1722,14 @@ static int pdo_duckdb_stmt_param_hook(pdo_stmt_t *stmt, struct pdo_bound_param_d
 
 	switch (PDO_PARAM_TYPE(param->param_type)) {
 		case PDO_PARAM_STMT:
-			return 0;
+			return pdo_duckdb_stmt_bind_failure(S);
 
 		case PDO_PARAM_NULL:
 			if (duckdb_bind_null(S->prepared, idx) == DuckDBSuccess) {
 				return 1;
 			}
 			pdo_duckdb_error_stmt(stmt, "Failed to bind NULL parameter");
-			return 0;
+			return pdo_duckdb_stmt_bind_failure(S);
 
 		case PDO_PARAM_INT:
 		case PDO_PARAM_BOOL:
@@ -1169,7 +1748,7 @@ static int pdo_duckdb_stmt_param_hook(pdo_stmt_t *stmt, struct pdo_bound_param_d
 				}
 			}
 			pdo_duckdb_error_stmt(stmt, "Failed to bind integer parameter");
-			return 0;
+			return pdo_duckdb_stmt_bind_failure(S);
 
 		case PDO_PARAM_LOB:
 			if (Z_TYPE_P(parameter) == IS_RESOURCE) {
@@ -1181,23 +1760,23 @@ static int pdo_duckdb_stmt_param_hook(pdo_stmt_t *stmt, struct pdo_bound_param_d
 					ZVAL_STR(parameter, mem ? mem : ZSTR_EMPTY_ALLOC());
 				} else {
 					pdo_raise_impl_error(stmt->dbh, stmt, "HY105", "Expected a stream resource");
-					return 0;
+					return pdo_duckdb_stmt_bind_failure(S);
 				}
 			} else if (Z_TYPE_P(parameter) == IS_NULL) {
 				if (duckdb_bind_null(S->prepared, idx) == DuckDBSuccess) {
 					return 1;
 				}
 				pdo_duckdb_error_stmt(stmt, "Failed to bind NULL parameter");
-				return 0;
+				return pdo_duckdb_stmt_bind_failure(S);
 			} else if (!try_convert_to_string(parameter)) {
-				return 0;
+				return pdo_duckdb_stmt_bind_failure(S);
 			}
 
 			if (duckdb_bind_blob(S->prepared, idx, Z_STRVAL_P(parameter), (idx_t)Z_STRLEN_P(parameter)) == DuckDBSuccess) {
 				return 1;
 			}
 			pdo_duckdb_error_stmt(stmt, "Failed to bind blob parameter");
-			return 0;
+			return pdo_duckdb_stmt_bind_failure(S);
 
 		case PDO_PARAM_STR:
 		default:
@@ -1207,15 +1786,23 @@ static int pdo_duckdb_stmt_param_hook(pdo_stmt_t *stmt, struct pdo_bound_param_d
 				}
 			} else {
 				if (!try_convert_to_string(parameter)) {
-					return 0;
+					return pdo_duckdb_stmt_bind_failure(S);
 				}
 				if (duckdb_bind_varchar_length(S->prepared, idx, Z_STRVAL_P(parameter), (idx_t)Z_STRLEN_P(parameter)) == DuckDBSuccess) {
 					return 1;
 				}
 			}
 			pdo_duckdb_error_stmt(stmt, "Failed to bind string parameter");
-			return 0;
+			return pdo_duckdb_stmt_bind_failure(S);
 	}
+}
+
+static int pdo_duckdb_stmt_cursor_closer(pdo_stmt_t *stmt)
+{
+	pdo_duckdb_stmt *S = (pdo_duckdb_stmt *)stmt->driver_data;
+
+	pdo_duckdb_stmt_reset_result(S);
+	return 1;
 }
 
 const struct pdo_stmt_methods duckdb_stmt_methods = {
@@ -1226,4 +1813,5 @@ const struct pdo_stmt_methods duckdb_stmt_methods = {
 	.get_col = pdo_duckdb_stmt_get_col,
 	.param_hook = pdo_duckdb_stmt_param_hook,
 	.get_column_meta = pdo_duckdb_stmt_col_meta,
+	.cursor_closer = pdo_duckdb_stmt_cursor_closer,
 };

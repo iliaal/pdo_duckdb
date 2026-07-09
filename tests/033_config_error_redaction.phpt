@@ -42,6 +42,18 @@ try {
     echo 'array option names key: ', str_contains($e->getMessage(), 'threads') ? 'yes' : 'no', "\n";
     echo 'array option hides value: ', str_contains($e->getMessage(), $secret) ? 'no' : 'yes', "\n";
 }
+
+$dir = __DIR__ . '/open_error_' . $secret;
+mkdir($dir);
+try {
+    new PDO('duckdb:' . $dir);
+    echo "BAD: directory path accepted as database\n";
+} catch (PDOException $e) {
+    echo 'open failure generic: ', str_contains($e->getMessage(), 'Unable to open DuckDB database') ? 'yes' : 'no', "\n";
+    echo 'open failure hides path: ', str_contains($e->getMessage(), $secret) ? 'no' : 'yes', "\n";
+} finally {
+    rmdir($dir);
+}
 ?>
 --EXPECT--
 invalid DSN option names key: yes
@@ -52,3 +64,5 @@ open_basedir mentions path: yes
 open_basedir hides DSN tail: yes
 array option names key: yes
 array option hides value: yes
+open failure generic: yes
+open failure hides path: yes

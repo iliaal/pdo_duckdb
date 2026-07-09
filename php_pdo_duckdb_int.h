@@ -60,19 +60,24 @@ typedef struct {
 	duckdb_database db;
 	duckdb_connection conn;
 	pdo_duckdb_error_info einfo;
-	/* Whether this handle was opened with DuckDB external access disabled
-	 * (the open_basedir SQL sandbox). Recorded so a persistent handle isn't
-	 * reused across a change in open_basedir policy — see check_liveness. */
+	/* Whether the open_basedir SQL sandbox has already been applied to this
+	 * handle. Persistent handles are escalated in place on reuse; they are not
+	 * discarded when the request policy tightens. */
 	bool external_access_disabled;
 	/* Opt-in unbuffered (streaming) result mode for statements on this handle
 	 * (PDO::DUCKDB_ATTR_UNBUFFERED). Default false = the materialized path. */
 	bool unbuffered;
+	/* PDO core re-applies constructor driver_options through set_attribute()
+	 * after handle_factory. Accept DUCKDB_ATTR_CONFIG exactly for that reapply;
+	 * later runtime calls cannot change an already-open DuckDB database. */
+	bool config_reapply_pending;
 } pdo_duckdb_db_handle;
 
 typedef struct {
 	pdo_duckdb_db_handle *H;
 	duckdb_prepared_statement prepared;
 	duckdb_result result;
+	pdo_duckdb_error_info einfo;
 	/* result holds a materialized rowset that must be destroyed */
 	bool has_result;
 	/* Result is read forward-only via the data-chunk API. We stream one chunk
@@ -83,6 +88,8 @@ typedef struct {
 	idx_t col_count;			/* cached result column count */
 	duckdb_type *col_types;		/* cached result column type ids */
 	duckdb_logical_type *col_logical_types; /* cached result logical types */
+	unsigned char *col_fast_nested; /* nested canonical strings can use the
+									 * direct renderer */
 	bool started;				/* has the first chunk been fetched? */
 	bool done;					/* all chunks consumed */
 	/* Per-execute latch. DuckDB keeps prepared-statement bindings across

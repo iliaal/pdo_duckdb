@@ -53,11 +53,13 @@ In scope:
   parameter declares unusual types, widths, or NULL patterns.
 - `open_basedir` bypasses. On the database file, the driver runs the
   `duckdb:` DSN path through `php_check_open_basedir()` before opening
-  it. When `open_basedir` is set, it also disables DuckDB's external
-  file access wholesale (`enable_external_access=false`), so SQL-level
-  reads such as `read_csv`, `COPY`, `ATTACH`, and extension loading are
-  blocked entirely, including for paths inside `open_basedir`. A bypass
-  of either gate is in scope.
+  it. When `open_basedir` is set, it applies a locked DuckDB sandbox
+  profile: external file access is disabled (`enable_external_access=false`),
+  path allowlists are rejected or cleared, extension auto-install/load is
+  disabled, and runtime configuration changes are blocked. SQL-level reads
+  such as `read_csv`, `COPY`, `ATTACH`, and extension loading are blocked
+  entirely, including for paths inside `open_basedir`. A bypass of either
+  gate is in scope.
 - Parameter-binding flaws that break the prepared-statement boundary (a
   bound value altering statement structure).
 - Arginfo / ZPP mismatches that cause undefined behavior reachable from
@@ -75,3 +77,7 @@ Out of scope:
   file access enabled, or loading a DuckDB extension, when
   `open_basedir` is not set. Treat an untrusted database file as any
   other untrusted input and constrain it at the application layer.
+- Isolation between PDO persistent handles with the same DSN. Persistence
+  reuses the DuckDB connection/session by design, so catalog state,
+  attachments, and `SET` options can survive across requests in the same
+  PHP process.

@@ -44,6 +44,18 @@ static void pdo_duckdb_appender_throw(duckdb_appender ap, const char *what)
 	}
 }
 
+static void pdo_duckdb_appender_warning(duckdb_appender ap, const char *what)
+{
+	duckdb_error_data ed = ap ? duckdb_appender_error_data(ap) : NULL;
+	const char *msg = (ed && duckdb_error_data_has_error(ed)) ? duckdb_error_data_message(ed) : NULL;
+
+	php_error_docref(NULL, E_WARNING, "%s: %s", what, msg ? msg : "unknown error");
+
+	if (ed) {
+		duckdb_destroy_error_data(&ed);
+	}
+}
+
 static zend_object *pdo_duckdb_appender_new(zend_class_entry *ce)
 {
 	pdo_duckdb_appender *a = zend_object_alloc(sizeof(pdo_duckdb_appender), ce);
@@ -67,11 +79,21 @@ static void pdo_duckdb_appender_free(zend_object *obj)
 	pdo_duckdb_appender *a = pdo_duckdb_appender_from_obj(obj);
 
 	if (a->appender) {
-		/* destroy flushes any outstanding rows; ignore errors at dtor time */
+		duckdb_state close_state = DuckDBSuccess;
+		bool was_closed = a->closed;
+		/* destroy flushes any outstanding rows; warn on errors because a caller
+		 * relying on GC instead of flush()/close() otherwise gets silent data loss. */
 		if (!a->closed) {
-			duckdb_appender_close(a->appender);
+			close_state = duckdb_appender_close(a->appender);
+			if (close_state != DuckDBSuccess) {
+				pdo_duckdb_appender_warning(a->appender,
+					"Pdo\\Duckdb\\Appender close during destruction failed");
+			}
 		}
-		duckdb_appender_destroy(&a->appender);
+		if (duckdb_appender_destroy(&a->appender) != DuckDBSuccess && !was_closed && close_state == DuckDBSuccess) {
+			php_error_docref(NULL, E_WARNING,
+				"Pdo\\Duckdb\\Appender destroy during destruction failed");
+		}
 		a->appender = NULL;
 	}
 	if (a->col_types) {
@@ -132,7 +154,7 @@ zend_result pdo_duckdb_appender_minit(void)
 	pdo_duckdb_ce->create_object = pdo_dbh_new;
 	return php_pdo_register_driver_specific_ce(&pdo_duckdb_driver, pdo_duckdb_ce);
 #else
-	/* On 8.3 the method is exposed on the base PDO object via get_driver_methods
+	/* On 8.1-8.3 the method is exposed on the base PDO object via get_driver_methods
 	 * (see below); the generated subclass registrar is unused there. */
 	(void) register_class_Pdo_Duckdb;
 	(void) pdo_duckdb_ce;
@@ -143,9 +165,9 @@ zend_result pdo_duckdb_appender_minit(void)
 const zend_function_entry *pdo_duckdb_get_driver_methods(pdo_dbh_t *dbh, int kind)
 {
 	/* Always expose the method on base-PDO instances (`new PDO('duckdb:')`),
-	 * for BC and for the 8.3 floor. On 8.4+ `PDO::connect()` additionally yields
-	 * a Pdo\Duckdb instance whose own method does not trip the 8.5 deprecation
-	 * of base-PDO driver methods. Same mechanism pdo_sqlite uses. */
+	 * for BC and for the 8.1-8.3 supported versions. On 8.4+ `PDO::connect()`
+	 * additionally yields a Pdo\Duckdb instance whose own method does not trip the
+	 * 8.5 deprecation of base-PDO driver methods. Same mechanism pdo_sqlite uses. */
 	switch (kind) {
 		case PDO_DBH_DRIVER_METHOD_KIND_DBH:
 			return class_PdoDuckDb_Ext_methods;
@@ -156,7 +178,7 @@ const zend_function_entry *pdo_duckdb_get_driver_methods(pdo_dbh_t *dbh, int kin
 
 /* {{{ duckdbAppender(string $table, ?string $schema = null): Pdo\Duckdb\Appender
  * Shared by the Pdo\Duckdb subclass method (8.4+) and the base-PDO
- * get_driver_methods vehicle (8.3). */
+ * get_driver_methods vehicle (8.1-8.3). */
 static void pdo_duckdb_appender_create_impl(INTERNAL_FUNCTION_PARAMETERS)
 {
 	zend_string *table;
@@ -177,6 +199,12 @@ static void pdo_duckdb_appender_create_impl(INTERNAL_FUNCTION_PARAMETERS)
 	dbh = Z_PDO_DBH_P(ZEND_THIS);
 	PDO_CONSTRUCT_CHECK;
 	H = (pdo_duckdb_db_handle *)dbh->driver_data;
+
+	if (!pdo_duckdb_enforce_sandbox(H)) {
+		zend_throw_exception_ex(php_pdo_get_exception(), 0,
+			"PDO::duckdbAppender(): unable to apply the open_basedir sandbox");
+		RETURN_THROWS();
+	}
 
 	/* duckdb_appender_create() takes NUL-terminated const char* identifiers, so
 	 * an embedded NUL would silently truncate the table/schema name (e.g.
