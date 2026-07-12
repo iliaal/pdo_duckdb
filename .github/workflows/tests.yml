@@ -15,8 +15,8 @@ jobs:
     name: Validate composer.json
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
-      - uses: shivammathur/setup-php@v2
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # v2
         with:
           php-version: '8.4'
           tools: composer
@@ -28,8 +28,8 @@ jobs:
     runs-on: ubuntu-latest
     needs: validate
     steps:
-      - uses: actions/checkout@v6
-      - uses: shivammathur/setup-php@v2
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # v2
         with:
           php-version: '8.4'
           tools: phpize, php-config
@@ -64,17 +64,17 @@ jobs:
         php: ['8.1', '8.2', '8.3', '8.4', '8.5']
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
 
       - name: Setup PHP
-        uses: shivammathur/setup-php@v2
+        uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # v2
         with:
           php-version: ${{ matrix.php }}
           tools: phpize, php-config
 
       - name: Cache libduckdb
         id: cache-duckdb
-        uses: actions/cache@v5
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: duckdb
           key: libduckdb-linux-amd64-${{ env.DUCKDB_VERSION }}-v1
@@ -147,7 +147,7 @@ jobs:
       USE_TRACKED_ALLOC: 1
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
 
       - name: Install dependencies
         run: sudo apt-get update && sudo apt-get install -y llvm clang re2c bison autoconf unzip
@@ -161,7 +161,7 @@ jobs:
 
       - name: Cache libduckdb
         id: cache-duckdb
-        uses: actions/cache@v5
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: duckdb
           key: libduckdb-linux-amd64-${{ env.DUCKDB_VERSION }}-v1
@@ -212,8 +212,19 @@ jobs:
           export TEST_PHP_EXECUTABLE=/tmp/php-asan/bin/php
           export TEST_PHP_ARGS="-d extension=$(pwd)/modules/pdo_duckdb.so"
           export NO_INTERACTION=1
-          /tmp/php-asan/bin/php run-tests.php --show-diff --asan -g FAIL,BORK,LEAK,XLEAK tests/ 2>&1 | tee /tmp/test-output.txt || true
-          if grep -qP 'Tests failed\s*:\s*[1-9]' /tmp/test-output.txt; then
-            echo "::error::Tests failed under ASAN"
+          set +e
+          /tmp/php-asan/bin/php run-tests.php --show-diff --asan -g FAIL,BORK,LEAK,XLEAK tests/ 2>&1 | tee /tmp/test-output.txt
+          test_status=${PIPESTATUS[0]}
+          set -e
+          if [ "$test_status" -ne 0 ]; then
+            echo "::error::run-tests.php failed under ASAN (exit $test_status)"
+            exit "$test_status"
+          fi
+          if grep -qP 'Expected leak\s*:\s*[1-9][0-9]*' /tmp/test-output.txt; then
+            echo "::error::ASAN test run contains expected leaks (XLEAK)"
+            exit 1
+          fi
+          if ! grep -qP 'Number of tests\s*:\s*[1-9][0-9]*' /tmp/test-output.txt; then
+            echo "::error::ASAN test harness did not complete a non-empty test run"
             exit 1
           fi

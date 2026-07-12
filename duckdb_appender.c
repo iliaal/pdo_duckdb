@@ -458,6 +458,13 @@ static duckdb_value pdo_duckdb_build_value(zval *z, duckdb_logical_type lt, uint
 				? duckdb_list_type_child_type(lt)
 				: duckdb_array_type_child_type(lt);
 			idx_t n = zend_hash_num_elements(ht);
+
+			if (!zend_array_is_list(ht)) {
+				zend_value_error("Pdo\\Duckdb\\Appender::appendRow(): argument #%u expects a list-shaped array",
+					argpos);
+				duckdb_destroy_logical_type(&ct);
+				return NULL;
+			}
 			/* always non-NULL (even for an empty list) — create_list_value rejects
 			 * a NULL values pointer. */
 			duckdb_value *vals = emalloc(sizeof(duckdb_value) * (n ? n : 1));
@@ -501,10 +508,17 @@ static duckdb_value pdo_duckdb_build_value(zval *z, duckdb_logical_type lt, uint
 
 		case DUCKDB_TYPE_STRUCT: {
 			idx_t cnt = duckdb_struct_type_child_count(lt);
-			duckdb_value *vals = cnt ? emalloc(sizeof(duckdb_value) * cnt) : NULL;
+			duckdb_value *vals;
 			idx_t i, built = 0;
 			duckdb_value ret = NULL;
 			bool ok = true;
+
+			if (zend_hash_num_elements(ht) != cnt) {
+				zend_value_error("Pdo\\Duckdb\\Appender::appendRow(): argument #%u expects exactly %u struct field(s), got %u",
+					argpos, (uint32_t)cnt, (uint32_t)zend_hash_num_elements(ht));
+				return NULL;
+			}
+			vals = cnt ? emalloc(sizeof(duckdb_value) * cnt) : NULL;
 
 			for (i = 0; i < cnt; i++) {
 				char *fname = duckdb_struct_type_child_name(lt, i);

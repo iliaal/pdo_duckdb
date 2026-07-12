@@ -38,7 +38,14 @@ $c->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
 echo 'threads=', $c->query("SELECT current_setting('threads')")->fetchColumn(), "\n";
 $c = null;
 
-// 3. an invalid option name fails the connection with a clear error
+// 3. the array form overrides the same option from the DSN.
+$override = new PDO('duckdb::memory:;threads=1', null, null, [
+    PDO::DUCKDB_ATTR_CONFIG => ['threads' => 3],
+]);
+echo 'overridden threads=', $override->query("SELECT current_setting('threads')")->fetchColumn(), "\n";
+$override = null;
+
+// 4. an invalid option name fails the connection with a clear error
 try {
     new PDO('duckdb::memory:;not_a_real_option=1');
     echo "bad option accepted (BUG)\n";
@@ -46,7 +53,7 @@ try {
     echo 'bad option: ', str_contains($e->getMessage(), 'not_a_real_option') ? 'named in error' : 'generic', "\n";
 }
 
-// 4. a malformed DSN segment (no '=') is rejected
+// 5. a malformed DSN segment (no '=') is rejected
 try {
     new PDO('duckdb::memory:;justakey');
     echo "malformed accepted (BUG)\n";
@@ -54,7 +61,7 @@ try {
     echo "malformed DSN rejected\n";
 }
 
-// 5. a malformed segment AFTER a valid option is also rejected (and must not leak
+// 6. a malformed segment AFTER a valid option is also rejected (and must not leak
 // the partially-built config — exercised under ASan).
 try {
     new PDO('duckdb::memory:;threads=2;justakey');
@@ -69,6 +76,7 @@ bool(true)
 read_only count=1
 read_only rejects write
 threads=2
+overridden threads=3
 bad option: named in error
 malformed DSN rejected
 malformed-after-valid rejected

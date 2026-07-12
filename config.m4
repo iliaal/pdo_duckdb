@@ -28,6 +28,7 @@ if test "$PHP_PDO_DUCKDB_STATIC" != "no"; then
   PHP_PDO_DUCKDB="yes"
   PHP_CHECK_PDO_INCLUDES
   DUCKDB_STATIC_DIR="$PHP_PDO_DUCKDB_STATIC"
+  DUCKDB_HEADER_DIR="$DUCKDB_STATIC_DIR"
 
   AC_MSG_CHECKING([for the DuckDB static-libs bundle])
   if test ! -r "$DUCKDB_STATIC_DIR/duckdb.h" || test ! -r "$DUCKDB_STATIC_DIR/libduckdb_static.a"; then
@@ -115,17 +116,25 @@ elif test "$PHP_PDO_DUCKDB" != "no"; then
     AC_MSG_ERROR([Cannot find duckdb.h. Install the DuckDB C library, or point at it with --with-pdo-duckdb=DIR])
   fi
   AC_MSG_RESULT([found in $DUCKDB_INCDIR])
+  DUCKDB_HEADER_DIR="$DUCKDB_INCDIR"
 
   PHP_ADD_INCLUDE([$DUCKDB_INCDIR])
   PHP_ADD_LIBRARY_WITH_PATH([duckdb], [$DUCKDB_DIR/$PHP_LIBDIR], [PDO_DUCKDB_SHARED_LIBADD])
 
-  PHP_CHECK_LIBRARY([duckdb], [duckdb_open],
+  PHP_CHECK_LIBRARY([duckdb], [duckdb_appender_error_data],
     [],
-    [AC_MSG_ERROR([Could not find a usable libduckdb. Check config.log for details.])],
+    [AC_MSG_ERROR([Could not find a DuckDB 1.5.3-compatible libduckdb. Check config.log for details.])],
     [-L$DUCKDB_DIR/$PHP_LIBDIR])
 fi
 
 if test "$PHP_PDO_DUCKDB" != "no"; then
+  save_CPPFLAGS="$CPPFLAGS"
+  CPPFLAGS="$CPPFLAGS -I$DUCKDB_HEADER_DIR"
+  AC_CHECK_DECLS([DUCKDB_TYPE_VARIANT], [],
+    [AC_MSG_ERROR([DuckDB 1.5.3 or newer headers are required (DUCKDB_TYPE_VARIANT is missing).])],
+    [[#include <duckdb.h>]])
+  CPPFLAGS="$save_CPPFLAGS"
+
   if test "$PHP_PDO_DUCKDB_DEV" != "no"; then
     dnl -Wno-unused-parameter: PDO's handler ABI passes context args many
     dnl handlers legitimately ignore; the warning is pure noise under -Werror.

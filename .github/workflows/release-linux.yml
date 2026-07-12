@@ -11,8 +11,9 @@ name: Release Linux & macOS binaries
 # without libduckdb on the user's loader path, and PIE prefers the prebuilt).
 # Each runner downloads DuckDB's static-libs bundle for its os/arch and the
 # build links it via config.m4's --with-pdo-duckdb-static mode. The exact
-# build + self-contained + load-and-query checks run in binary-validate.yml
-# (workflow_dispatch) as the pre-tag dry run.
+# build + self-contained + load-and-query checks run in binary-validate.yml;
+# this workflow requires that reusable validator at the release SHA before
+# uploading any binary.
 #
 # macOS Intel (macos-13) and Linux musl are intentionally absent -- those
 # users source-build via PIE's composer-default fallback. composer.json
@@ -29,8 +30,12 @@ env:
   DUCKDB_VERSION: "1.5.4"
 
 jobs:
+  validate:
+    uses: ./.github/workflows/binary-validate.yml
+
   build:
     name: ${{ matrix.os }} php ${{ matrix.php }}
+    needs: validate
     runs-on: ${{ matrix.os }}
     permissions:
       contents: write
@@ -45,10 +50,10 @@ jobs:
           - macos-14
         php: ['8.4', '8.5']
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
 
       - name: Setup PHP
-        uses: shivammathur/setup-php@v2
+        uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # v2
         with:
           php-version: ${{ matrix.php }}
           coverage: none
@@ -62,12 +67,13 @@ jobs:
             macos-14)         asset=static-libs-osx-arm64.zip ;;
             *) echo "unmapped runner ${{ matrix.os }}"; exit 1 ;;
           esac
-          curl -fsSL "https://github.com/duckdb/duckdb/releases/download/v${DUCKDB_VERSION}/${asset}" -o duckdb-static.zip
+          curl -fsSL "https://github.com/duckdb/duckdb/releases/download/v${DUCKDB_VERSION}/${asset}" -o "$asset"
+          grep "  $asset$" .github/duckdb-sha256.txt | shasum -a 256 --check --strict
           mkdir -p duckdb-static
-          unzip -o -q duckdb-static.zip -d duckdb-static
+          unzip -o -q "$asset" -d duckdb-static
 
       - name: Build and upload prebuilt binary
-        uses: php/pie-ext-binary-builder@0.0.3
+        uses: php/pie-ext-binary-builder@5298761950f63c7e9565ed7004e922b346e4386c # 0.0.3
         with:
           release-tag: ${{ github.event.release.tag_name }}
           github-token: ${{ secrets.GITHUB_TOKEN }}

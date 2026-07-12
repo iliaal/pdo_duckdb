@@ -3,17 +3,6 @@ pdo_duckdb: GEOMETRY decodes to a hex-WKB string (round-trippable)
 --EXTENSIONS--
 pdo
 pdo_duckdb
---SKIPIF--
-<?php
-if (!extension_loaded('pdo_duckdb')) die('skip pdo_duckdb not loaded');
-try {
-    $db = new PDO('duckdb::memory:');
-    $db->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
-    $db->exec('INSTALL spatial; LOAD spatial;');
-} catch (Throwable $e) {
-    die('skip spatial extension unavailable: ' . $e->getMessage());
-}
-?>
 --FILE--
 <?php
 $db = new PDO('duckdb::memory:');

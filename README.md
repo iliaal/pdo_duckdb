@@ -25,7 +25,7 @@ foreach ($stmt as $row) {
 ## Requirements
 
 - PHP 8.1 or newer with the `pdo` extension
-- For a source build only: the DuckDB C library (`libduckdb` + `duckdb.h`),
+- For a source build only: DuckDB 1.5.3 or newer (`libduckdb` + `duckdb.h`),
   available as a prebuilt bundle from the [DuckDB installation page](https://duckdb.org/docs/installation/)
   or via your package manager. Prebuilt installs (below) need nothing else.
 
@@ -99,7 +99,11 @@ When `open_basedir` is set, external file access stays disabled whatever you
 pass. The driver also rejects path/security-sensitive DuckDB settings such as
 `allowed_directories`, `allowed_paths`, `temp_directory`, `extension_directory`,
 and extension auto-install/load knobs, and locks DuckDB configuration after the
-sandbox profile is applied.
+sandbox profile is applied. The database-file path check and DuckDB's open are
+separate filesystem operations because DuckDB has no descriptor-based open API.
+For file-backed databases, keep every writable path component below trusted,
+non-writable directory ancestry so an attacker cannot replace a checked path by
+renaming a file or symlink before DuckDB opens it.
 
 ## 🛠️ Bulk insert (Appender)
 

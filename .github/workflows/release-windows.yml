@@ -6,8 +6,8 @@ name: Release Windows binaries
 # dynamic import lib (duckdb.lib) and SHIP duckdb.dll inside the asset zip. PIE
 # installs bundled dependency DLLs to the PHP root (next to php.exe, on the
 # loader path) and the extension DLL to ext\, so the dependency resolves at
-# load. The build + bundled-DLL load-and-query is dry-run in
-# binary-validate-windows.yml (workflow_dispatch).
+# load. This workflow requires binary-validate-windows.yml at the release SHA
+# before uploading the bundled-DLL artifacts.
 #
 # x64 only: DuckDB ships no 32-bit Windows lib. NTS + TS. PHP 8.4/8.5 are the
 # runtime-validated set; older PHP falls back to PIE's composer-default source
@@ -22,8 +22,12 @@ env:
   DUCKDB_VERSION: "1.5.4"
 
 jobs:
+  validate:
+    uses: ./.github/workflows/binary-validate-windows.yml
+
   build:
     name: ${{ matrix.php }} ${{ matrix.ts }} x64
+    needs: validate
     runs-on: windows-2022
     permissions:
       contents: write
@@ -33,17 +37,22 @@ jobs:
         php: ['8.4', '8.5']
         ts: ['nts', 'ts']
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
 
       - name: Download libduckdb (amd64 dynamic — duckdb.h, duckdb.lib, duckdb.dll)
         shell: pwsh
         run: |
           $url = "https://github.com/duckdb/duckdb/releases/download/v${{ env.DUCKDB_VERSION }}/libduckdb-windows-amd64.zip"
           Invoke-WebRequest -Uri $url -OutFile duckdb.zip
+          $entry = Get-Content .github\duckdb-sha256.txt | Where-Object { $_ -match '  libduckdb-windows-amd64\.zip$' }
+          if (-not $entry) { throw 'missing checksum for libduckdb-windows-amd64.zip' }
+          $expected = ($entry -split '\s+')[0]
+          $actual = (Get-FileHash duckdb.zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $expected) { throw "DuckDB checksum mismatch: expected $expected, got $actual" }
           Expand-Archive duckdb.zip -DestinationPath duckdb-deps -Force
 
       - name: Build extension DLL (MSVC, against dynamic libduckdb)
-        uses: php/php-windows-builder/extension@v1
+        uses: php/php-windows-builder/extension@e03e5d39879adaeb61ed2225f0f4eae7db8c1df8 # v1
         with:
           php-version: ${{ matrix.php }}
           arch: x64

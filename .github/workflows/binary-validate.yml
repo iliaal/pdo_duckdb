@@ -1,12 +1,12 @@
 name: Binary build validation
 
-# Dispatch-only dry run: proves the self-contained static build works on each
-# release target (Linux amd64/arm64, macOS arm64) on real runners, WITHOUT
-# publishing. The release publisher (release-linux.yml) reuses the same
-# download + static-link steps via php/pie-ext-binary-builder, so a green run
-# here is the pre-tag gate for those lanes.
+# Reusable validation gate and manual dry run: proves the self-contained static
+# build works on each release target (Linux amd64/arm64, macOS arm64) on real
+# runners without publishing. release-linux.yml requires this workflow at the
+# release SHA before it uploads binaries.
 
 on:
+  workflow_call:
   workflow_dispatch:
 
 env:
@@ -27,10 +27,10 @@ jobs:
           - { os: macos-14,         duckdb: static-libs-osx-arm64.zip,   php: '8.4' }
           - { os: macos-14,         duckdb: static-libs-osx-arm64.zip,   php: '8.5' }
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
 
       - name: Setup PHP
-        uses: shivammathur/setup-php@v2
+        uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # v2
         with:
           php-version: ${{ matrix.php }}
           coverage: none
@@ -38,9 +38,11 @@ jobs:
       - name: Download DuckDB static libs
         shell: bash
         run: |
-          curl -fsSL "https://github.com/duckdb/duckdb/releases/download/v${DUCKDB_VERSION}/${{ matrix.duckdb }}" -o duckdb-static.zip
+          asset='${{ matrix.duckdb }}'
+          curl -fsSL "https://github.com/duckdb/duckdb/releases/download/v${DUCKDB_VERSION}/$asset" -o "$asset"
+          grep "  $asset$" .github/duckdb-sha256.txt | shasum -a 256 --check --strict
           mkdir -p duckdb-static
-          unzip -o -q duckdb-static.zip -d duckdb-static
+          unzip -o -q "$asset" -d duckdb-static
           ls -la duckdb-static | head
 
       - name: Build (static, self-contained)
