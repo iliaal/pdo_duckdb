@@ -13,9 +13,13 @@ if (PHP_PDO_DUCKDB != "no") {
 	var lib_search = (PHP_PDO_DUCKDB != "yes")
 		? PHP_PDO_DUCKDB + ";" + PHP_PDO_DUCKDB + "\\lib"
 		: "";
+	var version_header_ok = (PHP_PDO_DUCKDB == "yes")
+		? CHECK_FUNC_IN_HEADER("duckdb.h", "DUCKDB_TYPE_VARIANT", null)
+		: CHECK_FUNC_IN_HEADER("duckdb.h", "DUCKDB_TYPE_VARIANT", PHP_PDO_DUCKDB) ||
+			CHECK_FUNC_IN_HEADER("duckdb.h", "DUCKDB_TYPE_VARIANT", PHP_PDO_DUCKDB + "\\include");
 
 	if (CHECK_HEADER_ADD_INCLUDE("duckdb.h", "CFLAGS_PDO_DUCKDB", header_search) &&
-		CHECK_FUNC_IN_HEADER("duckdb.h", "DUCKDB_TYPE_VARIANT", header_search) &&
+		version_header_ok &&
 		CHECK_LIB("duckdb.lib", "pdo_duckdb", lib_search)) {
 		EXTENSION("pdo_duckdb", "pdo_duckdb.c duckdb_driver.c duckdb_statement.c duckdb_appender.c");
 		ADD_EXTENSION_DEP("pdo_duckdb", "pdo");
