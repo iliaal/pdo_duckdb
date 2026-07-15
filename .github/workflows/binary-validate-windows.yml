@@ -5,8 +5,8 @@ name: Binary build validation (Windows)
 # self-contained DLL is impossible. Instead we build php_pdo_duckdb.dll against
 # DuckDB's dynamic import lib (duckdb.lib) and ship duckdb.dll alongside. PIE
 # installs bundled dependency DLLs to the PHP root (next to php.exe), which is
-# on the loader path. release-windows.yml requires this load-and-query workflow
-# at the release SHA before it uploads binaries.
+# on the loader path. The release workflow repeats this load-and-query gate on
+# each exact archive it stages.
 
 on:
   workflow_call:

@@ -8,6 +8,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- Reject callback-capable `PDO::DUCKDB_ATTR_CONFIG` values before conversion,
+  preventing Stringable reentrancy during connection setup.
+- Synchronize raw SQL transaction control with PDO state, including prepared
+  statements, partially failing multi-statements, and DuckDB's `END` / `ABORT`
+  aliases. Track transaction control wrapped by `EXPLAIN ANALYZE` explicitly
+  because DuckDB executes it while exposing only the outer `EXPLAIN` type.
+- Report non-NULL `VARIANT` fetches as unsupported instead of silently returning
+  PHP `null`; explicit SQL casts and genuine NULL cells continue to work.
+- Render 1 BC DATE/TIMESTAMP values through DuckDB's canonical formatter rather
+  than emitting the nonexistent year zero.
+- Accept PHP integer array keys for numeric STRUCT field names in Appender rows.
+- Reject unsupported scroll cursors during `prepare()` rather than on the first
+  non-forward fetch.
 - Clear partial DuckDB parameter bindings after a failed bind round, so the next
   `execute([])` cannot reuse values from the failed attempt.
 - Keep native error messages statement-local, so one statement's `errorInfo()`
@@ -27,8 +40,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   disabling external access, and locking further DuckDB configuration changes.
 - Redact raw `duckdb_open_ext()` failure details from connection exceptions, so
   filesystem paths and OS error text from DuckDB are not exposed.
+- Pass release tags and package names to Linux/macOS and Windows release scripts
+  through environment variables and validate their filename grammar, preventing
+  GitHub expression values from becoming shell or PowerShell source code.
+- Build Linux release archives inside pinned Debian 12/PHP containers and macOS
+  archives with an 11.0 deployment target, then gate the final archive's glibc
+  and Mach-O minimum versions. Stage every platform artifact before one
+  least-privilege publisher uploads the complete set.
 
 ### Performance
+- Cache nested render descriptors and STRUCT names per result column, and bypass
+  portable 128-bit division for 64-bit values.
 - Add direct string renderers for `TIME_TZ`, `TIMESTAMP_TZ`, monthless
   `INTERVAL`, and `BIT` result cells, avoiding per-cell `duckdb_value`
   reconstruction on those scalar types.
@@ -38,6 +60,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   floating-point, and time-like leaves keep the DuckDB renderer.
 
 ### Tests
+- Add CI coverage for the advertised DuckDB 1.5.3 source-build floor and
+  for the portable integer renderers without compiler `int128` support, plus
+  regression coverage for config reentrancy, raw persistent transactions,
+  transaction aliases and executing `EXPLAIN` transaction wrappers, BC temporal values,
+  top-level and nested VARIANT errors, numeric STRUCT fields, and cursor modes.
 - Add regression coverage for `PDO::quote()`, sandbox config and allowlists,
   persistent-option reuse, unbuffered cursor cleanup, appender destructor
   warnings, statement-execute sandboxing, interleaved unbuffered streams,

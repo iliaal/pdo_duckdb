@@ -19,6 +19,7 @@
 #include "ext/standard/info.h"
 #include "ext/pdo/php_pdo.h"
 #include "ext/pdo/php_pdo_driver.h"
+#include "ext/pdo/php_pdo_error.h"
 #include "zend_smart_str.h"
 #include "php_pdo_duckdb.h"
 #include "php_pdo_duckdb_int.h"
@@ -30,10 +31,20 @@
 # define PDO_DUCKDB_HAVE_INT128 0
 #endif
 
-static bool pdo_duckdb_nested_col_type_fast_safe(duckdb_type tid, duckdb_logical_type lt);
+static pdo_duckdb_nested_render_type *pdo_duckdb_nested_render_type_build(
+	duckdb_type tid, duckdb_logical_type lt, bool owns_lt);
+static void pdo_duckdb_nested_render_type_destroy(pdo_duckdb_nested_render_type *type);
 
 static void pdo_duckdb_stmt_reset_result(pdo_duckdb_stmt *S)
 {
+	if (S->col_nested_renderers) {
+		idx_t c;
+		for (c = 0; c < S->col_count; c++) {
+			pdo_duckdb_nested_render_type_destroy(S->col_nested_renderers[c]);
+		}
+		efree(S->col_nested_renderers);
+		S->col_nested_renderers = NULL;
+	}
 	if (S->col_logical_types) {
 		idx_t c;
 		for (c = 0; c < S->col_count; c++) {
@@ -45,10 +56,6 @@ static void pdo_duckdb_stmt_reset_result(pdo_duckdb_stmt *S)
 	if (S->col_types) {
 		efree(S->col_types);
 		S->col_types = NULL;
-	}
-	if (S->col_fast_nested) {
-		efree(S->col_fast_nested);
-		S->col_fast_nested = NULL;
 	}
 	S->col_count = 0;
 
@@ -84,11 +91,22 @@ static void pdo_duckdb_stmt_cache_columns(pdo_duckdb_stmt *S)
 
 	S->col_types = emalloc(sizeof(duckdb_type) * S->col_count);
 	S->col_logical_types = emalloc(sizeof(duckdb_logical_type) * S->col_count);
-	S->col_fast_nested = emalloc(sizeof(unsigned char) * S->col_count);
+	S->col_nested_renderers = ecalloc(S->col_count, sizeof(pdo_duckdb_nested_render_type *));
 	for (c = 0; c < S->col_count; c++) {
 		S->col_types[c] = duckdb_column_type(&S->result, c);
 		S->col_logical_types[c] = duckdb_column_logical_type(&S->result, c);
-		S->col_fast_nested[c] = pdo_duckdb_nested_col_type_fast_safe(S->col_types[c], S->col_logical_types[c]) ? 1 : 0;
+		switch (S->col_types[c]) {
+			case DUCKDB_TYPE_LIST:
+			case DUCKDB_TYPE_ARRAY:
+			case DUCKDB_TYPE_STRUCT:
+			case DUCKDB_TYPE_MAP:
+			case DUCKDB_TYPE_UNION:
+				S->col_nested_renderers[c] = pdo_duckdb_nested_render_type_build(
+					S->col_types[c], S->col_logical_types[c], false);
+				break;
+			default:
+				break;
+		}
 	}
 }
 
@@ -153,6 +171,11 @@ static int pdo_duckdb_stmt_execute(pdo_stmt_t *stmt)
 		duckdb_destroy_pending(&pending);
 
 		S->has_result = true;
+		if (UNEXPECTED(S->transaction_effect != PDO_DUCKDB_TRANSACTION_NONE ||
+				S->statement_type == DUCKDB_STATEMENT_TYPE_TRANSACTION)) {
+			pdo_duckdb_sync_transaction_state(stmt->dbh, S->statement_type,
+				S->transaction_effect);
+		}
 		pdo_duckdb_stmt_cache_columns(S);
 		php_pdo_stmt_set_column_count(stmt, (int)S->col_count);
 		stmt->row_count = pdo_duckdb_stmt_rows_changed(&S->result);
@@ -170,6 +193,11 @@ static int pdo_duckdb_stmt_execute(pdo_stmt_t *stmt)
 	}
 
 	S->has_result = true;
+	if (UNEXPECTED(S->transaction_effect != PDO_DUCKDB_TRANSACTION_NONE ||
+			S->statement_type == DUCKDB_STATEMENT_TYPE_TRANSACTION)) {
+		pdo_duckdb_sync_transaction_state(stmt->dbh, S->statement_type,
+			S->transaction_effect);
+	}
 	pdo_duckdb_stmt_cache_columns(S);
 	php_pdo_stmt_set_column_count(stmt, (int)S->col_count);
 	stmt->row_count = pdo_duckdb_stmt_rows_changed(&S->result);
@@ -188,7 +216,8 @@ static int pdo_duckdb_stmt_execute(pdo_stmt_t *stmt)
  * reconstruction path below is only used for the "render as string" types and
  * for recursing into nested children. */
 
-static duckdb_value pdo_duckdb_cell_to_value_typed(duckdb_vector vec, idx_t row, duckdb_logical_type lt, bool destroy_lt);
+static duckdb_value pdo_duckdb_cell_to_value_typed(duckdb_vector vec, idx_t row,
+	duckdb_logical_type lt, bool destroy_lt, bool *unsupported_variant);
 
 static duckdb_value pdo_duckdb_decimal_value(duckdb_logical_type lt, void *data, idx_t row)
 {
@@ -239,14 +268,27 @@ static duckdb_value pdo_duckdb_enum_value(duckdb_logical_type lt, void *data, id
 	return duckdb_create_enum_value(lt, idx);
 }
 
+static size_t pdo_duckdb_format_u64(uint64_t value, char *out)
+{
+	char tmp[20];
+	size_t pos = sizeof(tmp);
+
+	do {
+		tmp[--pos] = (char)('0' + (value % 10));
+		value /= 10;
+	} while (value);
+
+	memcpy(out, tmp + pos, sizeof(tmp) - pos);
+	return sizeof(tmp) - pos;
+}
+
 static size_t pdo_duckdb_format_u128(uint64_t upper, uint64_t lower, char *out)
 {
 	char tmp[40];
 	size_t pos = sizeof(tmp);
 
-	if (upper == 0 && lower == 0) {
-		out[0] = '0';
-		return 1;
+	if (upper == 0) {
+		return pdo_duckdb_format_u64(lower, out);
 	}
 
 #if PDO_DUCKDB_HAVE_INT128
@@ -341,9 +383,6 @@ static bool pdo_duckdb_decimal_from_vector(duckdb_logical_type lt, void *data, i
 			return true;
 		}
 		case DUCKDB_TYPE_HUGEINT:
-#if !PDO_DUCKDB_HAVE_INT128
-			return false;
-#endif
 			d->value = ((duckdb_hugeint *)data)[row];
 			return true;
 		default:
@@ -420,7 +459,7 @@ static bool pdo_duckdb_format_date_part(duckdb_date date, char *buf, size_t *len
 	}
 
 	ds = duckdb_from_date(date);
-	if (ds.year < 0) {
+	if (ds.year <= 0) {
 		return false;
 	}
 
@@ -578,14 +617,12 @@ static bool pdo_duckdb_fast_col_to_string(duckdb_type tid, duckdb_logical_type l
 			ZVAL_STRINGL(result, tmp, (size_t)n);
 			return true;
 		}
-#if PDO_DUCKDB_HAVE_INT128
 		case DUCKDB_TYPE_HUGEINT:
 			ZVAL_STR(result, pdo_duckdb_hugeint_to_string(((duckdb_hugeint *)data)[row]));
 			return true;
 		case DUCKDB_TYPE_UHUGEINT:
 			ZVAL_STR(result, pdo_duckdb_uhugeint_to_string(((duckdb_uhugeint *)data)[row]));
 			return true;
-#endif
 		case DUCKDB_TYPE_DECIMAL: {
 			duckdb_decimal d;
 			if (!pdo_duckdb_decimal_from_vector(lt, data, row, &d)) {
@@ -813,69 +850,130 @@ static bool pdo_duckdb_decimal_type_fast_safe(duckdb_logical_type lt)
 		case DUCKDB_TYPE_SMALLINT:
 		case DUCKDB_TYPE_INTEGER:
 		case DUCKDB_TYPE_BIGINT:
-			return true;
 		case DUCKDB_TYPE_HUGEINT:
-			return PDO_DUCKDB_HAVE_INT128;
+			return true;
 		default:
 			return false;
 	}
 }
 
-static bool pdo_duckdb_nested_type_fast_safe(duckdb_type tid, duckdb_logical_type lt)
+static void pdo_duckdb_nested_render_type_destroy(pdo_duckdb_nested_render_type *type)
 {
+	idx_t i;
+
+	if (!type) {
+		return;
+	}
+	for (i = 0; i < type->child_count; i++) {
+		pdo_duckdb_nested_render_type_destroy(type->children[i]);
+		if (type->child_names && type->child_names[i]) {
+			duckdb_free(type->child_names[i]);
+		}
+	}
+	if (type->children) {
+		efree(type->children);
+	}
+	if (type->child_names) {
+		efree(type->child_names);
+	}
+	if (type->owns_logical_type && type->logical_type) {
+		duckdb_destroy_logical_type(&type->logical_type);
+	}
+	efree(type);
+}
+
+static pdo_duckdb_nested_render_type *pdo_duckdb_nested_render_type_build(
+		duckdb_type tid, duckdb_logical_type lt, bool owns_lt)
+{
+	pdo_duckdb_nested_render_type *type = ecalloc(1, sizeof(*type));
+	idx_t i;
+
+	type->type = tid;
+	type->logical_type = lt;
+	type->owns_logical_type = owns_lt;
+
 	switch (tid) {
 		case DUCKDB_TYPE_LIST: {
-			duckdb_logical_type ct = duckdb_list_type_child_type(lt);
-			bool ok = pdo_duckdb_nested_type_fast_safe(duckdb_get_type_id(ct), ct);
-			duckdb_destroy_logical_type(&ct);
-			return ok;
+			duckdb_logical_type child = duckdb_list_type_child_type(lt);
+			type->child_count = 1;
+			type->children = ecalloc(1, sizeof(*type->children));
+			type->children[0] = pdo_duckdb_nested_render_type_build(
+				duckdb_get_type_id(child), child, true);
+			if (!type->children[0]) {
+				pdo_duckdb_nested_render_type_destroy(type);
+				return NULL;
+			}
+			return type;
 		}
 		case DUCKDB_TYPE_ARRAY: {
-			duckdb_logical_type ct = duckdb_array_type_child_type(lt);
-			bool ok = pdo_duckdb_nested_type_fast_safe(duckdb_get_type_id(ct), ct);
-			duckdb_destroy_logical_type(&ct);
-			return ok;
+			duckdb_logical_type child = duckdb_array_type_child_type(lt);
+			type->child_count = 1;
+			type->children = ecalloc(1, sizeof(*type->children));
+			type->children[0] = pdo_duckdb_nested_render_type_build(
+				duckdb_get_type_id(child), child, true);
+			if (!type->children[0]) {
+				pdo_duckdb_nested_render_type_destroy(type);
+				return NULL;
+			}
+			return type;
 		}
-		case DUCKDB_TYPE_STRUCT: {
-			idx_t n = duckdb_struct_type_child_count(lt);
-			idx_t i;
-			for (i = 0; i < n; i++) {
-				duckdb_logical_type ct = duckdb_struct_type_child_type(lt, i);
+		case DUCKDB_TYPE_STRUCT:
+			type->child_count = duckdb_struct_type_child_count(lt);
+			type->children = ecalloc(type->child_count, sizeof(*type->children));
+			type->child_names = ecalloc(type->child_count, sizeof(*type->child_names));
+			for (i = 0; i < type->child_count; i++) {
+				duckdb_logical_type child = duckdb_struct_type_child_type(lt, i);
 				char *name = duckdb_struct_type_child_name(lt, i);
-				bool ok = pdo_duckdb_struct_name_is_fast_safe(name) &&
-					pdo_duckdb_nested_type_fast_safe(duckdb_get_type_id(ct), ct);
-				duckdb_destroy_logical_type(&ct);
-				if (name) {
-					duckdb_free(name);
+				if (!pdo_duckdb_struct_name_is_fast_safe(name)) {
+					if (name) {
+						duckdb_free(name);
+					}
+					duckdb_destroy_logical_type(&child);
+					pdo_duckdb_nested_render_type_destroy(type);
+					return NULL;
 				}
-				if (!ok) {
-					return false;
+				type->child_names[i] = name;
+				type->children[i] = pdo_duckdb_nested_render_type_build(
+					duckdb_get_type_id(child), child, true);
+				if (!type->children[i]) {
+					pdo_duckdb_nested_render_type_destroy(type);
+					return NULL;
 				}
 			}
-			return true;
-		}
+			return type;
 		case DUCKDB_TYPE_MAP: {
-			duckdb_logical_type kt = duckdb_map_type_key_type(lt);
-			duckdb_logical_type vt = duckdb_map_type_value_type(lt);
-			bool ok = pdo_duckdb_nested_type_fast_safe(duckdb_get_type_id(kt), kt) &&
-				pdo_duckdb_nested_type_fast_safe(duckdb_get_type_id(vt), vt);
-			duckdb_destroy_logical_type(&kt);
-			duckdb_destroy_logical_type(&vt);
-			return ok;
+			duckdb_logical_type key = duckdb_map_type_key_type(lt);
+			duckdb_logical_type value = duckdb_map_type_value_type(lt);
+			type->child_count = 2;
+			type->children = ecalloc(2, sizeof(*type->children));
+			type->children[0] = pdo_duckdb_nested_render_type_build(
+				duckdb_get_type_id(key), key, true);
+			if (!type->children[0]) {
+				duckdb_destroy_logical_type(&value);
+				pdo_duckdb_nested_render_type_destroy(type);
+				return NULL;
+			}
+			type->children[1] = pdo_duckdb_nested_render_type_build(
+				duckdb_get_type_id(value), value, true);
+			if (!type->children[1]) {
+				pdo_duckdb_nested_render_type_destroy(type);
+				return NULL;
+			}
+			return type;
 		}
-		case DUCKDB_TYPE_UNION: {
-			idx_t n = duckdb_union_type_member_count(lt);
-			idx_t i;
-			for (i = 0; i < n; i++) {
-				duckdb_logical_type mt = duckdb_union_type_member_type(lt, i);
-				bool ok = pdo_duckdb_nested_type_fast_safe(duckdb_get_type_id(mt), mt);
-				duckdb_destroy_logical_type(&mt);
-				if (!ok) {
-					return false;
+		case DUCKDB_TYPE_UNION:
+			type->child_count = duckdb_union_type_member_count(lt);
+			type->children = ecalloc(type->child_count, sizeof(*type->children));
+			for (i = 0; i < type->child_count; i++) {
+				duckdb_logical_type member = duckdb_union_type_member_type(lt, i);
+				type->children[i] = pdo_duckdb_nested_render_type_build(
+					duckdb_get_type_id(member), member, true);
+				if (!type->children[i]) {
+					pdo_duckdb_nested_render_type_destroy(type);
+					return NULL;
 				}
 			}
-			return true;
-		}
+			return type;
 		case DUCKDB_TYPE_SQLNULL:
 		case DUCKDB_TYPE_BOOLEAN:
 		case DUCKDB_TYPE_TINYINT:
@@ -886,36 +984,26 @@ static bool pdo_duckdb_nested_type_fast_safe(duckdb_type tid, duckdb_logical_typ
 		case DUCKDB_TYPE_USMALLINT:
 		case DUCKDB_TYPE_UINTEGER:
 		case DUCKDB_TYPE_UBIGINT:
-		case DUCKDB_TYPE_DATE:
-		case DUCKDB_TYPE_UUID:
-			return true;
-		case DUCKDB_TYPE_DECIMAL:
-			return pdo_duckdb_decimal_type_fast_safe(lt);
 		case DUCKDB_TYPE_HUGEINT:
 		case DUCKDB_TYPE_UHUGEINT:
-			return PDO_DUCKDB_HAVE_INT128;
+		case DUCKDB_TYPE_DATE:
+		case DUCKDB_TYPE_UUID:
+			return type;
+		case DUCKDB_TYPE_DECIMAL:
+			if (pdo_duckdb_decimal_type_fast_safe(lt)) {
+				return type;
+			}
+			break;
 		default:
-			return false;
+			break;
 	}
+	pdo_duckdb_nested_render_type_destroy(type);
+	return NULL;
 }
 
-static bool pdo_duckdb_nested_col_type_fast_safe(duckdb_type tid, duckdb_logical_type lt)
+static bool pdo_duckdb_fast_nested_cell_to_smart_str(duckdb_vector vec, idx_t row,
+		const pdo_duckdb_nested_render_type *type, smart_str *out)
 {
-	switch (tid) {
-		case DUCKDB_TYPE_LIST:
-		case DUCKDB_TYPE_ARRAY:
-		case DUCKDB_TYPE_STRUCT:
-		case DUCKDB_TYPE_MAP:
-		case DUCKDB_TYPE_UNION:
-			return pdo_duckdb_nested_type_fast_safe(tid, lt);
-		default:
-			return false;
-	}
-}
-
-static bool pdo_duckdb_fast_nested_cell_to_smart_str(duckdb_vector vec, idx_t row, duckdb_logical_type lt, smart_str *out)
-{
-	duckdb_type tid = duckdb_get_type_id(lt);
 	uint64_t *validity = duckdb_vector_get_validity(vec);
 	void *data;
 
@@ -926,37 +1014,33 @@ static bool pdo_duckdb_fast_nested_cell_to_smart_str(duckdb_vector vec, idx_t ro
 
 	data = duckdb_vector_get_data(vec);
 
-	switch (tid) {
+	switch (type->type) {
 		case DUCKDB_TYPE_LIST: {
 			duckdb_list_entry e = ((duckdb_list_entry *)data)[row];
 			duckdb_vector child = duckdb_list_vector_get_child(vec);
 			idx_t child_size = duckdb_list_vector_get_size(vec);
-			duckdb_logical_type ct;
 			idx_t i;
 
 			if (e.offset > child_size || e.length > child_size - e.offset) {
 				return false;
 			}
 
-			ct = duckdb_list_type_child_type(lt);
 			smart_str_appendc(out, '[');
 			for (i = 0; i < e.length; i++) {
 				if (i) {
 					smart_str_appends(out, ", ");
 				}
-				if (!pdo_duckdb_fast_nested_cell_to_smart_str(child, e.offset + i, ct, out)) {
-					duckdb_destroy_logical_type(&ct);
+				if (!pdo_duckdb_fast_nested_cell_to_smart_str(
+						child, e.offset + i, type->children[0], out)) {
 					return false;
 				}
 			}
 			smart_str_appendc(out, ']');
-			duckdb_destroy_logical_type(&ct);
 			return true;
 		}
 		case DUCKDB_TYPE_ARRAY: {
-			idx_t n = duckdb_array_type_array_size(lt);
+			idx_t n = duckdb_array_type_array_size(type->logical_type);
 			duckdb_vector child = duckdb_array_vector_get_child(vec);
-			duckdb_logical_type ct;
 			idx_t base, i;
 
 			if (n && row > (idx_t)-1 / n) {
@@ -964,52 +1048,36 @@ static bool pdo_duckdb_fast_nested_cell_to_smart_str(duckdb_vector vec, idx_t ro
 			}
 
 			base = row * n;
-			ct = duckdb_array_type_child_type(lt);
 			smart_str_appendc(out, '[');
 			for (i = 0; i < n; i++) {
 				if (i) {
 					smart_str_appends(out, ", ");
 				}
-				if (!pdo_duckdb_fast_nested_cell_to_smart_str(child, base + i, ct, out)) {
-					duckdb_destroy_logical_type(&ct);
+				if (!pdo_duckdb_fast_nested_cell_to_smart_str(
+						child, base + i, type->children[0], out)) {
 					return false;
 				}
 			}
 			smart_str_appendc(out, ']');
-			duckdb_destroy_logical_type(&ct);
 			return true;
 		}
 		case DUCKDB_TYPE_STRUCT: {
-			idx_t n = duckdb_struct_type_child_count(lt);
 			idx_t i;
 
 			smart_str_appendc(out, '{');
-			for (i = 0; i < n; i++) {
+			for (i = 0; i < type->child_count; i++) {
 				duckdb_vector child = duckdb_struct_vector_get_child(vec, i);
-				duckdb_logical_type ct = duckdb_struct_type_child_type(lt, i);
-				char *name = duckdb_struct_type_child_name(lt, i);
-
-				if (!pdo_duckdb_struct_name_is_fast_safe(name)) {
-					duckdb_destroy_logical_type(&ct);
-					if (name) {
-						duckdb_free(name);
-					}
-					return false;
-				}
 
 				if (i) {
 					smart_str_appends(out, ", ");
 				}
 				smart_str_appendc(out, '\'');
-				smart_str_appends(out, name);
+				smart_str_appends(out, type->child_names[i]);
 				smart_str_appends(out, "': ");
-				if (!pdo_duckdb_fast_nested_cell_to_smart_str(child, row, ct, out)) {
-					duckdb_destroy_logical_type(&ct);
-					duckdb_free(name);
+				if (!pdo_duckdb_fast_nested_cell_to_smart_str(
+						child, row, type->children[i], out)) {
 					return false;
 				}
-				duckdb_destroy_logical_type(&ct);
-				duckdb_free(name);
 			}
 			smart_str_appendc(out, '}');
 			return true;
@@ -1018,7 +1086,6 @@ static bool pdo_duckdb_fast_nested_cell_to_smart_str(duckdb_vector vec, idx_t ro
 			duckdb_list_entry e = ((duckdb_list_entry *)data)[row];
 			idx_t entries_size = duckdb_list_vector_get_size(vec);
 			duckdb_vector entries, kvec, vvec;
-			duckdb_logical_type kt, vt;
 			idx_t i;
 
 			if (e.offset > entries_size || e.length > entries_size - e.offset) {
@@ -1028,29 +1095,23 @@ static bool pdo_duckdb_fast_nested_cell_to_smart_str(duckdb_vector vec, idx_t ro
 			entries = duckdb_list_vector_get_child(vec);
 			kvec = duckdb_struct_vector_get_child(entries, 0);
 			vvec = duckdb_struct_vector_get_child(entries, 1);
-			kt = duckdb_map_type_key_type(lt);
-			vt = duckdb_map_type_value_type(lt);
 
 			smart_str_appendc(out, '{');
 			for (i = 0; i < e.length; i++) {
 				if (i) {
 					smart_str_appends(out, ", ");
 				}
-				if (!pdo_duckdb_fast_nested_cell_to_smart_str(kvec, e.offset + i, kt, out)) {
-					duckdb_destroy_logical_type(&kt);
-					duckdb_destroy_logical_type(&vt);
+				if (!pdo_duckdb_fast_nested_cell_to_smart_str(
+						kvec, e.offset + i, type->children[0], out)) {
 					return false;
 				}
 				smart_str_appendc(out, '=');
-				if (!pdo_duckdb_fast_nested_cell_to_smart_str(vvec, e.offset + i, vt, out)) {
-					duckdb_destroy_logical_type(&kt);
-					duckdb_destroy_logical_type(&vt);
+				if (!pdo_duckdb_fast_nested_cell_to_smart_str(
+						vvec, e.offset + i, type->children[1], out)) {
 					return false;
 				}
 			}
 			smart_str_appendc(out, '}');
-			duckdb_destroy_logical_type(&kt);
-			duckdb_destroy_logical_type(&vt);
 			return true;
 		}
 		case DUCKDB_TYPE_UNION: {
@@ -1058,29 +1119,27 @@ static bool pdo_duckdb_fast_nested_cell_to_smart_str(duckdb_vector vec, idx_t ro
 			void *tag_data = duckdb_vector_get_data(tag_vec);
 			idx_t tag = (idx_t)((uint8_t *)tag_data)[row];
 			duckdb_vector member_vec;
-			duckdb_logical_type mt;
-			bool ok;
 
-			if (tag >= duckdb_union_type_member_count(lt)) {
+			if (tag >= type->child_count) {
 				return false;
 			}
 
 			member_vec = duckdb_struct_vector_get_child(vec, tag + 1);
-			mt = duckdb_union_type_member_type(lt, tag);
-			ok = pdo_duckdb_fast_nested_cell_to_smart_str(member_vec, row, mt, out);
-			duckdb_destroy_logical_type(&mt);
-			return ok;
+			return pdo_duckdb_fast_nested_cell_to_smart_str(
+				member_vec, row, type->children[tag], out);
 		}
 		default:
-			return pdo_duckdb_smart_append_fast_scalar(tid, lt, data, row, out);
+			return pdo_duckdb_smart_append_fast_scalar(
+				type->type, type->logical_type, data, row, out);
 	}
 }
 
-static bool pdo_duckdb_fast_nested_col_to_string(duckdb_type tid, duckdb_vector vec, idx_t row, duckdb_logical_type lt, zval *result)
+static bool pdo_duckdb_fast_nested_col_to_string(duckdb_vector vec, idx_t row,
+		const pdo_duckdb_nested_render_type *type, zval *result)
 {
 	smart_str out = {0};
 
-	switch (tid) {
+	switch (type->type) {
 		case DUCKDB_TYPE_LIST:
 		case DUCKDB_TYPE_ARRAY:
 		case DUCKDB_TYPE_STRUCT:
@@ -1091,7 +1150,7 @@ static bool pdo_duckdb_fast_nested_col_to_string(duckdb_type tid, duckdb_vector 
 			return false;
 	}
 
-	if (!pdo_duckdb_fast_nested_cell_to_smart_str(vec, row, lt, &out)) {
+	if (!pdo_duckdb_fast_nested_cell_to_smart_str(vec, row, type, &out)) {
 		smart_str_free(&out);
 		return false;
 	}
@@ -1100,7 +1159,8 @@ static bool pdo_duckdb_fast_nested_col_to_string(duckdb_type tid, duckdb_vector 
 	return true;
 }
 
-static duckdb_value pdo_duckdb_cell_to_value_typed(duckdb_vector vec, idx_t row, duckdb_logical_type lt, bool destroy_lt)
+static duckdb_value pdo_duckdb_cell_to_value_typed(duckdb_vector vec, idx_t row,
+		duckdb_logical_type lt, bool destroy_lt, bool *unsupported_variant)
 {
 	duckdb_type tid = duckdb_get_type_id(lt);
 	uint64_t *validity = duckdb_vector_get_validity(vec);
@@ -1270,7 +1330,8 @@ static duckdb_value pdo_duckdb_cell_to_value_typed(duckdb_vector vec, idx_t row,
 			 * pointer, so an empty list must still pass a valid buffer. */
 			vals = emalloc(sizeof(duckdb_value) * (e.length ? e.length : 1));
 			for (i = 0; i < e.length; i++) {
-				vals[i] = pdo_duckdb_cell_to_value_typed(child, e.offset + i, ct, false);
+				vals[i] = pdo_duckdb_cell_to_value_typed(
+					child, e.offset + i, ct, false, unsupported_variant);
 			}
 			ret = duckdb_create_list_value(ct, vals, e.length);
 			for (i = 0; i < e.length; i++) {
@@ -1287,7 +1348,8 @@ static duckdb_value pdo_duckdb_cell_to_value_typed(duckdb_vector vec, idx_t row,
 			duckdb_value *vals = emalloc(sizeof(duckdb_value) * (n ? n : 1));
 			idx_t base = row * n, i;
 			for (i = 0; i < n; i++) {
-				vals[i] = pdo_duckdb_cell_to_value_typed(child, base + i, ct, false);
+				vals[i] = pdo_duckdb_cell_to_value_typed(
+					child, base + i, ct, false, unsupported_variant);
 			}
 			ret = duckdb_create_array_value(ct, vals, n);
 			for (i = 0; i < n; i++) {
@@ -1304,7 +1366,8 @@ static duckdb_value pdo_duckdb_cell_to_value_typed(duckdb_vector vec, idx_t row,
 			for (i = 0; i < n; i++) {
 				duckdb_vector child = duckdb_struct_vector_get_child(vec, i);
 				duckdb_logical_type ct = duckdb_struct_type_child_type(lt, i);
-				vals[i] = pdo_duckdb_cell_to_value_typed(child, row, ct, false);
+				vals[i] = pdo_duckdb_cell_to_value_typed(
+					child, row, ct, false, unsupported_variant);
 				duckdb_destroy_logical_type(&ct);
 			}
 			ret = duckdb_create_struct_value(lt, vals);
@@ -1336,8 +1399,10 @@ static duckdb_value pdo_duckdb_cell_to_value_typed(duckdb_vector vec, idx_t row,
 			keys = emalloc(sizeof(duckdb_value) * (e.length ? e.length : 1));
 			vals = emalloc(sizeof(duckdb_value) * (e.length ? e.length : 1));
 			for (i = 0; i < e.length; i++) {
-				keys[i] = pdo_duckdb_cell_to_value_typed(kvec, e.offset + i, kt, false);
-				vals[i] = pdo_duckdb_cell_to_value_typed(vvec, e.offset + i, vt, false);
+				keys[i] = pdo_duckdb_cell_to_value_typed(
+					kvec, e.offset + i, kt, false, unsupported_variant);
+				vals[i] = pdo_duckdb_cell_to_value_typed(
+					vvec, e.offset + i, vt, false, unsupported_variant);
 			}
 			ret = duckdb_create_map_value(lt, keys, vals, e.length);
 			for (i = 0; i < e.length; i++) {
@@ -1369,12 +1434,20 @@ static duckdb_value pdo_duckdb_cell_to_value_typed(duckdb_vector vec, idx_t row,
 			}
 			member_vec = duckdb_struct_vector_get_child(vec, tag + 1);
 			duckdb_logical_type mt = duckdb_union_type_member_type(lt, tag);
-			duckdb_value member = pdo_duckdb_cell_to_value_typed(member_vec, row, mt, false);
+			duckdb_value member = pdo_duckdb_cell_to_value_typed(
+				member_vec, row, mt, false, unsupported_variant);
 			ret = duckdb_create_union_value(lt, tag, member);
 			duckdb_destroy_value(&member);
 			duckdb_destroy_logical_type(&mt);
 			break;
 		}
+
+		case DUCKDB_TYPE_VARIANT:
+			if (unsupported_variant) {
+				*unsupported_variant = true;
+			}
+			ret = duckdb_create_null_value();
+			break;
 
 		default:
 			/* Unknown/unsupported type: surface as SQL NULL rather than crash. */
@@ -1460,9 +1533,18 @@ static int pdo_duckdb_stmt_describe(pdo_stmt_t *stmt, int colno)
 /* Reconstruct the cell as a duckdb_value and render its canonical string into
  * `result`. Used for types without a native PHP mapping, and for integers that
  * overflow zend_long on 32-bit builds. */
-static void pdo_duckdb_col_to_string(duckdb_vector vec, idx_t row, duckdb_logical_type lt, zval *result)
+static bool pdo_duckdb_col_to_string(duckdb_vector vec, idx_t row,
+		duckdb_logical_type lt, zval *result)
 {
-	duckdb_value v = pdo_duckdb_cell_to_value_typed(vec, row, lt, false);
+	bool unsupported_variant = false;
+	duckdb_value v = pdo_duckdb_cell_to_value_typed(
+		vec, row, lt, false, &unsupported_variant);
+
+	if (unsupported_variant) {
+		duckdb_destroy_value(&v);
+		ZVAL_NULL(result);
+		return false;
+	}
 	/* duckdb_get_varchar() on a NULL value throws a C++ InternalException that
 	 * aborts the process; guard with is_null (also covers any unhandled type
 	 * cell_to_value falls back to a NULL value for). */
@@ -1478,6 +1560,7 @@ static void pdo_duckdb_col_to_string(duckdb_vector vec, idx_t row, duckdb_logica
 		}
 	}
 	duckdb_destroy_value(&v);
+	return true;
 }
 
 static int pdo_duckdb_stmt_get_col(
@@ -1523,7 +1606,7 @@ static int pdo_duckdb_stmt_get_col(
 			int64_t v = ((int64_t *)data)[row];
 #if SIZEOF_ZEND_LONG < 8
 			if (v < (int64_t)ZEND_LONG_MIN || v > (int64_t)ZEND_LONG_MAX) {
-				pdo_duckdb_col_to_string(vec, row, S->col_logical_types[colno], result);  /* preserve precision as string */
+				(void)pdo_duckdb_col_to_string(vec, row, S->col_logical_types[colno], result);  /* preserve precision as string */
 				return 1;
 			}
 #endif
@@ -1534,7 +1617,7 @@ static int pdo_duckdb_stmt_get_col(
 			uint32_t v = ((uint32_t *)data)[row];
 #if SIZEOF_ZEND_LONG < 8
 			if (v > (uint32_t)ZEND_LONG_MAX) {
-				pdo_duckdb_col_to_string(vec, row, S->col_logical_types[colno], result);
+				(void)pdo_duckdb_col_to_string(vec, row, S->col_logical_types[colno], result);
 				return 1;
 			}
 #endif
@@ -1549,13 +1632,25 @@ static int pdo_duckdb_stmt_get_col(
 			return 1;
 		}
 
+		case DUCKDB_TYPE_VARIANT:
+			ZVAL_NULL(result);
+			pdo_duckdb_error_stmt(stmt,
+				"DuckDB VARIANT values are not supported by the C result API; cast the value to VARCHAR in SQL");
+			pdo_handle_error(stmt->dbh, stmt);
+			return 1;
+
 		default:
 			/* Extended scalar and nested types are returned as their canonical
 			 * DuckDB string form; common scalar formats use fast renderers first. */
-			if (!(S->col_fast_nested[colno] &&
-						pdo_duckdb_fast_nested_col_to_string(tid, vec, row, S->col_logical_types[colno], result)) &&
+			if (!(S->col_nested_renderers[colno] &&
+						pdo_duckdb_fast_nested_col_to_string(
+							vec, row, S->col_nested_renderers[colno], result)) &&
 					!pdo_duckdb_fast_col_to_string(tid, S->col_logical_types[colno], data, row, result)) {
-				pdo_duckdb_col_to_string(vec, row, S->col_logical_types[colno], result);
+				if (!pdo_duckdb_col_to_string(vec, row, S->col_logical_types[colno], result)) {
+					pdo_duckdb_error_stmt(stmt,
+						"DuckDB VARIANT values are not supported by the C result API; cast the value to VARCHAR in SQL");
+					pdo_handle_error(stmt->dbh, stmt);
+				}
 			}
 			return 1;
 	}

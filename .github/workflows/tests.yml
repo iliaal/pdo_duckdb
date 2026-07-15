@@ -93,7 +93,7 @@ jobs:
         run: |
           phpize
           ./configure --with-pdo-duckdb="$PWD/duckdb" --enable-pdo-duckdb-dev
-          WARNINGS=$(make -j$(nproc) 2>&1 | tee /dev/stderr | grep -c 'warning:' || true)
+          WARNINGS=$(make -j"$(nproc)" 2>&1 | tee /dev/stderr | grep -c 'warning:' || true)
           if [ "$WARNINGS" -gt 0 ]; then
             echo "::error::Build produced $WARNINGS warning(s)"
             exit 1
@@ -102,8 +102,9 @@ jobs:
       - name: Run tests
         run: |
           export LD_LIBRARY_PATH="$PWD/duckdb/lib"
-          export TEST_PHP_EXECUTABLE=$(which php)
-          export TEST_PHP_ARGS="-d extension=$(pwd)/modules/pdo_duckdb.so"
+          TEST_PHP_EXECUTABLE="$(command -v php)"
+          export TEST_PHP_EXECUTABLE
+          export TEST_PHP_ARGS="-d extension=$PWD/modules/pdo_duckdb.so"
           export NO_INTERACTION=1
           # Direct invocation: run-tests.php exits non-zero on failures and the
           # --show-diff output is printed inline (no capture-under-bash-e, which
@@ -130,6 +131,87 @@ jobs:
           DUCKDB_PREFIX="$PWD/duckdb" \
           EXT="$PWD/modules/pdo_duckdb.so" \
           bash scripts/pdo-common-tests.sh
+
+  duckdb-floor:
+    name: DuckDB 1.5.3 floor - PHP 8.4
+    runs-on: ubuntu-latest
+    env:
+      DUCKDB_FLOOR_VERSION: '1.5.3'
+      DUCKDB_FLOOR_SHA256: '0a926eba5bce0abc0010f4b9109133e4440cb74e97bd10fd2d0fc2a721621b05'
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # v2
+        with:
+          php-version: '8.4'
+          tools: phpize, php-config
+          coverage: none
+
+      - name: Download DuckDB floor release
+        run: |
+          curl -fsSL -o /tmp/libduckdb.zip \
+            "https://github.com/duckdb/duckdb/releases/download/v${DUCKDB_FLOOR_VERSION}/libduckdb-linux-amd64.zip"
+          echo "${DUCKDB_FLOOR_SHA256}  /tmp/libduckdb.zip" | sha256sum --check --strict
+          mkdir -p duckdb/include duckdb/lib raw
+          unzip -o /tmp/libduckdb.zip -d raw
+          cp raw/duckdb.h duckdb/include/
+          cp raw/libduckdb.so duckdb/lib/
+
+      - name: Build against DuckDB floor
+        run: |
+          phpize
+          ./configure --with-pdo-duckdb="$PWD/duckdb" --enable-pdo-duckdb-dev
+          make -j"$(nproc)"
+
+      - name: Run full suite against DuckDB floor
+        run: |
+          export LD_LIBRARY_PATH="$PWD/duckdb/lib"
+          TEST_PHP_EXECUTABLE="$(command -v php)"
+          export TEST_PHP_EXECUTABLE
+          export TEST_PHP_ARGS="-d extension=$PWD/modules/pdo_duckdb.so"
+          export NO_INTERACTION=1
+          php run-tests.php --show-diff -g FAIL,BORK,LEAK,XLEAK tests/
+
+  portable-integers:
+    name: Portable integer renderers - PHP 8.4
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # v2
+        with:
+          php-version: '8.4'
+          tools: phpize, php-config
+          coverage: none
+
+      - name: Download libduckdb
+        run: |
+          asset=libduckdb-linux-amd64.zip
+          curl -fsSL -o "$asset" \
+            "https://github.com/duckdb/duckdb/releases/download/v${DUCKDB_VERSION}/${asset}"
+          grep "  $asset$" .github/duckdb-sha256.txt | sha256sum --check --strict
+          mkdir -p duckdb/include duckdb/lib raw
+          unzip -o "$asset" -d raw
+          cp raw/duckdb.h duckdb/include/
+          cp raw/libduckdb.so duckdb/lib/
+
+      - name: Build without compiler int128 support
+        run: |
+          phpize
+          CFLAGS="-U__SIZEOF_INT128__" \
+            ./configure --with-pdo-duckdb="$PWD/duckdb" --enable-pdo-duckdb-dev
+          make -j"$(nproc)"
+
+      - name: Run full suite through portable integer renderers
+        run: |
+          export LD_LIBRARY_PATH="$PWD/duckdb/lib"
+          TEST_PHP_EXECUTABLE="$(command -v php)"
+          export TEST_PHP_EXECUTABLE
+          export TEST_PHP_ARGS="-d extension=$PWD/modules/pdo_duckdb.so"
+          export NO_INTERACTION=1
+          php run-tests.php --show-diff -g FAIL,BORK,LEAK,XLEAK tests/
 
   asan:
     name: PHP ${{ matrix.php }} - ASAN
@@ -190,7 +272,7 @@ jobs:
             --enable-cli \
             --enable-pdo \
             --prefix=/tmp/php-asan
-          make -j$(nproc)
+          make -j"$(nproc)"
           make install
 
       - name: Build extension with ASAN
@@ -204,13 +286,13 @@ jobs:
           ./configure \
             --with-pdo-duckdb="$PWD/duckdb" \
             --with-php-config=/tmp/php-asan/bin/php-config
-          make -j$(nproc)
+          make -j"$(nproc)"
 
       - name: Run tests under ASAN
         run: |
           export LD_LIBRARY_PATH="$PWD/duckdb/lib:${LD_LIBRARY_PATH}"
           export TEST_PHP_EXECUTABLE=/tmp/php-asan/bin/php
-          export TEST_PHP_ARGS="-d extension=$(pwd)/modules/pdo_duckdb.so"
+          export TEST_PHP_ARGS="-d extension=$PWD/modules/pdo_duckdb.so"
           export NO_INTERACTION=1
           set +e
           /tmp/php-asan/bin/php run-tests.php --show-diff --asan -g FAIL,BORK,LEAK,XLEAK tests/ 2>&1 | tee /tmp/test-output.txt

@@ -39,7 +39,9 @@ pie install iliaal/pdo_duckdb
 
 On Linux (x86_64/arm64), macOS (Apple Silicon), and Windows x64, PIE downloads a
 self-contained prebuilt binary. No DuckDB install or build toolchain needed. On
-other platforms or older PHP it falls back to a source build, which needs
+Linux the prebuilt baseline is glibc 2.36 (Debian 12); Apple Silicon binaries
+target macOS 11.0. On other platforms, older operating systems, or older PHP,
+use a source build, which needs
 `libduckdb` + `duckdb.h`; point it at the prefix if they aren't in a standard
 location:
 
@@ -190,13 +192,20 @@ $db->exec('INSTALL httpfs; LOAD httpfs;');  // downloadable extensions
 - **Transactions.** `beginTransaction()` / `commit()` / `rollBack()` map to
   DuckDB `BEGIN TRANSACTION` / `COMMIT` / `ROLLBACK`. DuckDB is
   autocommit-by-default with no session toggle, so `setAttribute(PDO::ATTR_AUTOCOMMIT,
-  false)` is rejected; use `beginTransaction()` for explicit transactions.
+  false)` is rejected; use `beginTransaction()` for explicit transactions. The
+  driver also reflects raw transaction-control SQL through `inTransaction()` so
+  persistent handles cannot retain an invisible transaction after PHP releases
+  a PDO object. This includes DuckDB's `END` and `ABORT` aliases and transaction
+  control wrapped by `EXPLAIN ANALYZE`; DuckDB reports only the outer `EXPLAIN`
+  statement type, so the driver tracks the wrapped effect explicitly after
+  successful execution.
 - **`open_basedir`.** When `open_basedir` is set, DuckDB's SQL-level external
   file access (`read_csv`, `COPY`, `ATTACH`, `httpfs`, …) is disabled so the
   sandbox holds at the SQL layer, not just for the database file path. If
   `open_basedir` is tightened after a handle already exists, the driver clears
   DuckDB path allowlists before disabling external access and locks the
-  connection configuration.
+  connection configuration. You can still activate an extension compiled into
+  DuckDB, such as `LOAD json`; the sandbox blocks extension files and downloads.
 - **`lastInsertId()`** is not supported; DuckDB has no implicit rowid. Use a
   sequence and `currval()` if you need generated keys.
 - **Type mapping.** Integers up to 64-bit signed return as `int`, `FLOAT`/`DOUBLE`
@@ -212,7 +221,10 @@ $db->exec('INSTALL httpfs; LOAD httpfs;');  // downloadable extensions
   `GEOMETRY` (from the spatial extension) returns its WKB bytes as a hex string;
   call `ST_AsText()` in SQL if you want WKT. `TIMESTAMPTZ` native fetches render
   the instant in UTC (`+00`); select `CAST(col AS VARCHAR)` if you need DuckDB's
-  session-`TimeZone` rendering.
+  session-`TimeZone` rendering. DuckDB's C result API cannot extract non-NULL
+  `VARIANT` cells safely, so fetching one reports a PDO error; cast it to
+  `VARCHAR` (or another concrete SQL type) in the query. SQL NULL remains PHP
+  `null`.
 - **Streaming results.** By default `execute()` returns a materialized result:
   DuckDB buffers the full result set before PDO fetches, so a large `SELECT` is
   bounded by available memory. For large scans, set `PDO::DUCKDB_ATTR_UNBUFFERED`

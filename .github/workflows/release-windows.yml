@@ -1,36 +1,30 @@
 name: Release Windows binaries
 
-# Triggered when a GitHub Release is published. DuckDB ships no MSVC static
+# Called by release.yml when a GitHub Release is published. DuckDB ships no MSVC static
 # Windows lib (only a MinGW one, not MSVC-linkable), so a static self-contained
 # DLL is impossible. Instead we build php_pdo_duckdb.dll against DuckDB's
 # dynamic import lib (duckdb.lib) and SHIP duckdb.dll inside the asset zip. PIE
 # installs bundled dependency DLLs to the PHP root (next to php.exe, on the
 # loader path) and the extension DLL to ext\, so the dependency resolves at
-# load. This workflow requires binary-validate-windows.yml at the release SHA
-# before uploading the bundled-DLL artifacts.
+# load. Each exact release archive is loaded and queried before it is staged.
 #
 # x64 only: DuckDB ships no 32-bit Windows lib. NTS + TS. PHP 8.4/8.5 are the
 # runtime-validated set; older PHP falls back to PIE's composer-default source
 # build.
 
 on:
-  release:
-    types: [published]
+  workflow_call:
 
 env:
   # Keep in sync with DUCKDB_VERSION in tests.yml.
   DUCKDB_VERSION: "1.5.4"
 
 jobs:
-  validate:
-    uses: ./.github/workflows/binary-validate-windows.yml
-
   build:
     name: ${{ matrix.php }} ${{ matrix.ts }} x64
-    needs: validate
     runs-on: windows-2022
     permissions:
-      contents: write
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -60,13 +54,25 @@ jobs:
           args: --with-pdo-duckdb=${{ github.workspace }}\duckdb-deps
           run-tests: false
 
-      - name: Bundle duckdb.dll, name to the release tag, upload as a release asset
+      - name: Setup matching PHP for final-archive validation
+        uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # v2
+        with:
+          php-version: ${{ matrix.php }}
+          coverage: none
+        env:
+          phpts: ${{ matrix.ts }}
+
+      - name: Bundle duckdb.dll and finalize the release archive
+        id: package
         shell: pwsh
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
           $ErrorActionPreference = 'Stop'
-          $tag = "${{ github.event.release.tag_name }}"
+          $tag = $env:RELEASE_TAG
+          if ($tag -notmatch '^[A-Za-z0-9][A-Za-z0-9._+-]*$') {
+            throw 'unsupported release tag for an archive name'
+          }
 
           $zip = Get-ChildItem artifacts -Filter "php_pdo_duckdb-*.zip" |
                  Where-Object { $_.Name -notlike '*-logs*' } | Select-Object -First 1
@@ -87,5 +93,31 @@ jobs:
           $out = "$newbase.zip"
           if (Test-Path $out) { Remove-Item $out -Force }
           Compress-Archive -Path stage\* -DestinationPath $out
-          Write-Host "uploading $out"
-          gh release upload "$tag" "$out" --clobber
+          Get-FileHash $out -Algorithm SHA256 | Format-List
+          "package=$out" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Validate the exact release archive
+        shell: pwsh
+        env:
+          PACKAGE: ${{ steps.package.outputs.package }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $package = $env:PACKAGE
+          Expand-Archive $package -DestinationPath release-verify -Force
+          $extdll = Get-ChildItem release-verify -Filter 'php_pdo_duckdb-*.dll' | Select-Object -First 1
+          $duckdbdll = Get-ChildItem release-verify -Filter 'duckdb.dll' | Select-Object -First 1
+          if (-not $extdll) { throw 'final archive contains no extension DLL' }
+          if (-not $duckdbdll) { throw 'final archive contains no duckdb.dll' }
+
+          $php = (Get-Command php).Source
+          Copy-Item $duckdbdll.FullName -Destination (Split-Path $php) -Force
+          php -d extension="$($extdll.FullName)" scripts\win-probe.php
+          if ($LASTEXITCODE -ne 0) { throw "final archive probe failed (exit $LASTEXITCODE)" }
+          Get-FileHash $package -Algorithm SHA256 | Format-List
+
+      - name: Stage validated release archive
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-windows-php${{ matrix.php }}-${{ matrix.ts }}
+          path: ${{ steps.package.outputs.package }}
+          if-no-files-found: error

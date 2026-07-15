@@ -2,8 +2,8 @@ name: Binary build validation
 
 # Reusable validation gate and manual dry run: proves the self-contained static
 # build works on each release target (Linux amd64/arm64, macOS arm64) on real
-# runners without publishing. release-linux.yml requires this workflow at the
-# release SHA before it uploads binaries.
+# runners without publishing. The release workflow repeats these gates against
+# the exact archives it stages.
 
 on:
   workflow_call:
@@ -20,16 +20,17 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: ubuntu-24.04,     duckdb: static-libs-linux-amd64.zip, php: '8.4' }
-          - { os: ubuntu-24.04,     duckdb: static-libs-linux-amd64.zip, php: '8.5' }
-          - { os: ubuntu-24.04-arm, duckdb: static-libs-linux-arm64.zip, php: '8.4' }
-          - { os: ubuntu-24.04-arm, duckdb: static-libs-linux-arm64.zip, php: '8.5' }
-          - { os: macos-14,         duckdb: static-libs-osx-arm64.zip,   php: '8.4' }
-          - { os: macos-14,         duckdb: static-libs-osx-arm64.zip,   php: '8.5' }
+          - { os: ubuntu-24.04,     duckdb: static-libs-linux-amd64.zip, php: '8.4', baseline-image: 'php:8.4-cli-bookworm@sha256:138a210978c7767ef2a26f499c413fe6de1c13233c9a5068139565c81191b1ac' }
+          - { os: ubuntu-24.04,     duckdb: static-libs-linux-amd64.zip, php: '8.5', baseline-image: 'php:8.5-cli-bookworm@sha256:fb740987f3e7aefd7f52d1f961fa91602874f2b6a5b0bf0105725f8987b54bee' }
+          - { os: ubuntu-24.04-arm, duckdb: static-libs-linux-arm64.zip, php: '8.4', baseline-image: 'php:8.4-cli-bookworm@sha256:138a210978c7767ef2a26f499c413fe6de1c13233c9a5068139565c81191b1ac' }
+          - { os: ubuntu-24.04-arm, duckdb: static-libs-linux-arm64.zip, php: '8.5', baseline-image: 'php:8.5-cli-bookworm@sha256:fb740987f3e7aefd7f52d1f961fa91602874f2b6a5b0bf0105725f8987b54bee' }
+          - { os: macos-14,         duckdb: static-libs-osx-arm64.zip,   php: '8.4', baseline-image: '' }
+          - { os: macos-14,         duckdb: static-libs-osx-arm64.zip,   php: '8.5', baseline-image: '' }
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
 
       - name: Setup PHP
+        if: runner.os == 'macOS'
         uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # v2
         with:
           php-version: ${{ matrix.php }}
@@ -43,14 +44,31 @@ jobs:
           grep "  $asset$" .github/duckdb-sha256.txt | shasum -a 256 --check --strict
           mkdir -p duckdb-static
           unzip -o -q "$asset" -d duckdb-static
-          ls -la duckdb-static | head
 
       - name: Build (static, self-contained)
         shell: bash
+        env:
+          PHP_BASELINE_IMAGE: ${{ matrix.baseline-image }}
         run: |
-          phpize
-          ./configure --with-pdo-duckdb-static="$GITHUB_WORKSPACE/duckdb-static" --enable-pdo-duckdb-dev
-          make -j"$(getconf _NPROCESSORS_ONLN)"
+          set -euo pipefail
+          if [ "$RUNNER_OS" = Linux ]; then
+            docker run --rm \
+              -v "$GITHUB_WORKSPACE:/work" \
+              -w /work \
+              "$PHP_BASELINE_IMAGE" \
+              bash -euo pipefail -c '
+                apt-get update -qq
+                apt-get install -y --no-install-recommends autoconf g++ make pkg-config
+                phpize
+                ./configure --with-pdo-duckdb-static=/work/duckdb-static --enable-pdo-duckdb-dev
+                make -j"$(getconf _NPROCESSORS_ONLN)"
+              '
+          else
+            export MACOSX_DEPLOYMENT_TARGET=11.0
+            phpize
+            ./configure --with-pdo-duckdb-static="$GITHUB_WORKSPACE/duckdb-static" --enable-pdo-duckdb-dev
+            make -j"$(getconf _NPROCESSORS_ONLN)"
+          fi
           ls -lh modules/pdo_duckdb.so
           if [ "$RUNNER_OS" = "macOS" ]; then
             echo "=== namespace flag in final link ==="
@@ -77,6 +95,18 @@ jobs:
           # libstdc++ already sits in the process (the build host) and fail
           # dlopen on a clean box. Gate on it.
           if [ "$RUNNER_OS" = "Linux" ]; then
+            max_glibc=$(
+              readelf --version-info modules/pdo_duckdb.so \
+                | grep -oE 'GLIBC_[0-9]+(\.[0-9]+)+' \
+                | sort -Vu \
+                | tail -1
+            )
+            if [ -z "$max_glibc" ] ||
+                [ "$(printf '%s\n' "$max_glibc" GLIBC_2.36 | sort -V | tail -1)" != GLIBC_2.36 ]; then
+              printf 'ERROR: module requires unsupported glibc version: %s\n' "$max_glibc"
+              exit 1
+            fi
+            printf 'ok: maximum glibc symbol version is %s\n' "$max_glibc"
             undef=$(nm -D -u modules/pdo_duckdb.so | grep -cE "_ZNSt|_ZSt|__cxxabi" || true)
             if [ "$undef" -ne 0 ]; then
               echo "ERROR: $undef undefined libstdc++/__cxxabi symbols — C++ runtime not statically linked"
@@ -84,18 +114,27 @@ jobs:
               exit 1
             fi
             echo "ok: C++ runtime fully resolved (0 undefined std/cxxabi)"
+          else
+            min_macos=$(otool -l modules/pdo_duckdb.so | awk '$1 == "minos" { print $2; exit }')
+            case "$min_macos" in
+              11.0|11.0.0) ;;
+              *) printf 'ERROR: module has unexpected macOS minimum: %s\n' "$min_macos"; exit 1 ;;
+            esac
+            printf 'ok: macOS deployment target is %s\n' "$min_macos"
           fi
 
       - name: Load + query in a CLEAN container (Linux — catches build-host-only deps)
         if: runner.os == 'Linux'
         shell: bash
+        env:
+          PHP_BASELINE_IMAGE: ${{ matrix.baseline-image }}
         run: |
           # Load the freshly built .so with a stock php:<ver>-cli that has NO
           # libstdc++/libduckdb pre-loaded, so a non-self-contained module fails
           # here even though it loads on this build runner. This is the check
           # that would have caught the 0.2.0 Linux libstdc++ defect.
           cp modules/pdo_duckdb.so /tmp/pdo_duckdb.so
-          docker run --rm -v /tmp/pdo_duckdb.so:/ext/pdo_duckdb.so:ro "php:${{ matrix.php }}-cli" \
+          docker run --rm -v /tmp/pdo_duckdb.so:/ext/pdo_duckdb.so:ro "$PHP_BASELINE_IMAGE" \
             php -d extension=/ext/pdo_duckdb.so -r '
               if (!extension_loaded("pdo_duckdb")) { fwrite(STDERR, "FAIL: not loaded\n"); exit(1); }
               $d = new PDO("duckdb::memory:");
@@ -146,9 +185,12 @@ jobs:
             -- php -d extension="$GITHUB_WORKSPACE/modules/pdo_duckdb.so" /tmp/probe.php 2>&1 \
             | grep -iE "stop reason|frame #|Process [0-9]+ stopped|abort|throw|assert|pure|libc\+\+|libsystem|exception|stopped at breakpoint" | head -50
 
-      - name: Load + query (no libduckdb on path)
+      - name: Load + query (macOS, no libduckdb on path)
+        if: runner.os == 'macOS'
         shell: bash
         run: |
+          # The single-quoted program is PHP, not shell.
+          # shellcheck disable=SC2016
           php -d extension="$GITHUB_WORKSPACE/modules/pdo_duckdb.so" -r '
             fwrite(STDERR, "STAGE loaded=".(int)extension_loaded("pdo_duckdb")."\n");
             $d = new PDO("duckdb::memory:");

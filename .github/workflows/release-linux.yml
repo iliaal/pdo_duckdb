@@ -1,19 +1,18 @@
 name: Release Linux & macOS binaries
 
-# Triggered when a GitHub Release is published. Builds self-contained .so
+# Called by release.yml when a GitHub Release is published. Builds self-contained .so
 # binaries for Linux glibc (x86_64 + arm64) and macOS arm64 at the PHP
 # versions in the matrix (NTS only -- ZTS lives in the Windows lane) and
-# uploads each as a release asset via php/pie-ext-binary-builder using
-# PIE's pre-packaged-binary naming convention.
+# stages each for release.yml using PIE's pre-packaged-binary naming
+# convention.
 #
 # pdo_duckdb links an external libduckdb, so the prebuilt must STATICALLY
 # link DuckDB to be self-contained (a dynamically-linked .so wouldn't load
 # without libduckdb on the user's loader path, and PIE prefers the prebuilt).
 # Each runner downloads DuckDB's static-libs bundle for its os/arch and the
 # build links it via config.m4's --with-pdo-duckdb-static mode. The exact
-# build + self-contained + load-and-query checks run in binary-validate.yml;
-# this workflow requires that reusable validator at the release SHA before
-# uploading any binary.
+# The release build repeats the self-contained and load-and-query gates from
+# binary-validate.yml against each exact archive before staging it.
 #
 # macOS Intel (macos-13) and Linux musl are intentionally absent -- those
 # users source-build via PIE's composer-default fallback. composer.json
@@ -22,23 +21,18 @@ name: Release Linux & macOS binaries
 # matches (older PHP, other arches/libc).
 
 on:
-  release:
-    types: [published]
+  workflow_call:
 
 env:
   # Keep in sync with DUCKDB_VERSION in tests.yml / windows.yml.
   DUCKDB_VERSION: "1.5.4"
 
 jobs:
-  validate:
-    uses: ./.github/workflows/binary-validate.yml
-
   build:
-    name: ${{ matrix.os }} php ${{ matrix.php }}
-    needs: validate
+    name: ${{ matrix.os }} php ${{ matrix.php.version }}
     runs-on: ${{ matrix.os }}
     permissions:
-      contents: write
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -48,14 +42,19 @@ jobs:
           - ubuntu-24.04
           - ubuntu-24.04-arm
           - macos-14
-        php: ['8.4', '8.5']
+        php:
+          - version: '8.4'
+            baseline-image: php:8.4-cli-bookworm@sha256:138a210978c7767ef2a26f499c413fe6de1c13233c9a5068139565c81191b1ac
+          - version: '8.5'
+            baseline-image: php:8.5-cli-bookworm@sha256:fb740987f3e7aefd7f52d1f961fa91602874f2b6a5b0bf0105725f8987b54bee
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
 
       - name: Setup PHP
+        if: runner.os == 'macOS'
         uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # v2
         with:
-          php-version: ${{ matrix.php }}
+          php-version: ${{ matrix.php.version }}
           coverage: none
 
       - name: Download DuckDB static libs for this os/arch
@@ -72,9 +71,116 @@ jobs:
           mkdir -p duckdb-static
           unzip -o -q "$asset" -d duckdb-static
 
-      - name: Build and upload prebuilt binary
-        uses: php/pie-ext-binary-builder@5298761950f63c7e9565ed7004e922b346e4386c # 0.0.3
+      - name: Build and package prebuilt binary
+        id: package
+        shell: bash
+        env:
+          PHP_BASELINE_IMAGE: ${{ matrix.php.baseline-image }}
+          MATRIX_PHP_VERSION: ${{ matrix.php.version }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$RELEASE_TAG" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]*$ ]]; then
+            echo "unsupported release tag for an archive name"
+            exit 1
+          fi
+          if [ "$RUNNER_OS" = Linux ]; then
+            docker run --rm \
+              -v "$GITHUB_WORKSPACE:/work" \
+              -w /work \
+              "$PHP_BASELINE_IMAGE" \
+              bash -euo pipefail -c '
+                apt-get update -qq
+                apt-get install -y --no-install-recommends autoconf g++ make pkg-config
+                phpize
+                ./configure --with-pdo-duckdb-static=/work/duckdb-static
+                make -j"$(getconf _NPROCESSORS_ONLN)"
+              '
+          else
+            export MACOSX_DEPLOYMENT_TARGET=11.0
+            phpize
+            ./configure --with-pdo-duckdb-static="$GITHUB_WORKSPACE/duckdb-static"
+            make -j"$(getconf _NPROCESSORS_ONLN)"
+          fi
+
+          php_version="$MATRIX_PHP_VERSION"
+          case "$(uname -m)" in
+            x86_64) arch=x86_64 ;;
+            aarch64|arm64) arch=arm64 ;;
+            *) echo "unsupported architecture: $(uname -m)"; exit 1 ;;
+          esac
+          case "$(uname -s)" in
+            Linux) os=linux; libc=glibc ;;
+            Darwin) os=darwin; libc=bsdlibc ;;
+            *) echo "unsupported operating system: $(uname -s)"; exit 1 ;;
+          esac
+          package="php_pdo_duckdb-${RELEASE_TAG}_php${php_version}-${arch}-${os}-${libc}.zip"
+
+          zip -j "$package" modules/pdo_duckdb.so
+          shasum -a 256 "$package"
+          echo "package=$package" >> "$GITHUB_OUTPUT"
+
+      - name: Validate the exact release archive
+        shell: bash
+        env:
+          PACKAGE: ${{ steps.package.outputs.package }}
+          PHP_BASELINE_IMAGE: ${{ matrix.php.baseline-image }}
+        run: |
+          set -euo pipefail
+          rm -rf release-stage
+          mkdir release-stage
+          unzip -q "$PACKAGE" -d release-stage
+          test -f release-stage/pdo_duckdb.so
+
+          if [ "$RUNNER_OS" = Linux ]; then
+            if ldd release-stage/pdo_duckdb.so | grep -qi libduckdb; then
+              echo "release archive still depends on libduckdb"
+              exit 1
+            fi
+            max_glibc=$(
+              readelf --version-info release-stage/pdo_duckdb.so \
+                | grep -oE 'GLIBC_[0-9]+(\.[0-9]+)+' \
+                | sort -Vu \
+                | tail -1
+            )
+            if [ -z "$max_glibc" ] ||
+                [ "$(printf '%s\n' "$max_glibc" GLIBC_2.36 | sort -V | tail -1)" != GLIBC_2.36 ]; then
+              printf 'release archive requires unsupported glibc version: %s\n' "$max_glibc"
+              exit 1
+            fi
+            # shellcheck disable=SC2016
+            docker run --rm \
+              -v "$PWD/release-stage/pdo_duckdb.so:/ext/pdo_duckdb.so:ro" \
+              "$PHP_BASELINE_IMAGE" \
+              php -d extension=/ext/pdo_duckdb.so -r '
+                $d = new PDO("duckdb::memory:");
+                $d->exec("CREATE TABLE t(i INTEGER)");
+                $d->exec("INSERT INTO t VALUES (1), (2)");
+                if ((int) $d->query("SELECT count(*) FROM t")->fetchColumn() !== 2) exit(1);
+              '
+          else
+            if otool -L release-stage/pdo_duckdb.so | grep -qi libduckdb; then
+              echo "release archive still depends on libduckdb"
+              exit 1
+            fi
+            min_macos=$(otool -l release-stage/pdo_duckdb.so | awk '$1 == "minos" { print $2; exit }')
+            case "$min_macos" in
+              11.0|11.0.0) ;;
+              *) printf 'release archive has unexpected macOS minimum: %s\n' "$min_macos"; exit 1 ;;
+            esac
+            # shellcheck disable=SC2016
+            php -n -d extension="$PWD/release-stage/pdo_duckdb.so" -r '
+              $d = new PDO("duckdb::memory:");
+              $d->exec("CREATE TABLE t(i INTEGER)");
+              $d->exec("INSERT INTO t VALUES (1), (2)");
+              if ((int) $d->query("SELECT count(*) FROM t")->fetchColumn() !== 2) exit(1);
+            '
+          fi
+          shasum -a 256 "$PACKAGE"
+
+      - name: Stage validated release archive
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          release-tag: ${{ github.event.release.tag_name }}
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          configure-flags: '--with-pdo-duckdb-static=${{ github.workspace }}/duckdb-static'
+          name: release-unix-${{ matrix.os }}-php${{ matrix.php.version }}
+          path: ${{ steps.package.outputs.package }}
+          if-no-files-found: error

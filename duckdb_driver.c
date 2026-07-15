@@ -97,12 +97,76 @@ static void duckdb_handle_closer(pdo_dbh_t *dbh) /* {{{ */
 }
 /* }}} */
 
+enum {
+	PDO_DUCKDB_SQL_DIRECT_TRANSACTION = 1 << 0,
+	PDO_DUCKDB_SQL_EXPLAIN_ANALYZE_TRANSACTION = 1 << 1,
+	PDO_DUCKDB_SQL_MULTIPLE_STATEMENTS = 1 << 2
+};
+
+static unsigned int pdo_duckdb_sql_transaction_flags(const char *sql, size_t len,
+	pdo_duckdb_transaction_effect *effects, size_t effects_capacity,
+	size_t *statement_count);
+static pdo_duckdb_transaction_effect pdo_duckdb_sql_first_transaction_effect(
+	const char *sql, size_t len);
+
+static size_t pdo_duckdb_sql_unicode_space_len(const char *sql, size_t len)
+{
+	const unsigned char *s = (const unsigned char *)sql;
+
+	if (len >= 2 && s[0] == 0xC2 && s[1] == 0xA0) {
+		return 2; /* NO-BREAK SPACE */
+	}
+	if (len >= 3) {
+		if (s[0] == 0xE2 && s[1] == 0x80 &&
+				((s[2] >= 0x80 && s[2] <= 0x8A) || s[2] == 0xAF)) {
+			return 3; /* U+2000..U+200A, NARROW NO-BREAK SPACE */
+		}
+		if ((s[0] == 0xE2 && s[1] == 0x81 && s[2] == 0x9F) ||
+				(s[0] == 0xE3 && s[1] == 0x80 && s[2] == 0x80) ||
+				(s[0] == 0xEF && s[1] == 0xBB && s[2] == 0xBF)) {
+			return 3; /* MEDIUM MATHEMATICAL SPACE, IDEOGRAPHIC SPACE, BOM */
+		}
+	}
+	return 0;
+}
+
+static bool pdo_duckdb_sql_may_have_multiple_statements(const char *sql, size_t len)
+{
+	const char *semicolon = memchr(sql, ';', len);
+	size_t pos;
+
+	if (!semicolon) {
+		return false;
+	}
+	pos = (size_t)(semicolon - sql) + 1;
+	while (pos < len) {
+		unsigned char c = (unsigned char)sql[pos];
+		size_t unicode_space_len = pdo_duckdb_sql_unicode_space_len(sql + pos, len - pos);
+		if (unicode_space_len) {
+			pos += unicode_space_len;
+			continue;
+		}
+		if (c != ';' && c != ' ' && c != '\t' && c != '\n' &&
+				c != '\r' && c != '\f' && c != '\v') {
+			return true;
+		}
+		pos++;
+	}
+	return false;
+}
+
 static bool duckdb_handle_preparer(pdo_dbh_t *dbh, zend_string *sql, pdo_stmt_t *stmt, zval *driver_options)
 {
 	pdo_duckdb_db_handle *H = (pdo_duckdb_db_handle *)dbh->driver_data;
 	pdo_duckdb_stmt *S;
 	zend_string *rewritten = NULL;
+	pdo_duckdb_transaction_effect transaction_effect = PDO_DUCKDB_TRANSACTION_NONE;
 	int parse_ret;
+
+	if (PDO_CURSOR_FWDONLY != pdo_attr_lval(driver_options, PDO_ATTR_CURSOR, PDO_CURSOR_FWDONLY)) {
+		pdo_duckdb_error(dbh, "DuckDB PDO driver only supports forward-only cursors");
+		return false;
+	}
 
 	/* duckdb_prepare() takes a NUL-terminated const char*, so an embedded NUL
 	 * would silently truncate the statement (e.g. "SELECT 1\0DROP ..." prepares
@@ -112,6 +176,9 @@ static bool duckdb_handle_preparer(pdo_dbh_t *dbh, zend_string *sql, pdo_stmt_t 
 		return false;
 	}
 
+	transaction_effect = pdo_duckdb_sql_first_transaction_effect(
+		ZSTR_VAL(sql), ZSTR_LEN(sql));
+
 	if (!pdo_duckdb_enforce_sandbox(H)) {
 		pdo_duckdb_error(dbh, "Unable to apply the open_basedir sandbox profile to DuckDB");
 		return false;
@@ -119,6 +186,7 @@ static bool duckdb_handle_preparer(pdo_dbh_t *dbh, zend_string *sql, pdo_stmt_t 
 
 	S = ecalloc(1, sizeof(pdo_duckdb_stmt));
 	S->H = H;
+	S->transaction_effect = transaction_effect;
 	stmt->driver_data = S;
 	stmt->methods = &duckdb_stmt_methods;
 	/* DuckDB understands $1/$2 numbered parameters. Declaring NAMED support with
@@ -149,6 +217,7 @@ static bool duckdb_handle_preparer(pdo_dbh_t *dbh, zend_string *sql, pdo_stmt_t 
 		}
 		return false;
 	}
+	S->statement_type = duckdb_prepared_statement_type(S->prepared);
 
 	if (rewritten) {
 		zend_string_release(rewritten);
@@ -156,11 +225,445 @@ static bool duckdb_handle_preparer(pdo_dbh_t *dbh, zend_string *sql, pdo_stmt_t 
 	return true;
 }
 
+void pdo_duckdb_sync_transaction_state(pdo_dbh_t *dbh, duckdb_statement_type type,
+		pdo_duckdb_transaction_effect effect)
+{
+	if (effect == PDO_DUCKDB_TRANSACTION_OPEN) {
+		dbh->in_txn = true;
+		return;
+	}
+	if (effect == PDO_DUCKDB_TRANSACTION_CLOSE) {
+		dbh->in_txn = false;
+		return;
+	}
+	if (type == DUCKDB_STATEMENT_TYPE_TRANSACTION) {
+		dbh->in_txn = !dbh->in_txn;
+	}
+}
+
+static bool pdo_duckdb_ascii_keyword(const char *token, size_t len, const char *keyword)
+{
+	size_t i;
+
+	if (strlen(keyword) != len) {
+		return false;
+	}
+	for (i = 0; i < len; i++) {
+		unsigned char c = (unsigned char)token[i];
+		if (c >= 'a' && c <= 'z') {
+			c = (unsigned char)(c - ('a' - 'A'));
+		}
+		if (c != (unsigned char)keyword[i]) {
+			return false;
+		}
+	}
+	return true;
+}
+
+typedef enum {
+	PDO_DUCKDB_SQL_TOKEN_EOF,
+	PDO_DUCKDB_SQL_TOKEN_WORD,
+	PDO_DUCKDB_SQL_TOKEN_QUOTED_WORD,
+	PDO_DUCKDB_SQL_TOKEN_LPAREN,
+	PDO_DUCKDB_SQL_TOKEN_RPAREN,
+	PDO_DUCKDB_SQL_TOKEN_COMMA,
+	PDO_DUCKDB_SQL_TOKEN_SEMICOLON,
+	PDO_DUCKDB_SQL_TOKEN_OTHER
+} pdo_duckdb_sql_token_kind;
+
+typedef struct {
+	pdo_duckdb_sql_token_kind kind;
+	const char *start;
+	size_t len;
+} pdo_duckdb_sql_token;
+
+typedef struct {
+	const char *sql;
+	size_t len;
+	size_t pos;
+} pdo_duckdb_sql_scanner;
+
+static bool pdo_duckdb_sql_word_start(unsigned char c)
+{
+	return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_';
+}
+
+static bool pdo_duckdb_sql_word_continue(unsigned char c)
+{
+	return pdo_duckdb_sql_word_start(c) || (c >= '0' && c <= '9') || c == '$';
+}
+
+static bool pdo_duckdb_sql_skip_dollar_quote(pdo_duckdb_sql_scanner *scanner)
+{
+	size_t start = scanner->pos;
+	size_t tag_end = start + 1;
+	size_t delimiter_len;
+	size_t i;
+
+	while (tag_end < scanner->len) {
+		unsigned char c = (unsigned char)scanner->sql[tag_end];
+		if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+				(c >= '0' && c <= '9') || c == '_')) {
+			break;
+		}
+		tag_end++;
+	}
+	if (tag_end >= scanner->len || scanner->sql[tag_end] != '$') {
+		return false;
+	}
+
+	delimiter_len = tag_end - start + 1;
+	i = tag_end + 1;
+	while (i <= scanner->len - delimiter_len) {
+		if (scanner->sql[i] == '$' &&
+				memcmp(scanner->sql + i, scanner->sql + start, delimiter_len) == 0) {
+			scanner->pos = i + delimiter_len;
+			return true;
+		}
+		i++;
+	}
+
+	/* Let DuckDB report the unterminated literal; consume it here so tokens in
+	 * its body cannot be mistaken for statement boundaries. */
+	scanner->pos = scanner->len;
+	return true;
+}
+
+static void pdo_duckdb_sql_skip_quoted(pdo_duckdb_sql_scanner *scanner,
+		unsigned char quote, bool backslash_escapes)
+{
+	scanner->pos++;
+	while (scanner->pos < scanner->len) {
+		unsigned char c = (unsigned char)scanner->sql[scanner->pos];
+
+		if (backslash_escapes && c == '\\' && scanner->pos + 1 < scanner->len) {
+			scanner->pos += 2;
+			continue;
+		}
+		if (c == quote) {
+			if (scanner->pos + 1 < scanner->len &&
+					(unsigned char)scanner->sql[scanner->pos + 1] == quote) {
+				scanner->pos += 2;
+				continue;
+			}
+			scanner->pos++;
+			return;
+		}
+		scanner->pos++;
+	}
+}
+
+static pdo_duckdb_sql_token pdo_duckdb_sql_next_token(pdo_duckdb_sql_scanner *scanner)
+{
+	pdo_duckdb_sql_token token = {PDO_DUCKDB_SQL_TOKEN_EOF, NULL, 0};
+
+	while (scanner->pos < scanner->len) {
+		unsigned char c = (unsigned char)scanner->sql[scanner->pos];
+		size_t unicode_space_len = pdo_duckdb_sql_unicode_space_len(
+			scanner->sql + scanner->pos, scanner->len - scanner->pos);
+
+		if (c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v') {
+			scanner->pos++;
+			continue;
+		}
+		if (unicode_space_len) {
+			scanner->pos += unicode_space_len;
+			continue;
+		}
+		if (c == '-' && scanner->pos + 1 < scanner->len &&
+				scanner->sql[scanner->pos + 1] == '-') {
+			scanner->pos += 2;
+			while (scanner->pos < scanner->len &&
+					scanner->sql[scanner->pos] != '\n' && scanner->sql[scanner->pos] != '\r') {
+				scanner->pos++;
+			}
+			continue;
+		}
+		if (c == '/' && scanner->pos + 1 < scanner->len &&
+				scanner->sql[scanner->pos + 1] == '*') {
+			size_t depth = 1;
+			scanner->pos += 2;
+			while (scanner->pos < scanner->len && depth > 0) {
+				if (scanner->pos + 1 < scanner->len &&
+						scanner->sql[scanner->pos] == '/' && scanner->sql[scanner->pos + 1] == '*') {
+					depth++;
+					scanner->pos += 2;
+				} else if (scanner->pos + 1 < scanner->len &&
+						scanner->sql[scanner->pos] == '*' && scanner->sql[scanner->pos + 1] == '/') {
+					depth--;
+					scanner->pos += 2;
+				} else {
+					scanner->pos++;
+				}
+			}
+			continue;
+		}
+		if ((c == 'E' || c == 'e') && scanner->pos + 1 < scanner->len &&
+				scanner->sql[scanner->pos + 1] == '\'') {
+			scanner->pos++;
+			pdo_duckdb_sql_skip_quoted(scanner, '\'', true);
+			token.kind = PDO_DUCKDB_SQL_TOKEN_OTHER;
+			return token;
+		}
+		if (c == '\'') {
+			pdo_duckdb_sql_skip_quoted(scanner, c, false);
+			token.kind = PDO_DUCKDB_SQL_TOKEN_OTHER;
+			return token;
+		}
+		if (c == '"') {
+			size_t start;
+			scanner->pos++;
+			start = scanner->pos;
+			while (scanner->pos < scanner->len) {
+				if (scanner->sql[scanner->pos] == '"') {
+					if (scanner->pos + 1 < scanner->len && scanner->sql[scanner->pos + 1] == '"') {
+						scanner->pos += 2;
+						continue;
+					}
+					token.kind = PDO_DUCKDB_SQL_TOKEN_QUOTED_WORD;
+					token.start = scanner->sql + start;
+					token.len = scanner->pos - start;
+					scanner->pos++;
+					return token;
+				}
+				scanner->pos++;
+			}
+			token.kind = PDO_DUCKDB_SQL_TOKEN_OTHER;
+			return token;
+		}
+		if (c == '$' && pdo_duckdb_sql_skip_dollar_quote(scanner)) {
+			token.kind = PDO_DUCKDB_SQL_TOKEN_OTHER;
+			return token;
+		}
+		if (pdo_duckdb_sql_word_start(c)) {
+			size_t start = scanner->pos++;
+			while (scanner->pos < scanner->len &&
+					pdo_duckdb_sql_word_continue((unsigned char)scanner->sql[scanner->pos])) {
+				scanner->pos++;
+			}
+			token.kind = PDO_DUCKDB_SQL_TOKEN_WORD;
+			token.start = scanner->sql + start;
+			token.len = scanner->pos - start;
+			return token;
+		}
+
+		scanner->pos++;
+		switch (c) {
+			case '(': token.kind = PDO_DUCKDB_SQL_TOKEN_LPAREN; break;
+			case ')': token.kind = PDO_DUCKDB_SQL_TOKEN_RPAREN; break;
+			case ',': token.kind = PDO_DUCKDB_SQL_TOKEN_COMMA; break;
+			case ';': token.kind = PDO_DUCKDB_SQL_TOKEN_SEMICOLON; break;
+			default: token.kind = PDO_DUCKDB_SQL_TOKEN_OTHER; break;
+		}
+		return token;
+	}
+	return token;
+}
+
+static bool pdo_duckdb_sql_token_is_keyword(pdo_duckdb_sql_token token,
+		const char *keyword, bool allow_quoted)
+{
+	return (token.kind == PDO_DUCKDB_SQL_TOKEN_WORD ||
+			(allow_quoted && token.kind == PDO_DUCKDB_SQL_TOKEN_QUOTED_WORD)) &&
+		pdo_duckdb_ascii_keyword(token.start, token.len, keyword);
+}
+
+static pdo_duckdb_transaction_effect pdo_duckdb_sql_token_transaction_effect(
+		pdo_duckdb_sql_token token)
+{
+	if (pdo_duckdb_sql_token_is_keyword(token, "BEGIN", false) ||
+			pdo_duckdb_sql_token_is_keyword(token, "START", false)) {
+		return PDO_DUCKDB_TRANSACTION_OPEN;
+	}
+	if (pdo_duckdb_sql_token_is_keyword(token, "COMMIT", false) ||
+			pdo_duckdb_sql_token_is_keyword(token, "END", false) ||
+			pdo_duckdb_sql_token_is_keyword(token, "ROLLBACK", false) ||
+			pdo_duckdb_sql_token_is_keyword(token, "ABORT", false)) {
+		return PDO_DUCKDB_TRANSACTION_CLOSE;
+	}
+	return PDO_DUCKDB_TRANSACTION_NONE;
+}
+
+static pdo_duckdb_sql_token pdo_duckdb_sql_scan_explain(
+		pdo_duckdb_sql_scanner *scanner, bool *analyze)
+{
+	pdo_duckdb_sql_token token = pdo_duckdb_sql_next_token(scanner);
+
+	if (pdo_duckdb_sql_token_is_keyword(token, "ANALYZE", false) ||
+			pdo_duckdb_sql_token_is_keyword(token, "ANALYSE", false)) {
+		*analyze = true;
+		token = pdo_duckdb_sql_next_token(scanner);
+	}
+
+	if (token.kind == PDO_DUCKDB_SQL_TOKEN_LPAREN) {
+		size_t depth = 1;
+		bool option_start = true;
+
+		while (depth > 0) {
+			token = pdo_duckdb_sql_next_token(scanner);
+			if (token.kind == PDO_DUCKDB_SQL_TOKEN_EOF ||
+					token.kind == PDO_DUCKDB_SQL_TOKEN_SEMICOLON) {
+				return token;
+			}
+			if (token.kind == PDO_DUCKDB_SQL_TOKEN_LPAREN) {
+				depth++;
+				continue;
+			}
+			if (token.kind == PDO_DUCKDB_SQL_TOKEN_RPAREN) {
+				depth--;
+				continue;
+			}
+			if (depth == 1 && token.kind == PDO_DUCKDB_SQL_TOKEN_COMMA) {
+				option_start = true;
+				continue;
+			}
+			if (depth == 1 && option_start) {
+				if (pdo_duckdb_sql_token_is_keyword(token, "ANALYZE", true) ||
+						pdo_duckdb_sql_token_is_keyword(token, "ANALYSE", true)) {
+					*analyze = true;
+				}
+				option_start = false;
+			}
+		}
+		token = pdo_duckdb_sql_next_token(scanner);
+	}
+
+	return token;
+}
+
+static void pdo_duckdb_sql_skip_statement(pdo_duckdb_sql_scanner *scanner, size_t depth)
+{
+	for (;;) {
+		pdo_duckdb_sql_token token = pdo_duckdb_sql_next_token(scanner);
+
+		if (token.kind == PDO_DUCKDB_SQL_TOKEN_EOF) {
+			return;
+		}
+		if (token.kind == PDO_DUCKDB_SQL_TOKEN_LPAREN) {
+			depth++;
+		} else if (token.kind == PDO_DUCKDB_SQL_TOKEN_RPAREN) {
+			if (depth > 0) {
+				depth--;
+			}
+		} else if (token.kind == PDO_DUCKDB_SQL_TOKEN_SEMICOLON && depth == 0) {
+			return;
+		}
+	}
+}
+
+static pdo_duckdb_transaction_effect pdo_duckdb_sql_first_transaction_effect(
+		const char *sql, size_t len)
+{
+	pdo_duckdb_sql_scanner scanner = {sql, len, 0};
+	pdo_duckdb_sql_token first;
+	pdo_duckdb_transaction_effect effect;
+
+	do {
+		first = pdo_duckdb_sql_next_token(&scanner);
+	} while (first.kind == PDO_DUCKDB_SQL_TOKEN_SEMICOLON);
+
+	effect = pdo_duckdb_sql_token_transaction_effect(first);
+	if (effect != PDO_DUCKDB_TRANSACTION_NONE) {
+		return effect;
+	}
+	if (pdo_duckdb_sql_token_is_keyword(first, "EXPLAIN", false)) {
+		bool analyze = false;
+		pdo_duckdb_sql_token wrapped = pdo_duckdb_sql_scan_explain(&scanner, &analyze);
+
+		if (analyze) {
+			return pdo_duckdb_sql_token_transaction_effect(wrapped);
+		}
+	}
+	return PDO_DUCKDB_TRANSACTION_NONE;
+}
+
+static unsigned int pdo_duckdb_sql_transaction_flags(const char *sql, size_t len,
+		pdo_duckdb_transaction_effect *effects, size_t effects_capacity,
+		size_t *statement_count_out)
+{
+	pdo_duckdb_sql_scanner scanner = {sql, len, 0};
+	unsigned int flags = 0;
+	size_t statement_count = 0;
+
+	for (;;) {
+		pdo_duckdb_sql_token first = pdo_duckdb_sql_next_token(&scanner);
+		size_t initial_depth = first.kind == PDO_DUCKDB_SQL_TOKEN_LPAREN ? 1 : 0;
+		pdo_duckdb_transaction_effect effect = PDO_DUCKDB_TRANSACTION_NONE;
+
+		if (first.kind == PDO_DUCKDB_SQL_TOKEN_EOF) {
+			*statement_count_out = statement_count;
+			return flags;
+		}
+		if (first.kind == PDO_DUCKDB_SQL_TOKEN_SEMICOLON) {
+			continue;
+		}
+		statement_count++;
+		if (statement_count > 1) {
+			flags |= PDO_DUCKDB_SQL_MULTIPLE_STATEMENTS;
+		}
+		effect = pdo_duckdb_sql_token_transaction_effect(first);
+		if (effect != PDO_DUCKDB_TRANSACTION_NONE) {
+			flags |= PDO_DUCKDB_SQL_DIRECT_TRANSACTION;
+		} else if (pdo_duckdb_sql_token_is_keyword(first, "EXPLAIN", false)) {
+			bool analyze = false;
+			pdo_duckdb_sql_token wrapped = pdo_duckdb_sql_scan_explain(&scanner, &analyze);
+
+			if (analyze) {
+				effect = pdo_duckdb_sql_token_transaction_effect(wrapped);
+				if (effect != PDO_DUCKDB_TRANSACTION_NONE) {
+					flags |= PDO_DUCKDB_SQL_EXPLAIN_ANALYZE_TRANSACTION;
+				}
+			}
+			initial_depth = wrapped.kind == PDO_DUCKDB_SQL_TOKEN_LPAREN ? 1 : 0;
+		}
+		if (effects && statement_count <= effects_capacity) {
+			effects[statement_count - 1] = effect;
+		}
+		pdo_duckdb_sql_skip_statement(&scanner, initial_depth);
+	}
+}
+
+static zend_long pdo_duckdb_exec_transaction_multi(pdo_dbh_t *dbh,
+		duckdb_extracted_statements extracted, idx_t count,
+		const pdo_duckdb_transaction_effect *effects)
+{
+	pdo_duckdb_db_handle *H = (pdo_duckdb_db_handle *)dbh->driver_data;
+	zend_long changed = 0;
+	idx_t i;
+
+	for (i = 0; i < count; i++) {
+		duckdb_prepared_statement prepared = NULL;
+		duckdb_result result;
+		duckdb_statement_type type;
+
+		if (duckdb_prepare_extracted_statement(H->conn, extracted, i, &prepared) != DuckDBSuccess) {
+			pdo_duckdb_error(dbh, prepared ? duckdb_prepare_error(prepared) : "Unable to prepare DuckDB statement");
+			duckdb_destroy_prepare(&prepared);
+			return -1;
+		}
+		type = duckdb_prepared_statement_type(prepared);
+		if (duckdb_execute_prepared(prepared, &result) != DuckDBSuccess) {
+			pdo_duckdb_error(dbh, duckdb_result_error(&result));
+			duckdb_destroy_result(&result);
+			duckdb_destroy_prepare(&prepared);
+			return -1;
+		}
+		changed = (zend_long)duckdb_rows_changed(&result);
+		pdo_duckdb_sync_transaction_state(dbh, type, effects[i]);
+		duckdb_destroy_result(&result);
+		duckdb_destroy_prepare(&prepared);
+	}
+	return changed;
+}
+
 static zend_long duckdb_handle_doer(pdo_dbh_t *dbh, const zend_string *sql)
 {
 	pdo_duckdb_db_handle *H = (pdo_duckdb_db_handle *)dbh->driver_data;
 	duckdb_result result;
 	zend_long changed;
+	unsigned int transaction_flags;
+	pdo_duckdb_transaction_effect transaction_effect = PDO_DUCKDB_TRANSACTION_NONE;
+	size_t statement_count;
 
 	/* duckdb_query() takes a NUL-terminated const char*: an embedded NUL would
 	 * silently truncate the statement. Reject it. */
@@ -169,9 +672,50 @@ static zend_long duckdb_handle_doer(pdo_dbh_t *dbh, const zend_string *sql)
 		return -1;
 	}
 
+	transaction_flags = 0;
+	if (pdo_duckdb_sql_may_have_multiple_statements(ZSTR_VAL(sql), ZSTR_LEN(sql))) {
+		transaction_flags = pdo_duckdb_sql_transaction_flags(
+			ZSTR_VAL(sql), ZSTR_LEN(sql), &transaction_effect, 1, &statement_count);
+	} else {
+		transaction_effect = pdo_duckdb_sql_first_transaction_effect(
+			ZSTR_VAL(sql), ZSTR_LEN(sql));
+	}
+
 	if (!pdo_duckdb_enforce_sandbox(H)) {
 		pdo_duckdb_error(dbh, "Unable to apply the open_basedir sandbox profile to DuckDB");
 		return -1;
+	}
+
+	if ((transaction_flags & PDO_DUCKDB_SQL_MULTIPLE_STATEMENTS) &&
+			(transaction_flags & (PDO_DUCKDB_SQL_DIRECT_TRANSACTION |
+				PDO_DUCKDB_SQL_EXPLAIN_ANALYZE_TRANSACTION))) {
+		duckdb_extracted_statements extracted = NULL;
+		idx_t count = duckdb_extract_statements(H->conn, ZSTR_VAL(sql), &extracted);
+		pdo_duckdb_transaction_effect *effects = ecalloc(
+			statement_count, sizeof(pdo_duckdb_transaction_effect));
+		size_t verified_statement_count;
+
+		(void)pdo_duckdb_sql_transaction_flags(ZSTR_VAL(sql), ZSTR_LEN(sql),
+			effects, statement_count, &verified_statement_count);
+
+		if (count == 0) {
+			pdo_duckdb_error(dbh, duckdb_extract_statements_error(extracted));
+			efree(effects);
+			duckdb_destroy_extracted(&extracted);
+			return -1;
+		}
+		if (count > 1 && count == verified_statement_count) {
+			changed = pdo_duckdb_exec_transaction_multi(dbh, extracted, count, effects);
+			efree(effects);
+			duckdb_destroy_extracted(&extracted);
+			return changed;
+		}
+		efree(effects);
+		duckdb_destroy_extracted(&extracted);
+		if (count != verified_statement_count) {
+			pdo_duckdb_error(dbh, "Unable to classify the DuckDB multi-statement transaction batch");
+			return -1;
+		}
 	}
 
 	if (duckdb_query(H->conn, ZSTR_VAL(sql), &result) != DuckDBSuccess) {
@@ -181,6 +725,8 @@ static zend_long duckdb_handle_doer(pdo_dbh_t *dbh, const zend_string *sql)
 	}
 
 	changed = (zend_long)duckdb_rows_changed(&result);
+	pdo_duckdb_sync_transaction_state(dbh, duckdb_result_statement_type(result),
+		transaction_effect);
 	duckdb_destroy_result(&result);
 	return changed;
 }
@@ -535,6 +1081,26 @@ static const char *pdo_duckdb_open_error_message(const char *open_error)
 	return "Unable to open DuckDB database";
 }
 
+static zend_string *pdo_duckdb_config_scalar_to_string(zval *value)
+{
+	ZVAL_DEREF(value);
+
+	switch (Z_TYPE_P(value)) {
+		case IS_NULL:
+		case IS_FALSE:
+		case IS_TRUE:
+		case IS_LONG:
+		case IS_DOUBLE:
+		case IS_STRING:
+			return zval_get_string(value);
+		default:
+			zend_throw_exception_ex(php_pdo_get_exception(), 0,
+				"PDO::DUCKDB_ATTR_CONFIG values must be scalar or null, %s given",
+				zend_zval_type_name(value));
+			return NULL;
+	}
+}
+
 /* Build the DuckDB open-time config from user options and the open_basedir
  * sandbox. Sources, applied in this order so the sandbox always wins:
  *   1. DSN "key=value;..." pairs (everything after the first ';' in the DSN)
@@ -626,12 +1192,25 @@ static bool pdo_duckdb_build_config(pdo_dbh_t *dbh, const char *dsn_opts,
 						"PDO::DUCKDB_ATTR_CONFIG keys must be option-name strings");
 					return false;
 				}
-				ZVAL_DEREF(val);
-					sval = zval_get_string(val);
 					/* duckdb_set_config() takes NUL-terminated strings; an embedded NUL
 					 * in the option name or value would be silently truncated, applying
 					 * a different (possibly security-relevant) option than requested. */
-					if (zend_str_has_nul_byte(key) || zend_str_has_nul_byte(sval)) {
+					if (zend_str_has_nul_byte(key)) {
+						if (config) {
+							duckdb_destroy_config(&config);
+						}
+						zend_throw_exception_ex(php_pdo_get_exception(), 0,
+							"PDO::DUCKDB_ATTR_CONFIG option names and values must not contain a NUL byte");
+						return false;
+					}
+					sval = pdo_duckdb_config_scalar_to_string(val);
+					if (!sval) {
+						if (config) {
+							duckdb_destroy_config(&config);
+						}
+						return false;
+					}
+					if (zend_str_has_nul_byte(sval)) {
 						zend_string_release(sval);
 						if (config) {
 							duckdb_destroy_config(&config);

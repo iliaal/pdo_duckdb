@@ -1,0 +1,52 @@
+name: Release binaries
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  unix:
+    name: Build Linux and macOS archives
+    permissions:
+      contents: read
+    uses: ./.github/workflows/release-linux.yml
+
+  windows:
+    name: Build Windows archives
+    permissions:
+      contents: read
+    uses: ./.github/workflows/release-windows.yml
+
+  publish:
+    name: Publish complete archive set
+    needs: [unix, windows]
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RELEASE_TAG: ${{ github.event.release.tag_name }}
+    steps:
+      - name: Download and publish the complete validated archive set
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "$RELEASE_TAG" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]*$ ]]; then
+            printf 'unsupported release tag for an archive name\n'
+            exit 1
+          fi
+
+          gh run download "$GITHUB_RUN_ID" --pattern 'release-*' --dir release-assets
+          readarray -d '' archives < <(
+            find release-assets -type f -name '*.zip' -print0
+          )
+          if [ "${#archives[@]}" -ne 10 ]; then
+            printf 'expected 10 validated release archives, found %d\n' "${#archives[@]}"
+            exit 1
+          fi
+          gh release upload "$RELEASE_TAG" "${archives[@]}" --clobber

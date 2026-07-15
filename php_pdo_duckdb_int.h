@@ -73,6 +73,21 @@ typedef struct {
 	bool config_reapply_pending;
 } pdo_duckdb_db_handle;
 
+typedef struct _pdo_duckdb_nested_render_type {
+	duckdb_type type;
+	duckdb_logical_type logical_type;
+	bool owns_logical_type;
+	idx_t child_count;
+	struct _pdo_duckdb_nested_render_type **children;
+	char **child_names;
+} pdo_duckdb_nested_render_type;
+
+typedef enum {
+	PDO_DUCKDB_TRANSACTION_NONE,
+	PDO_DUCKDB_TRANSACTION_OPEN,
+	PDO_DUCKDB_TRANSACTION_CLOSE
+} pdo_duckdb_transaction_effect;
+
 typedef struct {
 	pdo_duckdb_db_handle *H;
 	duckdb_prepared_statement prepared;
@@ -88,10 +103,18 @@ typedef struct {
 	idx_t col_count;			/* cached result column count */
 	duckdb_type *col_types;		/* cached result column type ids */
 	duckdb_logical_type *col_logical_types; /* cached result logical types */
-	unsigned char *col_fast_nested; /* nested canonical strings can use the
-									 * direct renderer */
+	pdo_duckdb_nested_render_type **col_nested_renderers; /* immutable type/name
+									 * descriptors for direct nested rendering */
 	bool started;				/* has the first chunk been fetched? */
 	bool done;					/* all chunks consumed */
+	/* Explicit effect for transaction control wrapped by EXPLAIN ANALYZE (whose
+	 * native statement type is EXPLAIN), and for direct aliases recognized at
+	 * prepare time. Applied only after native execution succeeds. */
+	pdo_duckdb_transaction_effect transaction_effect;
+	/* Native statement classification is immutable for a prepared statement.
+	 * Cache it at prepare time so repeated execute() calls do not cross the
+	 * DuckDB C API solely to keep PDO's transaction flag synchronized. */
+	duckdb_statement_type statement_type;
 	/* Per-execute latch. DuckDB keeps prepared-statement bindings across
 	 * executes, so re-executing with fewer params would silently reuse the
 	 * previous values. Cleared once per execute round — on the first EXEC_PRE
@@ -133,6 +156,11 @@ const zend_function_entry *pdo_duckdb_get_driver_methods(pdo_dbh_t *dbh, int kin
  * config didn't include the sandbox). One-time per handle. Returns false if the
  * sandbox is required but could not be applied. */
 bool pdo_duckdb_enforce_sandbox(pdo_duckdb_db_handle *H);
+
+/* Keep PDO's transaction flag aligned when SQL executes transaction control
+ * outside beginTransaction()/commit()/rollBack(). */
+void pdo_duckdb_sync_transaction_state(pdo_dbh_t *dbh, duckdb_statement_type type,
+	pdo_duckdb_transaction_effect effect);
 
 /* Records an error against the dbh (or stmt). msg is copied; pass the message
  * obtained from duckdb_result_error()/duckdb_prepare_error() or a literal. */

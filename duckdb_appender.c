@@ -523,7 +523,7 @@ static duckdb_value pdo_duckdb_build_value(zval *z, duckdb_logical_type lt, uint
 			for (i = 0; i < cnt; i++) {
 				char *fname = duckdb_struct_type_child_name(lt, i);
 				duckdb_logical_type ft = duckdb_struct_type_child_type(lt, i);
-				zval *fv = fname ? zend_hash_str_find(ht, fname, strlen(fname)) : NULL;
+				zval *fv = fname ? zend_symtable_str_find(ht, fname, strlen(fname)) : NULL;
 				duckdb_value cv;
 
 				if (!fv) {

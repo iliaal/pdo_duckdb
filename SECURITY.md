@@ -54,12 +54,13 @@ In scope:
 - `open_basedir` bypasses. On the database file, the driver runs the
   `duckdb:` DSN path through `php_check_open_basedir()` before opening
   it. When `open_basedir` is set, it applies a locked DuckDB sandbox
-  profile: external file access is disabled (`enable_external_access=false`),
-  path allowlists are rejected or cleared, extension auto-install/load is
-  disabled, and runtime configuration changes are blocked. SQL-level reads
-  such as `read_csv`, `COPY`, `ATTACH`, and extension loading are blocked
-  entirely, including for paths inside `open_basedir`. A bypass of either
-  gate is in scope.
+  profile. The driver sets `enable_external_access=false`, rejects or clears
+  path allowlists, disables extension auto-install/load, and locks runtime
+  configuration. The sandbox blocks `read_csv`, `COPY`, `ATTACH`, downloaded
+  extensions, and extension files even for paths inside `open_basedir`.
+  You can still use `LOAD` for an extension compiled into DuckDB, such as
+  `json`, because it does not cross a filesystem boundary. A bypass of either
+  filesystem gate is in scope.
 - Parameter-binding flaws that break the prepared-statement boundary (a
   bound value altering statement structure).
 - Arginfo / ZPP mismatches that cause undefined behavior reachable from
