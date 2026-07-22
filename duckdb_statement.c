@@ -669,23 +669,7 @@ static bool pdo_duckdb_fast_col_to_string(duckdb_type tid, duckdb_logical_type l
 			ZVAL_STRINGL(result, buf, len);
 			return true;
 		}
-		case DUCKDB_TYPE_TIMESTAMP: {
-			duckdb_timestamp ts = ((duckdb_timestamp *)data)[row];
-			duckdb_timestamp_struct parts;
-			size_t dlen;
-
-			if (!duckdb_is_finite_timestamp(ts)) {
-				return false;
-			}
-			parts = duckdb_from_timestamp(ts);
-			if (!pdo_duckdb_format_date_part(duckdb_to_date(parts.date), buf, &dlen)) {
-				return false;
-			}
-			buf[dlen++] = ' ';
-			len = pdo_duckdb_format_time_part(parts.time, buf + dlen);
-			ZVAL_STRINGL(result, buf, dlen + len);
-			return true;
-		}
+		case DUCKDB_TYPE_TIMESTAMP:
 		case DUCKDB_TYPE_TIMESTAMP_TZ: {
 			duckdb_timestamp ts = ((duckdb_timestamp *)data)[row];
 			duckdb_timestamp_struct parts;
@@ -700,8 +684,11 @@ static bool pdo_duckdb_fast_col_to_string(duckdb_type tid, duckdb_logical_type l
 			}
 			buf[dlen++] = ' ';
 			len = pdo_duckdb_format_time_part(parts.time, buf + dlen);
-			memcpy(buf + dlen + len, "+00", 3);
-			ZVAL_STRINGL(result, buf, dlen + len + 3);
+			if (tid == DUCKDB_TYPE_TIMESTAMP_TZ) {
+				memcpy(buf + dlen + len, "+00", 3);
+				len += 3;
+			}
+			ZVAL_STRINGL(result, buf, dlen + len);
 			return true;
 		}
 		case DUCKDB_TYPE_INTERVAL:

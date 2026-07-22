@@ -815,28 +815,28 @@ static bool pdo_duckdb_set_attr(pdo_dbh_t *dbh, zend_long attr, zval *val)
 			 * constructor option without raising IM001. */
 			return true;
 
-			case PDO_DUCKDB_ATTR_UNBUFFERED:
-				((pdo_duckdb_db_handle *)dbh->driver_data)->unbuffered = zend_is_true(val);
+		case PDO_DUCKDB_ATTR_UNBUFFERED:
+			((pdo_duckdb_db_handle *)dbh->driver_data)->unbuffered = zend_is_true(val);
+			return true;
+
+		case PDO_DUCKDB_ATTR_CONFIG:
+		{
+			pdo_duckdb_db_handle *H = (pdo_duckdb_db_handle *)dbh->driver_data;
+			/* Consumed at open time by the handle factory (DuckDB config is
+			 * open-time only). PDO core re-applies constructor driver-options
+			 * through set_attribute after the factory; accept that one reapply,
+			 * then reject runtime attempts instead of pretending to reconfigure
+			 * an already-open database. */
+			if (H->config_reapply_pending) {
+				H->config_reapply_pending = false;
 				return true;
-
-			case PDO_DUCKDB_ATTR_CONFIG:
-			{
-				pdo_duckdb_db_handle *H = (pdo_duckdb_db_handle *)dbh->driver_data;
-				/* Consumed at open time by the handle factory (DuckDB config is
-				 * open-time only). PDO core re-applies constructor driver-options
-				 * through set_attribute after the factory; accept that one reapply,
-				 * then reject runtime attempts instead of pretending to reconfigure
-				 * an already-open database. */
-				if (H->config_reapply_pending) {
-					H->config_reapply_pending = false;
-					return true;
-				}
-				pdo_duckdb_error(dbh, "PDO::DUCKDB_ATTR_CONFIG can only be supplied when opening a DuckDB connection");
-				return false;
 			}
+			pdo_duckdb_error(dbh, "PDO::DUCKDB_ATTR_CONFIG can only be supplied when opening a DuckDB connection");
+			return false;
+		}
 
-			default:
-				return false;
+		default:
+			return false;
 	}
 }
 
@@ -1129,26 +1129,26 @@ static bool pdo_duckdb_build_config(pdo_dbh_t *dbh, const char *dsn_opts,
 	} while (0)
 
 	/* 1. DSN key=value pairs */
-		if (dsn_opts && *dsn_opts) {
-			char *copy = estrdup(dsn_opts);
-			char *save = NULL;
-			char *pair = php_strtok_r(copy, ";", &save);
+	if (dsn_opts && *dsn_opts) {
+		char *copy = estrdup(dsn_opts);
+		char *save = NULL;
+		char *pair = php_strtok_r(copy, ";", &save);
 
-			while (pair) {
-				char *eq = strchr(pair, '=');
-				if (eq && eq != pair) {
-					*eq = '\0';
-					if (sandbox && !pdo_duckdb_reject_sandbox_config_key(&config, pair, strlen(pair))) {
-						efree(copy);
-						return false;
-					}
-					DUCKDB_ENSURE_CONFIG();
-					if (!pdo_duckdb_set_one_config(&config, pair, eq + 1)) {
-						efree(copy);
-						return false;
-					}
-				} else if (*pair) {
-					/* a non-empty segment without '=' is malformed; a valid option may
+		while (pair) {
+			char *eq = strchr(pair, '=');
+			if (eq && eq != pair) {
+				*eq = '\0';
+				if (sandbox && !pdo_duckdb_reject_sandbox_config_key(&config, pair, strlen(pair))) {
+					efree(copy);
+					return false;
+				}
+				DUCKDB_ENSURE_CONFIG();
+				if (!pdo_duckdb_set_one_config(&config, pair, eq + 1)) {
+					efree(copy);
+					return false;
+				}
+			} else if (*pair) {
+				/* a non-empty segment without '=' is malformed; a valid option may
 				 * already have allocated config, so destroy it before bailing.
 				 * Do not echo the raw segment: DSN option tails can contain secrets. */
 				if (config) {
@@ -1181,8 +1181,8 @@ static bool pdo_duckdb_build_config(pdo_dbh_t *dbh, const char *dsn_opts,
 				return false;
 			}
 
-				ZEND_HASH_FOREACH_STR_KEY_VAL(Z_ARRVAL_P(cfg), key, val) {
-					zend_string *sval;
+			ZEND_HASH_FOREACH_STR_KEY_VAL(Z_ARRVAL_P(cfg), key, val) {
+				zend_string *sval;
 
 				if (!key) {
 					if (config) {
@@ -1192,42 +1192,42 @@ static bool pdo_duckdb_build_config(pdo_dbh_t *dbh, const char *dsn_opts,
 						"PDO::DUCKDB_ATTR_CONFIG keys must be option-name strings");
 					return false;
 				}
-					/* duckdb_set_config() takes NUL-terminated strings; an embedded NUL
-					 * in the option name or value would be silently truncated, applying
-					 * a different (possibly security-relevant) option than requested. */
-					if (zend_str_has_nul_byte(key)) {
-						if (config) {
-							duckdb_destroy_config(&config);
-						}
-						zend_throw_exception_ex(php_pdo_get_exception(), 0,
-							"PDO::DUCKDB_ATTR_CONFIG option names and values must not contain a NUL byte");
-						return false;
+				/* duckdb_set_config() takes NUL-terminated strings; an embedded NUL
+				 * in the option name or value would be silently truncated, applying
+				 * a different (possibly security-relevant) option than requested. */
+				if (zend_str_has_nul_byte(key)) {
+					if (config) {
+						duckdb_destroy_config(&config);
 					}
-					sval = pdo_duckdb_config_scalar_to_string(val);
-					if (!sval) {
-						if (config) {
-							duckdb_destroy_config(&config);
-						}
-						return false;
+					zend_throw_exception_ex(php_pdo_get_exception(), 0,
+						"PDO::DUCKDB_ATTR_CONFIG option names and values must not contain a NUL byte");
+					return false;
+				}
+				sval = pdo_duckdb_config_scalar_to_string(val);
+				if (!sval) {
+					if (config) {
+						duckdb_destroy_config(&config);
 					}
-					if (zend_str_has_nul_byte(sval)) {
-						zend_string_release(sval);
-						if (config) {
-							duckdb_destroy_config(&config);
-						}
-						zend_throw_exception_ex(php_pdo_get_exception(), 0,
-							"PDO::DUCKDB_ATTR_CONFIG option names and values must not contain a NUL byte");
-						return false;
+					return false;
+				}
+				if (zend_str_has_nul_byte(sval)) {
+					zend_string_release(sval);
+					if (config) {
+						duckdb_destroy_config(&config);
 					}
-					if (sandbox && !pdo_duckdb_reject_sandbox_config_key(&config, ZSTR_VAL(key), ZSTR_LEN(key))) {
-						zend_string_release(sval);
-						return false;
-					}
-					DUCKDB_ENSURE_CONFIG();
-					if (!pdo_duckdb_set_one_config(&config, ZSTR_VAL(key), ZSTR_VAL(sval))) {
-						zend_string_release(sval);
-						return false;
-					}
+					zend_throw_exception_ex(php_pdo_get_exception(), 0,
+						"PDO::DUCKDB_ATTR_CONFIG option names and values must not contain a NUL byte");
+					return false;
+				}
+				if (sandbox && !pdo_duckdb_reject_sandbox_config_key(&config, ZSTR_VAL(key), ZSTR_LEN(key))) {
+					zend_string_release(sval);
+					return false;
+				}
+				DUCKDB_ENSURE_CONFIG();
+				if (!pdo_duckdb_set_one_config(&config, ZSTR_VAL(key), ZSTR_VAL(sval))) {
+					zend_string_release(sval);
+					return false;
+				}
 				zend_string_release(sval);
 			} ZEND_HASH_FOREACH_END();
 		}
