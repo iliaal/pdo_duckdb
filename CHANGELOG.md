@@ -33,8 +33,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to run while a streaming result is partially consumed.
 - Surface DuckDB fetch errors that arrive when `duckdb_fetch_chunk()` returns no
   chunk, rather than treating them as ordinary end-of-result.
+- Release the native result (including unbuffered streams) after a mid-fetch
+  DuckDB error so the connection is not pinned until a later re-execute.
+- Reset the per-execute bind latch when sandbox escalate fails after `EXEC_PRE`,
+  so the next execute does not skip `duckdb_clear_bindings`.
+- Drop the latent `in_txn` toggle for unclassified `TRANSACTION` statements;
+  only explicit OPEN/CLOSE effects update PDO transaction state.
 
 ### Security
+- On runtime/`check_liveness` open_basedir escalate, reset `temp_directory` into
+  the first basedir entry, clear sticky `log_query_path` / `profiling_output`
+  writers, clear `allowed_configs`, and `DETACH` out-of-basedir attachments
+  before `enable_external_access=false` (DuckDB's OnSet re-allowlists temp and
+  attached paths after that flip and they cannot be cleared afterward).
+- Reject `allowed_configs` under open_basedir at connect time (lock-bypass list).
 - Harden the `open_basedir` DuckDB sandbox profile by rejecting path and
   extension-loading config keys, clearing runtime path allowlists before
   disabling external access, and locking further DuckDB configuration changes.

@@ -99,9 +99,9 @@ process; do not use persistence as a tenant or request isolation boundary.
 
 When `open_basedir` is set, external file access stays disabled whatever you
 pass. The driver also rejects path/security-sensitive DuckDB settings such as
-`allowed_directories`, `allowed_paths`, `temp_directory`, `extension_directory`,
-and extension auto-install/load knobs, and locks DuckDB configuration after the
-sandbox profile is applied. The database-file path check and DuckDB's open are
+`allowed_directories`, `allowed_paths`, `allowed_configs`, `temp_directory`,
+`extension_directory`, and extension auto-install/load knobs, and locks DuckDB
+configuration after the sandbox profile is applied. The database-file path check and DuckDB's open are
 separate filesystem operations because DuckDB has no descriptor-based open API.
 For file-backed databases, keep every writable path component below trusted,
 non-writable directory ancestry so an attacker cannot replace a checked path by
@@ -119,8 +119,17 @@ $app = $db->duckdbAppender('events');      // optional 2nd arg: schema name
 foreach ($rows as $r) {
     $app->appendRow($r['id'], $r['name'], $r['ts']);
 }
-$app->flush();                              // or $app->close() to finalize
+$app->flush();   // push buffered rows; appender stays open for more rows
+$app->close();   // flush + finalize; further append/flush/close throw
 ```
+
+`flush()` commits buffered rows and leaves the appender usable. `close()`
+flushes, finalizes the native appender, and marks the PHP object closed. Relying
+on the destructor alone still closes (and warns on failure); prefer an explicit
+`close()`. Soft validation failures (`ValueError`/`TypeError` for arity, types,
+ranges) leave the appender live so you can retry the row. Hard DuckDB failures
+on append/flush/close poison the appender — later use throws `Error` and you must
+create a new one.
 
 `appendRow(...$values)` takes one argument per column (left to right) and
 returns the appender for chaining. PHP `null`/`bool`/`int`/`float`/`string` map
@@ -238,6 +247,10 @@ $db->exec('INSTALL httpfs; LOAD httpfs;');  // downloadable extensions
   another statement can run while an unbuffered result is partially consumed, and
   the first result can continue afterward. Use `PDOStatement::closeCursor()` when
   you want to release the native result early.
+
+  Persistent connections reset `DUCKDB_ATTR_UNBUFFERED` to false on every checkout
+  (`check_liveness`). Pass it again in the constructor options or call
+  `setAttribute` after each `new PDO(..., [PDO::ATTR_PERSISTENT => true])`.
 
 ## Status
 

@@ -134,8 +134,11 @@ static int pdo_duckdb_stmt_execute(pdo_stmt_t *stmt)
 	pdo_duckdb_stmt_reset_result(S);
 
 	/* open_basedir may have been tightened after this statement was prepared;
-	 * apply the sandbox to the connection before re-executing. */
+	 * apply the sandbox to the connection before re-executing. EXEC_PRE may
+	 * already have set binds_cleared; reset the latch on failure so the next
+	 * execute does not skip duckdb_clear_bindings. */
 	if (!pdo_duckdb_enforce_sandbox(S->H)) {
+		S->binds_cleared = false;
 		pdo_duckdb_error_stmt(stmt, "Unable to apply the open_basedir sandbox profile to DuckDB");
 		return 0;
 	}
@@ -151,10 +154,9 @@ static int pdo_duckdb_stmt_execute(pdo_stmt_t *stmt)
 	if (S->H->unbuffered) {
 		/* Opt-in streaming (PDO::DUCKDB_ATTR_UNBUFFERED): the pending-result API
 		 * yields a streaming result that produces chunks lazily as fetch_chunk()
-		 * pulls them, so a huge SELECT isn't buffered whole. DuckDB allows only one
-		 * active streaming result per connection and it can't be mixed with other
-		 * result calls — running a second unbuffered statement before this one is
-		 * consumed surfaces DuckDB's own error. */
+		 * pulls them, so a huge SELECT isn't buffered whole. The driver does not
+		 * impose a single-active-stream guard; interleaved unbuffered statements
+		 * are allowed (tests/043). closeCursor() releases a stream early. */
 		duckdb_pending_result pending = NULL;
 
 		if (duckdb_pending_prepared_streaming(S->prepared, &pending) != DuckDBSuccess) {
@@ -1478,8 +1480,11 @@ static int pdo_duckdb_stmt_fetch(pdo_stmt_t *stmt,
 		if (!S->chunk) {
 			const char *err = duckdb_result_error(&S->result);
 			if (err && *err) {
-				S->done = true;
+				/* Release the native result (esp. unbuffered streams) so the
+				 * connection is not pinned until a later re-execute/dtor. */
 				pdo_duckdb_error_stmt(stmt, err);
+				pdo_duckdb_stmt_reset_result(S);
+				S->done = true;
 				return 0;
 			}
 			S->done = true;

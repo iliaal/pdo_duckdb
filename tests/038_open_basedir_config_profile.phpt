@@ -10,6 +10,7 @@ open_basedir={PWD}
 $blocked = [
     'allowed_directories',
     'allowed_paths',
+    'allowed_configs',
     'file_search_path',
     'temp_directory',
     'extension_directory',
@@ -83,8 +84,8 @@ try {
 }
 ?>
 --EXPECT--
-array blocked=22
-dsn blocked=22
+array blocked=23
+dsn blocked=23
 enable_external_access=false
 autoinstall_known_extensions=false
 autoload_known_extensions=false

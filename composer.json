@@ -26,6 +26,11 @@
                 "name": "enable-pdo-duckdb-dev",
                 "description": "Build with -Wall -Wextra -Werror for release verification",
                 "needs-value": false
+            },
+            {
+                "name": "with-pdo-duckdb-static",
+                "description": "Link a self-contained static libduckdb (for prebuilt PIE bundles)",
+                "needs-value": false
             }
         ]
     }

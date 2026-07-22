@@ -228,16 +228,17 @@ static bool duckdb_handle_preparer(pdo_dbh_t *dbh, zend_string *sql, pdo_stmt_t 
 void pdo_duckdb_sync_transaction_state(pdo_dbh_t *dbh, duckdb_statement_type type,
 		pdo_duckdb_transaction_effect effect)
 {
+	(void)type;
+
+	/* Only explicit OPEN/CLOSE effects move in_txn. Never toggle on bare
+	 * TRANSACTION type: a missed keyword classification would flip the flag
+	 * wrong and break free-time rollback / persistent cleanup. */
 	if (effect == PDO_DUCKDB_TRANSACTION_OPEN) {
 		dbh->in_txn = true;
 		return;
 	}
 	if (effect == PDO_DUCKDB_TRANSACTION_CLOSE) {
 		dbh->in_txn = false;
-		return;
-	}
-	if (type == DUCKDB_STATEMENT_TYPE_TRANSACTION) {
-		dbh->in_txn = !dbh->in_txn;
 	}
 }
 
@@ -852,13 +853,142 @@ static bool pdo_duckdb_query_ok(duckdb_connection conn, const char *sql)
 	return true;
 }
 
+/* SET key='value' with SQL single-quote escaping. Used only for sandbox
+ * escalate helpers (paths from open_basedir / empty strings). */
+static bool pdo_duckdb_set_string_option(duckdb_connection conn, const char *key, const char *value)
+{
+	smart_str sql = {0};
+	const char *p;
+	bool ok;
+
+	smart_str_appends(&sql, "SET ");
+	smart_str_appends(&sql, key);
+	smart_str_appends(&sql, "='");
+	for (p = value; *p; p++) {
+		if (*p == '\'') {
+			smart_str_appendc(&sql, '\'');
+		}
+		smart_str_appendc(&sql, *p);
+	}
+	smart_str_appends(&sql, "'");
+	smart_str_0(&sql);
+	ok = pdo_duckdb_query_ok(conn, ZSTR_VAL(sql.s));
+	smart_str_free(&sql);
+	return ok;
+}
+
+/* Point temp_directory at the first open_basedir entry (or clear it) so that
+ * DuckDB's EnableExternalAccessSetting::OnSet cannot re-allowlist an
+ * attacker-chosen temp path when external access is turned off. */
+static bool pdo_duckdb_reset_sandbox_temp_directory(pdo_duckdb_db_handle *H)
+{
+	const char *ob = PG(open_basedir);
+	char *copy;
+	char *sep;
+	bool ok;
+
+	if (!ob || !*ob) {
+		return pdo_duckdb_query_ok(H->conn, "SET temp_directory=''");
+	}
+
+	copy = estrdup(ob);
+	sep = strchr(copy, DEFAULT_DIR_SEPARATOR);
+	if (sep) {
+		*sep = '\0';
+	}
+	if (!*copy) {
+		efree(copy);
+		return pdo_duckdb_query_ok(H->conn, "SET temp_directory=''");
+	}
+
+	ok = pdo_duckdb_set_string_option(H->conn, "temp_directory", copy);
+	efree(copy);
+	return ok;
+}
+
+/* DETACH user-attached databases whose paths fall outside open_basedir.
+ * OnSet re-adds every attached path to allowed_paths when external access is
+ * disabled; those entries cannot be cleared afterward. */
+static bool pdo_duckdb_detach_out_of_basedir(pdo_duckdb_db_handle *H)
+{
+	duckdb_result res;
+	idx_t rows, i;
+	bool ok = true;
+
+	if (duckdb_query(H->conn,
+			"SELECT database_name, path FROM duckdb_databases() "
+			"WHERE NOT internal AND path IS NOT NULL AND path <> ''",
+			&res) != DuckDBSuccess) {
+		duckdb_destroy_result(&res);
+		return false;
+	}
+
+	rows = duckdb_row_count(&res);
+	for (i = 0; i < rows; i++) {
+		char *name = duckdb_value_varchar(&res, 0, i);
+		char *path = duckdb_value_varchar(&res, 1, i);
+		smart_str sql = {0};
+		const char *p;
+
+		if (!name || !path || !*path) {
+			if (name) {
+				duckdb_free(name);
+			}
+			if (path) {
+				duckdb_free(path);
+			}
+			continue;
+		}
+
+		/* Quiet check: denied attachments are detached, not user-facing warnings. */
+		if (php_check_open_basedir_ex(path, 0) == 0) {
+			duckdb_free(name);
+			duckdb_free(path);
+			continue;
+		}
+
+		smart_str_appends(&sql, "DETACH \"");
+		for (p = name; *p; p++) {
+			if (*p == '"') {
+				smart_str_appendc(&sql, '"');
+			}
+			smart_str_appendc(&sql, *p);
+		}
+		smart_str_appends(&sql, "\"");
+		smart_str_0(&sql);
+		if (!pdo_duckdb_query_ok(H->conn, ZSTR_VAL(sql.s))) {
+			ok = false;
+		}
+		smart_str_free(&sql);
+		duckdb_free(name);
+		duckdb_free(path);
+		if (!ok) {
+			break;
+		}
+	}
+
+	duckdb_destroy_result(&res);
+	return ok;
+}
+
 /* Disable DuckDB external access (read_csv/COPY/ATTACH/httpfs) on the live
- * connection. Clear allowlists before flipping enable_external_access: DuckDB
- * refuses allowed_directories/allowed_paths changes after external access is
- * disabled, but pre-existing allowlists remain effective. */
+ * connection. Order matters:
+ * 1. Neutralize sticky writers (log_query_path) and OnSet re-allowlist inputs
+ *    (temp_directory, out-of-basedir ATTACHes) while external access is still on.
+ * 2. Clear allowlists before flipping enable_external_access: DuckDB refuses
+ *    allowed_directories/allowed_paths changes after external access is off, but
+ *    pre-existing allowlists remain effective.
+ * 3. enable_external_access=false runs DuckDB's OnSet, which re-adds the
+ *    (now sandboxed) temp directory and remaining attached paths.
+ * 4. lock_configuration last so none of the above can be undone. */
 static bool pdo_duckdb_disable_external_access(pdo_duckdb_db_handle *H)
 {
-	if (!pdo_duckdb_query_ok(H->conn, "SET allowed_directories = []") ||
+	if (!pdo_duckdb_query_ok(H->conn, "SET log_query_path=''") ||
+			!pdo_duckdb_query_ok(H->conn, "SET profiling_output=''") ||
+			!pdo_duckdb_query_ok(H->conn, "SET allowed_configs = []") ||
+			!pdo_duckdb_reset_sandbox_temp_directory(H) ||
+			!pdo_duckdb_detach_out_of_basedir(H) ||
+			!pdo_duckdb_query_ok(H->conn, "SET allowed_directories = []") ||
 			!pdo_duckdb_query_ok(H->conn, "SET allowed_paths = []") ||
 			!pdo_duckdb_query_ok(H->conn, "SET autoinstall_known_extensions=false") ||
 			!pdo_duckdb_query_ok(H->conn, "SET autoload_known_extensions=false") ||
@@ -1006,6 +1136,7 @@ static bool pdo_duckdb_sandbox_forbids_config_key(const char *key, size_t key_le
 {
 	return PDO_DUCKDB_CONFIG_KEY_MATCHES(key, key_len, "allowed_directories") ||
 		PDO_DUCKDB_CONFIG_KEY_MATCHES(key, key_len, "allowed_paths") ||
+		PDO_DUCKDB_CONFIG_KEY_MATCHES(key, key_len, "allowed_configs") ||
 		PDO_DUCKDB_CONFIG_KEY_MATCHES(key, key_len, "file_search_path") ||
 		PDO_DUCKDB_CONFIG_KEY_MATCHES(key, key_len, "temp_directory") ||
 		PDO_DUCKDB_CONFIG_KEY_MATCHES(key, key_len, "extension_directory") ||
