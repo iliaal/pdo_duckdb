@@ -23,6 +23,8 @@ name: Release Linux & macOS binaries
 on:
   workflow_call:
 
+permissions: {}
+
 env:
   # Keep in sync with DUCKDB_VERSION in tests.yml / windows.yml.
   DUCKDB_VERSION: "1.5.4"
@@ -48,7 +50,9 @@ jobs:
           - version: '8.5'
             baseline-image: php:8.5-cli-bookworm@sha256:fb740987f3e7aefd7f52d1f961fa91602874f2b6a5b0bf0105725f8987b54bee
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
 
       - name: Setup PHP
         if: runner.os == 'macOS'
@@ -59,12 +63,14 @@ jobs:
 
       - name: Download DuckDB static libs for this os/arch
         shell: bash
+        env:
+          MATRIX_OS: ${{ matrix.os }}
         run: |
-          case "${{ matrix.os }}" in
+          case "$MATRIX_OS" in
             ubuntu-24.04)     asset=static-libs-linux-amd64.zip ;;
             ubuntu-24.04-arm) asset=static-libs-linux-arm64.zip ;;
             macos-14)         asset=static-libs-osx-arm64.zip ;;
-            *) echo "unmapped runner ${{ matrix.os }}"; exit 1 ;;
+            *) echo "unmapped runner $MATRIX_OS"; exit 1 ;;
           esac
           curl -fsSL "https://github.com/duckdb/duckdb/releases/download/v${DUCKDB_VERSION}/${asset}" -o "$asset"
           grep "  $asset$" .github/duckdb-sha256.txt | shasum -a 256 --check --strict

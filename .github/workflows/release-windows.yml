@@ -15,6 +15,8 @@ name: Release Windows binaries
 on:
   workflow_call:
 
+permissions: {}
+
 env:
   # Keep in sync with DUCKDB_VERSION in tests.yml.
   DUCKDB_VERSION: "1.5.4"
@@ -31,12 +33,14 @@ jobs:
         php: ['8.4', '8.5']
         ts: ['nts', 'ts']
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
 
       - name: Download libduckdb (amd64 dynamic — duckdb.h, duckdb.lib, duckdb.dll)
         shell: pwsh
         run: |
-          $url = "https://github.com/duckdb/duckdb/releases/download/v${{ env.DUCKDB_VERSION }}/libduckdb-windows-amd64.zip"
+          $url = "https://github.com/duckdb/duckdb/releases/download/v$env:DUCKDB_VERSION/libduckdb-windows-amd64.zip"
           Invoke-WebRequest -Uri $url -OutFile duckdb.zip
           $entry = Get-Content .github\duckdb-sha256.txt | Where-Object { $_ -match '  libduckdb-windows-amd64\.zip$' }
           if (-not $entry) { throw 'missing checksum for libduckdb-windows-amd64.zip' }

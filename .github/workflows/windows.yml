@@ -16,6 +16,12 @@ on:
   pull_request:
     branches: [master]
 
+permissions: {}
+
+concurrency:
+  group: windows-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   # Keep in sync with DUCKDB_VERSION in tests.yml.
   DUCKDB_VERSION: "1.5.4"
@@ -38,7 +44,7 @@ jobs:
         run: |
           # DuckDB ships no 32-bit Windows C library (only amd64 / arm64), so
           # drop x86 from the matrix — those builds can't link libduckdb.
-          echo '${{ steps.gen.outputs.matrix }}' > matrix.json
+          echo '${STEPS_GEN_OUTPUTS_MATRIX}' > matrix.json
           cat matrix.json
           if jq -e 'has("include")' matrix.json >/dev/null 2>&1; then
             out=$(jq -c '{include: [.include[] | select(.arch == "x64")]}' matrix.json)
@@ -47,21 +53,27 @@ jobs:
           fi
           echo "matrix=$out" >> "$GITHUB_OUTPUT"
           echo "filtered: $out"
+        env:
+          STEPS_GEN_OUTPUTS_MATRIX: ${{ steps.gen.outputs.matrix }}
 
   windows-build:
     name: Build ${{ matrix.php-version }} ${{ matrix.arch }} ${{ matrix.ts }}
     needs: windows-matrix
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix: ${{ fromJson(needs.windows-matrix.outputs.matrix) }}
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
 
       - name: Download and stage libduckdb (x64)
         shell: pwsh
         run: |
-          $url = "https://github.com/duckdb/duckdb/releases/download/v${{ env.DUCKDB_VERSION }}/libduckdb-windows-amd64.zip"
+          $url = "https://github.com/duckdb/duckdb/releases/download/v$env:DUCKDB_VERSION/libduckdb-windows-amd64.zip"
           Invoke-WebRequest -Uri $url -OutFile duckdb.zip
           Expand-Archive duckdb.zip -DestinationPath duckdb-deps -Force
           # Bundle layout is flat: duckdb.h, duckdb.lib, duckdb.dll (+ duckdb.hpp).
