@@ -44,7 +44,7 @@ jobs:
         run: |
           # DuckDB ships no 32-bit Windows C library (only amd64 / arm64), so
           # drop x86 from the matrix — those builds can't link libduckdb.
-          echo '${STEPS_GEN_OUTPUTS_MATRIX}' > matrix.json
+          printf '%s\n' "$STEPS_GEN_OUTPUTS_MATRIX" > matrix.json
           cat matrix.json
           if jq -e 'has("include")' matrix.json >/dev/null 2>&1; then
             out=$(jq -c '{include: [.include[] | select(.arch == "x64")]}' matrix.json)
