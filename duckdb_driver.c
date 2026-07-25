@@ -217,19 +217,15 @@ static bool duckdb_handle_preparer(pdo_dbh_t *dbh, zend_string *sql, pdo_stmt_t 
 		}
 		return false;
 	}
-	S->statement_type = duckdb_prepared_statement_type(S->prepared);
-
 	if (rewritten) {
 		zend_string_release(rewritten);
 	}
 	return true;
 }
 
-void pdo_duckdb_sync_transaction_state(pdo_dbh_t *dbh, duckdb_statement_type type,
+void pdo_duckdb_apply_transaction_effect(pdo_dbh_t *dbh,
 		pdo_duckdb_transaction_effect effect)
 {
-	(void)type;
-
 	/* Only explicit OPEN/CLOSE effects move in_txn. Never toggle on bare
 	 * TRANSACTION type: a missed keyword classification would flip the flag
 	 * wrong and break free-time rollback / persistent cleanup. */
@@ -635,14 +631,12 @@ static zend_long pdo_duckdb_exec_transaction_multi(pdo_dbh_t *dbh,
 	for (i = 0; i < count; i++) {
 		duckdb_prepared_statement prepared = NULL;
 		duckdb_result result;
-		duckdb_statement_type type;
 
 		if (duckdb_prepare_extracted_statement(H->conn, extracted, i, &prepared) != DuckDBSuccess) {
 			pdo_duckdb_error(dbh, prepared ? duckdb_prepare_error(prepared) : "Unable to prepare DuckDB statement");
 			duckdb_destroy_prepare(&prepared);
 			return -1;
 		}
-		type = duckdb_prepared_statement_type(prepared);
 		if (duckdb_execute_prepared(prepared, &result) != DuckDBSuccess) {
 			pdo_duckdb_error(dbh, duckdb_result_error(&result));
 			duckdb_destroy_result(&result);
@@ -650,7 +644,7 @@ static zend_long pdo_duckdb_exec_transaction_multi(pdo_dbh_t *dbh,
 			return -1;
 		}
 		changed = (zend_long)duckdb_rows_changed(&result);
-		pdo_duckdb_sync_transaction_state(dbh, type, effects[i]);
+		pdo_duckdb_apply_transaction_effect(dbh, effects[i]);
 		duckdb_destroy_result(&result);
 		duckdb_destroy_prepare(&prepared);
 	}
@@ -726,8 +720,7 @@ static zend_long duckdb_handle_doer(pdo_dbh_t *dbh, const zend_string *sql)
 	}
 
 	changed = (zend_long)duckdb_rows_changed(&result);
-	pdo_duckdb_sync_transaction_state(dbh, duckdb_result_statement_type(result),
-		transaction_effect);
+	pdo_duckdb_apply_transaction_effect(dbh, transaction_effect);
 	duckdb_destroy_result(&result);
 	return changed;
 }

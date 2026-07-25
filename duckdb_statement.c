@@ -171,34 +171,21 @@ static int pdo_duckdb_stmt_execute(pdo_stmt_t *stmt)
 			return 0;
 		}
 		duckdb_destroy_pending(&pending);
-
-		S->has_result = true;
-		if (UNEXPECTED(S->transaction_effect != PDO_DUCKDB_TRANSACTION_NONE ||
-				S->statement_type == DUCKDB_STATEMENT_TYPE_TRANSACTION)) {
-			pdo_duckdb_sync_transaction_state(stmt->dbh, S->statement_type,
-				S->transaction_effect);
+	} else {
+		/* duckdb_execute_prepared returns a *materialized* result: DuckDB buffers
+		 * the whole result set here, and duckdb_fetch_chunk() below streams chunks
+		 * out of that buffer. So fetching is chunked but memory is bounded by the
+		 * full result, not row-streamed. */
+		if (duckdb_execute_prepared(S->prepared, &S->result) != DuckDBSuccess) {
+			pdo_duckdb_error_stmt(stmt, duckdb_result_error(&S->result));
+			duckdb_destroy_result(&S->result);
+			return 0;
 		}
-		pdo_duckdb_stmt_cache_columns(S);
-		php_pdo_stmt_set_column_count(stmt, (int)S->col_count);
-		stmt->row_count = pdo_duckdb_stmt_rows_changed(&S->result);
-		return 1;
-	}
-
-	/* duckdb_execute_prepared returns a *materialized* result: DuckDB buffers
-	 * the whole result set here, and duckdb_fetch_chunk() below streams chunks
-	 * out of that buffer. So fetching is chunked but memory is bounded by the
-	 * full result, not row-streamed. */
-	if (duckdb_execute_prepared(S->prepared, &S->result) != DuckDBSuccess) {
-		pdo_duckdb_error_stmt(stmt, duckdb_result_error(&S->result));
-		duckdb_destroy_result(&S->result);
-		return 0;
 	}
 
 	S->has_result = true;
-	if (UNEXPECTED(S->transaction_effect != PDO_DUCKDB_TRANSACTION_NONE ||
-			S->statement_type == DUCKDB_STATEMENT_TYPE_TRANSACTION)) {
-		pdo_duckdb_sync_transaction_state(stmt->dbh, S->statement_type,
-			S->transaction_effect);
+	if (UNEXPECTED(S->transaction_effect != PDO_DUCKDB_TRANSACTION_NONE)) {
+		pdo_duckdb_apply_transaction_effect(stmt->dbh, S->transaction_effect);
 	}
 	pdo_duckdb_stmt_cache_columns(S);
 	php_pdo_stmt_set_column_count(stmt, (int)S->col_count);
@@ -1634,15 +1621,20 @@ static int pdo_duckdb_stmt_get_col(
 		default:
 			/* Extended scalar and nested types are returned as their canonical
 			 * DuckDB string form; common scalar formats use fast renderers first. */
-			if (!(S->col_nested_renderers[colno] &&
-						pdo_duckdb_fast_nested_col_to_string(
-							vec, row, S->col_nested_renderers[colno], result)) &&
-					!pdo_duckdb_fast_col_to_string(tid, S->col_logical_types[colno], data, row, result)) {
-				if (!pdo_duckdb_col_to_string(vec, row, S->col_logical_types[colno], result)) {
-					pdo_duckdb_error_stmt(stmt,
-						"DuckDB VARIANT values are not supported by the C result API; cast the value to VARCHAR in SQL");
-					pdo_handle_error(stmt->dbh, stmt);
-				}
+			if (S->col_nested_renderers[colno] &&
+					pdo_duckdb_fast_nested_col_to_string(
+						vec, row, S->col_nested_renderers[colno], result)) {
+				return 1;
+			}
+			if (pdo_duckdb_fast_col_to_string(
+					tid, S->col_logical_types[colno], data, row, result)) {
+				return 1;
+			}
+			if (!pdo_duckdb_col_to_string(
+					vec, row, S->col_logical_types[colno], result)) {
+				pdo_duckdb_error_stmt(stmt,
+					"DuckDB VARIANT values are not supported by the C result API; cast the value to VARCHAR in SQL");
+				pdo_handle_error(stmt->dbh, stmt);
 			}
 			return 1;
 	}

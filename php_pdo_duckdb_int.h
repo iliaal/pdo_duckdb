@@ -111,10 +111,6 @@ typedef struct {
 	 * native statement type is EXPLAIN), and for direct aliases recognized at
 	 * prepare time. Applied only after native execution succeeds. */
 	pdo_duckdb_transaction_effect transaction_effect;
-	/* Native statement classification is immutable for a prepared statement.
-	 * Cache it at prepare time so repeated execute() calls do not cross the
-	 * DuckDB C API solely to keep PDO's transaction flag synchronized. */
-	duckdb_statement_type statement_type;
 	/* Per-execute latch. DuckDB keeps prepared-statement bindings across
 	 * executes, so re-executing with fewer params would silently reuse the
 	 * previous values. Cleared once per execute round — on the first EXEC_PRE
@@ -159,7 +155,7 @@ bool pdo_duckdb_enforce_sandbox(pdo_duckdb_db_handle *H);
 
 /* Keep PDO's transaction flag aligned when SQL executes transaction control
  * outside beginTransaction()/commit()/rollBack(). */
-void pdo_duckdb_sync_transaction_state(pdo_dbh_t *dbh, duckdb_statement_type type,
+void pdo_duckdb_apply_transaction_effect(pdo_dbh_t *dbh,
 	pdo_duckdb_transaction_effect effect);
 
 /* Records an error against the dbh (or stmt). msg is copied; pass the message
