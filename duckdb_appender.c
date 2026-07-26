@@ -81,10 +81,8 @@ static void pdo_duckdb_appender_free(zend_object *obj)
 	if (a->appender) {
 		duckdb_state close_state = DuckDBSuccess;
 		bool was_closed = a->closed;
-		/* destroy flushes any outstanding rows; warn on errors because a caller
-		 * relying on GC instead of flush()/close() otherwise gets silent data loss.
-		 * Latch sandbox first so an unflushed close cannot write outside a
-		 * mid-request open_basedir tighten. */
+		/* destroy flushes outstanding rows; sandbox first so GC close cannot
+		 * write outside a mid-request open_basedir tighten. */
 		if (!a->closed) {
 			if (a->pdo) {
 				pdo_duckdb_db_handle *H = (pdo_duckdb_db_handle *)

@@ -761,8 +761,10 @@ static zend_string *duckdb_handle_quoter(pdo_dbh_t *dbh, const zend_string *unqu
 	smart_str_appendc(&buf, '\'');
 	smart_str_0(&buf);
 
-	pdo_duckdb_clear_einfo(&((pdo_duckdb_db_handle *)dbh->driver_data)->einfo,
-		dbh->is_persistent);
+	{
+		pdo_duckdb_db_handle *H = (pdo_duckdb_db_handle *)dbh->driver_data;
+		pdo_duckdb_clear_einfo(&H->einfo, dbh->is_persistent);
+	}
 	return buf.s;
 }
 
@@ -802,8 +804,7 @@ static bool duckdb_handle_rollback(pdo_dbh_t *dbh)
 	return duckdb_simple_exec(dbh, "ROLLBACK");
 }
 
-/* Bool attrs: use numeric/bool truthiness. zend_is_true treats non-empty
- * strings (including "0" and "false") as true. */
+/* Attr truthiness: unlike zend_is_true, empty string and "0" are false. */
 static bool pdo_duckdb_zval_is_true(zval *val)
 {
 	ZVAL_DEREF(val);
@@ -818,11 +819,7 @@ static bool pdo_duckdb_zval_is_true(zval *val)
 		case IS_DOUBLE:
 			return Z_DVAL_P(val) != 0.0;
 		case IS_STRING:
-			if (Z_STRLEN_P(val) == 0 ||
-					(Z_STRLEN_P(val) == 1 && Z_STRVAL_P(val)[0] == '0')) {
-				return false;
-			}
-			return true;
+			return Z_STRLEN_P(val) != 0 && !zend_string_equals_literal(Z_STR_P(val), "0");
 		default:
 			return zend_is_true(val);
 	}
@@ -887,15 +884,8 @@ static bool pdo_duckdb_query_ok(duckdb_connection conn, const char *sql)
 	return true;
 }
 
-/* Clear temp_directory before enable_external_access=false. A non-empty temp
- * path is re-allowlisted by DuckDB's OnSet and cannot be removed afterward —
- * seeding it with the first open_basedir entry let SQL read that whole tree
- * (and survive a later open_basedir re-narrow). Empty temp seeds nothing. */
-static bool pdo_duckdb_reset_sandbox_temp_directory(pdo_duckdb_db_handle *H)
-{
-	return pdo_duckdb_query_ok(H->conn, "SET temp_directory=''");
-}
-
+/* Hash of the current open_basedir string (0 if unset). Used to detect re-narrow
+ * after escalate, when DuckDB allowlists are frozen. */
 static zend_ulong pdo_duckdb_open_basedir_hash(void)
 {
 	const char *ob = PG(open_basedir);
@@ -982,10 +972,12 @@ static bool pdo_duckdb_detach_out_of_basedir(pdo_duckdb_db_handle *H)
  * 4. lock_configuration last so none of the above can be undone. */
 static bool pdo_duckdb_disable_external_access(pdo_duckdb_db_handle *H)
 {
+	/* Empty temp before the flip: a non-empty temp_directory is re-allowlisted by
+	 * DuckDB OnSet and cannot be cleared afterward (do not seed basedir root). */
 	if (!pdo_duckdb_query_ok(H->conn, "SET log_query_path=''") ||
 			!pdo_duckdb_query_ok(H->conn, "SET profiling_output=''") ||
 			!pdo_duckdb_query_ok(H->conn, "SET allowed_configs = []") ||
-			!pdo_duckdb_reset_sandbox_temp_directory(H) ||
+			!pdo_duckdb_query_ok(H->conn, "SET temp_directory=''") ||
 			!pdo_duckdb_detach_out_of_basedir(H) ||
 			!pdo_duckdb_query_ok(H->conn, "SET allowed_directories = []") ||
 			!pdo_duckdb_query_ok(H->conn, "SET allowed_paths = []") ||
@@ -1007,26 +999,17 @@ static bool pdo_duckdb_disable_external_access(pdo_duckdb_db_handle *H)
 	return true;
 }
 
-/* If open_basedir is set and this handle is not yet sandboxed, disable external
- * access. After sandboxing, DuckDB allowlists are frozen — if open_basedir is
- * later re-narrowed, fail closed (SQL cannot drop permanent allowlist entries). */
+/* Apply sandbox when open_basedir is set and not yet applied. After apply,
+ * fail closed if basedir is re-narrowed (allowlists are frozen in DuckDB). */
 bool pdo_duckdb_enforce_sandbox(pdo_duckdb_db_handle *H)
 {
-	zend_ulong cur;
-
 	if (!(PG(open_basedir) && *PG(open_basedir))) {
 		return true;
 	}
-
-	cur = pdo_duckdb_open_basedir_hash();
 	if (!H->external_access_disabled) {
 		return pdo_duckdb_disable_external_access(H);
 	}
-	/* Already escalated / open-time sandboxed: refuse basedir re-narrow. */
-	if (H->sandbox_basedir_hash != cur) {
-		return false;
-	}
-	return true;
+	return H->sandbox_basedir_hash == pdo_duckdb_open_basedir_hash();
 }
 
 /* Persistent handles skip handle_factory on reuse, so PDO calls check_liveness

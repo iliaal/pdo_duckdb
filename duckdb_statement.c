@@ -73,13 +73,9 @@ static void pdo_duckdb_stmt_reset_result(pdo_duckdb_stmt *S)
 	S->done = false;
 }
 
-/* Reset driver result state and PDO's public column count (closeCursor /
- * failed re-execute / mid-fetch error). */
 static void pdo_duckdb_stmt_reset_result_full(pdo_stmt_t *stmt)
 {
-	pdo_duckdb_stmt *S = (pdo_duckdb_stmt *)stmt->driver_data;
-
-	pdo_duckdb_stmt_reset_result(S);
+	pdo_duckdb_stmt_reset_result((pdo_duckdb_stmt *)stmt->driver_data);
 	php_pdo_stmt_set_column_count(stmt, 0);
 }
 
@@ -1859,9 +1855,6 @@ static int pdo_duckdb_stmt_param_hook(pdo_stmt_t *stmt, struct pdo_bound_param_d
 					return 1;
 				}
 			}
-			if (EG(exception)) {
-				return pdo_duckdb_stmt_bind_failure(S);
-			}
 			pdo_duckdb_error_stmt(stmt, "Failed to bind integer parameter");
 			return pdo_duckdb_stmt_bind_failure(S);
 
@@ -1887,10 +1880,7 @@ static int pdo_duckdb_stmt_param_hook(pdo_stmt_t *stmt, struct pdo_bound_param_d
 				}
 				pdo_duckdb_error_stmt(stmt, "Failed to bind NULL parameter");
 				return pdo_duckdb_stmt_bind_failure(S);
-			} else if (!try_convert_to_string(parameter)) {
-				return pdo_duckdb_stmt_bind_failure(S);
-			}
-			if (EG(exception)) {
+			} else if (!try_convert_to_string(parameter) || EG(exception)) {
 				return pdo_duckdb_stmt_bind_failure(S);
 			}
 
@@ -1907,18 +1897,12 @@ static int pdo_duckdb_stmt_param_hook(pdo_stmt_t *stmt, struct pdo_bound_param_d
 					return 1;
 				}
 			} else {
-				if (!try_convert_to_string(parameter)) {
-					return pdo_duckdb_stmt_bind_failure(S);
-				}
-				if (EG(exception)) {
+				if (!try_convert_to_string(parameter) || EG(exception)) {
 					return pdo_duckdb_stmt_bind_failure(S);
 				}
 				if (duckdb_bind_varchar_length(S->prepared, idx, Z_STRVAL_P(parameter), (idx_t)Z_STRLEN_P(parameter)) == DuckDBSuccess) {
 					return 1;
 				}
-			}
-			if (EG(exception)) {
-				return pdo_duckdb_stmt_bind_failure(S);
 			}
 			pdo_duckdb_error_stmt(stmt, "Failed to bind string parameter");
 			return pdo_duckdb_stmt_bind_failure(S);
