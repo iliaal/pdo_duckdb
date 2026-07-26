@@ -1168,19 +1168,23 @@ static bool pdo_duckdb_reject_sandbox_config_key(duckdb_config *config, const ch
 	return true;
 }
 
+/* Open-time flags only. Do not set enable_external_access=false or
+ * lock_configuration here: DuckDB Configure would permanently allowlist the
+ * default temp dir, and lock would prevent the post-connect escalate cleaner
+ * (pdo_duckdb_disable_external_access) from clearing it. */
 static bool pdo_duckdb_apply_sandbox_config(duckdb_config *config)
 {
 	static const char *const sandbox_options[][2] = {
+		{"temp_directory", ""},
 		{"autoinstall_known_extensions", "false"},
 		{"autoload_known_extensions", "false"},
 		{"allow_community_extensions", "false"},
 		{"allow_extensions_metadata_mismatch", "false"},
 		{"allow_persistent_secrets", "false"},
+		{"allow_unredacted_secrets", "false"},
 		{"allow_unsigned_extensions", "false"},
 		{"enable_external_file_cache", "false"},
 		{"enable_http_metadata_cache", "false"},
-		{"enable_external_access", "false"},
-		{"lock_configuration", "true"},
 	};
 	size_t i;
 
@@ -1440,11 +1444,6 @@ static int pdo_duckdb_handle_factory(pdo_dbh_t *dbh, zval *driver_options) /* {{
 		}
 		goto cleanup;  /* exception already thrown */
 	}
-	if (PG(open_basedir) && *PG(open_basedir)) {
-		H->external_access_disabled = true;
-		H->sandbox_basedir_hash = pdo_duckdb_open_basedir_hash();
-	}
-
 	/* Carry an opt-in unbuffered request through to statements on this handle. */
 	if (driver_options && Z_TYPE_P(driver_options) == IS_ARRAY) {
 		zval *unbuf = zend_hash_index_find(Z_ARRVAL_P(driver_options), PDO_DUCKDB_ATTR_UNBUFFERED);
@@ -1478,6 +1477,15 @@ static int pdo_duckdb_handle_factory(pdo_dbh_t *dbh, zval *driver_options) /* {{
 	if (duckdb_connect(H->db, &H->conn) != DuckDBSuccess) {
 		pdo_duckdb_error(dbh, "Unable to connect to DuckDB database");
 		goto cleanup;
+	}
+
+	/* Full SQL sandbox after connect so allowlists seeded at open (e.g. default
+	 * temp for file DBs) can still be cleared before external access is locked. */
+	if (PG(open_basedir) && *PG(open_basedir)) {
+		if (!pdo_duckdb_disable_external_access(H)) {
+			pdo_duckdb_error(dbh, "Unable to apply the open_basedir sandbox profile to DuckDB");
+			goto cleanup;
+		}
 	}
 
 	dbh->alloc_own_columns = 1;

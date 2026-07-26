@@ -7,7 +7,7 @@ pdo_duckdb
 <?php
 // DuckDB EnableExternalAccessSetting::OnSet re-adds temporary_directory to
 // allowed_directories when external access is turned off. The driver must
-// reset temp_directory into open_basedir (or clear it) before that flip.
+// clear temp_directory (empty) before that flip — not seed basedir root.
 $outside = sys_get_temp_dir() . '/pdo_duckdb_oob_temp_' . getmypid();
 @mkdir($outside, 0700, true);
 file_put_contents("$outside/leak.csv", "col\nsecret\n");
@@ -20,8 +20,8 @@ ini_set('open_basedir', __DIR__);
 echo 'external=', $db->query("SELECT current_setting('enable_external_access')::VARCHAR")->fetchColumn(), "\n";
 echo 'locked=', $db->query("SELECT current_setting('lock_configuration')::VARCHAR")->fetchColumn(), "\n";
 
-$temp = $db->query("SELECT current_setting('temp_directory')")->fetchColumn();
-echo 'temp_inside_basedir=', (str_starts_with((string)$temp, __DIR__) || $temp === '' || $temp === null) ? 'yes' : 'no', "\n";
+$temp = (string)$db->query("SELECT current_setting('temp_directory')")->fetchColumn();
+echo 'temp_empty=', ($temp === '' ? 'yes' : 'no'), "\n";
 
 try {
     $rows = $db->query('SELECT * FROM read_csv(' . $db->quote("$outside/leak.csv") . ', header=true)')->fetchAll();
@@ -45,6 +45,6 @@ $outside = sys_get_temp_dir() . '/pdo_duckdb_oob_temp_' . getmypid();
 --EXPECT--
 external=false
 locked=true
-temp_inside_basedir=yes
+temp_empty=yes
 blocked
 int(7)

@@ -194,6 +194,13 @@ static int pdo_duckdb_stmt_execute(pdo_stmt_t *stmt)
 	}
 	pdo_duckdb_stmt_cache_columns(S);
 	php_pdo_stmt_set_column_count(stmt, (int)S->col_count);
+	/* reset_result_full uses set_column_count(0), which frees columns. PDO only
+	 * auto-describes when !stmt->executed (first execute). Clear the latch so
+	 * re-execute also runs pdo_stmt_describe_columns — otherwise getColumnMeta
+	 * SEGVs on a NULL columns array. */
+	if (!stmt->columns && S->col_count > 0) {
+		stmt->executed = 0;
+	}
 	stmt->row_count = pdo_duckdb_stmt_rows_changed(&S->result);
 	pdo_duckdb_clear_einfo(&S->einfo, false);
 

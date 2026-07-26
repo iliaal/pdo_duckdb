@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- Rebuild `PDOStatement` column metadata after re-execute when columns were
+  freed by `set_column_count(0)`, fixing a SEGV in `getColumnMeta()` without an
+  intervening fetch.
+- Open-time `open_basedir` sandbox for file-backed DBs now runs the full
+  post-connect escalate sequence (empty `temp_directory`, clear allowlists,
+  then external access off + lock) so DuckDB cannot permanently allowlist
+  `{db}.tmp` for SQL FS.
 - Runtime open_basedir escalate no longer seeds `temp_directory` with the first
   basedir entry (which DuckDB permanently allowlisted, allowing in-basedir
   `read_csv` and surviving basedir re-narrow). Temp is cleared instead; a
@@ -66,15 +73,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   only explicit OPEN/CLOSE effects update PDO transaction state.
 
 ### Security
-- On runtime/`check_liveness` open_basedir escalate, reset `temp_directory` into
-  the first basedir entry, clear sticky `log_query_path` / `profiling_output`
-  writers, clear `allowed_configs`, and `DETACH` out-of-basedir attachments
-  before `enable_external_access=false` (DuckDB's OnSet re-allowlists temp and
-  attached paths after that flip and they cannot be cleared afterward).
+- On open-time and runtime/`check_liveness` open_basedir sandbox, clear
+  `temp_directory` (empty — never seed basedir root), clear sticky
+  `log_query_path` / `profiling_output` writers, clear `allowed_configs` and
+  path allowlists, and `DETACH` out-of-basedir attachments before
+  `enable_external_access=false` (DuckDB's OnSet re-allowlists non-empty temp
+  and attached paths after that flip and they cannot be cleared afterward).
+  Re-narrowing `open_basedir` after sandbox fails closed.
 - Reject `allowed_configs` under open_basedir at connect time (lock-bypass list).
 - Harden the `open_basedir` DuckDB sandbox profile by rejecting path and
-  extension-loading config keys, clearing runtime path allowlists before
-  disabling external access, and locking further DuckDB configuration changes.
+  extension-loading config keys, applying the full escalate sequence after
+  connect for file-backed DBs, and locking further DuckDB configuration changes.
 - Redact raw `duckdb_open_ext()` failure details from connection exceptions, so
   filesystem paths and OS error text from DuckDB are not exposed.
 - Pass release tags and package names to Linux/macOS and Windows release scripts
