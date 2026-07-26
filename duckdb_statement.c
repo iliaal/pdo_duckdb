@@ -73,6 +73,16 @@ static void pdo_duckdb_stmt_reset_result(pdo_duckdb_stmt *S)
 	S->done = false;
 }
 
+/* Reset driver result state and PDO's public column count (closeCursor /
+ * failed re-execute / mid-fetch error). */
+static void pdo_duckdb_stmt_reset_result_full(pdo_stmt_t *stmt)
+{
+	pdo_duckdb_stmt *S = (pdo_duckdb_stmt *)stmt->driver_data;
+
+	pdo_duckdb_stmt_reset_result(S);
+	php_pdo_stmt_set_column_count(stmt, 0);
+}
+
 static zend_long pdo_duckdb_stmt_rows_changed(duckdb_result *result)
 {
 	return duckdb_result_return_type(*result) == DUCKDB_RESULT_TYPE_CHANGED_ROWS
@@ -128,7 +138,7 @@ static int pdo_duckdb_stmt_execute(pdo_stmt_t *stmt)
 {
 	pdo_duckdb_stmt *S = (pdo_duckdb_stmt *)stmt->driver_data;
 
-	pdo_duckdb_stmt_reset_result(S);
+	pdo_duckdb_stmt_reset_result_full(stmt);
 	/* Zero before any failure return so re-execute errors do not leave a stale rowCount. */
 	stmt->row_count = 0;
 
@@ -1458,6 +1468,14 @@ static int pdo_duckdb_stmt_fetch(pdo_stmt_t *stmt,
 	if (!S->has_result || S->done) {
 		return 0;
 	}
+	/* Unbuffered scans can open files during chunk pull; re-latch sandbox if
+	 * open_basedir was tightened after execute. */
+	if (!pdo_duckdb_enforce_sandbox(S->H)) {
+		pdo_duckdb_error_stmt(stmt, "Unable to apply the open_basedir sandbox profile to DuckDB");
+		pdo_duckdb_stmt_reset_result_full(stmt);
+		S->done = true;
+		return 0;
+	}
 	if (ori != PDO_FETCH_ORI_NEXT) {
 		pdo_duckdb_error_stmt(stmt, "DuckDB PDO driver only supports forward-only cursors");
 		return 0;
@@ -1482,7 +1500,7 @@ static int pdo_duckdb_stmt_fetch(pdo_stmt_t *stmt,
 				/* Release the native result (esp. unbuffered streams) so the
 				 * connection is not pinned until a later re-execute/dtor. */
 				pdo_duckdb_error_stmt(stmt, err);
-				pdo_duckdb_stmt_reset_result(S);
+				pdo_duckdb_stmt_reset_result_full(stmt);
 				S->done = true;
 				return 0;
 			}
@@ -1812,6 +1830,7 @@ static int pdo_duckdb_stmt_param_hook(pdo_stmt_t *stmt, struct pdo_bound_param_d
 
 	switch (PDO_PARAM_TYPE(param->param_type)) {
 		case PDO_PARAM_STMT:
+			pdo_duckdb_error_stmt(stmt, "PDO_PARAM_STMT is not supported");
 			return pdo_duckdb_stmt_bind_failure(S);
 
 		case PDO_PARAM_NULL:
@@ -1833,9 +1852,15 @@ static int pdo_duckdb_stmt_param_hook(pdo_stmt_t *stmt, struct pdo_bound_param_d
 				}
 			} else {
 				convert_to_long(parameter);
+				if (EG(exception)) {
+					return pdo_duckdb_stmt_bind_failure(S);
+				}
 				if (duckdb_bind_int64(S->prepared, idx, (int64_t)Z_LVAL_P(parameter)) == DuckDBSuccess) {
 					return 1;
 				}
+			}
+			if (EG(exception)) {
+				return pdo_duckdb_stmt_bind_failure(S);
 			}
 			pdo_duckdb_error_stmt(stmt, "Failed to bind integer parameter");
 			return pdo_duckdb_stmt_bind_failure(S);
@@ -1846,8 +1871,12 @@ static int pdo_duckdb_stmt_param_hook(pdo_stmt_t *stmt, struct pdo_bound_param_d
 				php_stream_from_zval_no_verify(stm, parameter);
 				if (stm) {
 					zend_string *mem = php_stream_copy_to_mem(stm, PHP_STREAM_COPY_ALL, 0);
+					if (!mem) {
+						pdo_duckdb_error_stmt(stmt, "Failed to read LOB stream");
+						return pdo_duckdb_stmt_bind_failure(S);
+					}
 					zval_ptr_dtor(parameter);
-					ZVAL_STR(parameter, mem ? mem : ZSTR_EMPTY_ALLOC());
+					ZVAL_STR(parameter, mem);
 				} else {
 					pdo_raise_impl_error(stmt->dbh, stmt, "HY105", "Expected a stream resource");
 					return pdo_duckdb_stmt_bind_failure(S);
@@ -1859,6 +1888,9 @@ static int pdo_duckdb_stmt_param_hook(pdo_stmt_t *stmt, struct pdo_bound_param_d
 				pdo_duckdb_error_stmt(stmt, "Failed to bind NULL parameter");
 				return pdo_duckdb_stmt_bind_failure(S);
 			} else if (!try_convert_to_string(parameter)) {
+				return pdo_duckdb_stmt_bind_failure(S);
+			}
+			if (EG(exception)) {
 				return pdo_duckdb_stmt_bind_failure(S);
 			}
 
@@ -1878,9 +1910,15 @@ static int pdo_duckdb_stmt_param_hook(pdo_stmt_t *stmt, struct pdo_bound_param_d
 				if (!try_convert_to_string(parameter)) {
 					return pdo_duckdb_stmt_bind_failure(S);
 				}
+				if (EG(exception)) {
+					return pdo_duckdb_stmt_bind_failure(S);
+				}
 				if (duckdb_bind_varchar_length(S->prepared, idx, Z_STRVAL_P(parameter), (idx_t)Z_STRLEN_P(parameter)) == DuckDBSuccess) {
 					return 1;
 				}
+			}
+			if (EG(exception)) {
+				return pdo_duckdb_stmt_bind_failure(S);
 			}
 			pdo_duckdb_error_stmt(stmt, "Failed to bind string parameter");
 			return pdo_duckdb_stmt_bind_failure(S);
@@ -1889,9 +1927,7 @@ static int pdo_duckdb_stmt_param_hook(pdo_stmt_t *stmt, struct pdo_bound_param_d
 
 static int pdo_duckdb_stmt_cursor_closer(pdo_stmt_t *stmt)
 {
-	pdo_duckdb_stmt *S = (pdo_duckdb_stmt *)stmt->driver_data;
-
-	pdo_duckdb_stmt_reset_result(S);
+	pdo_duckdb_stmt_reset_result_full(stmt);
 	return 1;
 }
 

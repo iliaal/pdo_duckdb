@@ -82,8 +82,17 @@ static void pdo_duckdb_appender_free(zend_object *obj)
 		duckdb_state close_state = DuckDBSuccess;
 		bool was_closed = a->closed;
 		/* destroy flushes any outstanding rows; warn on errors because a caller
-		 * relying on GC instead of flush()/close() otherwise gets silent data loss. */
+		 * relying on GC instead of flush()/close() otherwise gets silent data loss.
+		 * Latch sandbox first so an unflushed close cannot write outside a
+		 * mid-request open_basedir tighten. */
 		if (!a->closed) {
+			if (a->pdo) {
+				pdo_duckdb_db_handle *H = (pdo_duckdb_db_handle *)
+					php_pdo_dbh_fetch_inner(a->pdo)->driver_data;
+				if (H) {
+					(void)pdo_duckdb_enforce_sandbox(H);
+				}
+			}
 			close_state = duckdb_appender_close(a->appender);
 			if (close_state != DuckDBSuccess) {
 				pdo_duckdb_appender_warning(a->appender,

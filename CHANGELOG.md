@@ -8,6 +8,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- Runtime open_basedir escalate no longer seeds `temp_directory` with the first
+  basedir entry (which DuckDB permanently allowlisted, allowing in-basedir
+  `read_csv` and surviving basedir re-narrow). Temp is cleared instead; a
+  re-narrowed basedir after escalate fails closed. Fetch re-latches the sandbox
+  for unbuffered streams; appender destruction latches before implicit close.
+- Map `PDO::DUCKDB_ATTR_CONFIG` PHP bools to DuckDB `"true"`/`"false"`; treat
+  string `"0"` as false for `UNBUFFERED`/`AUTOCOMMIT`. Clear sticky `errorInfo`
+  on successful `quote`, avoid double WARNING on quote NUL, message
+  `PDO_PARAM_STMT` rejects, fail LOB binds when stream read fails, and zero
+  `columnCount` when a result is torn down. Reset the bind latch if EXEC_PRE
+  leaves an exception.
 - Escalate the `open_basedir` sandbox from `beginTransaction()` / `commit()` /
   `rollBack()` and from live `Appender` methods (`appendRow` / `flush` / `close`),
   matching prepare/exec so sticky writers and OOB attachments cannot survive a

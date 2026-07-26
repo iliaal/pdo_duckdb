@@ -19,7 +19,6 @@
 #include "ext/standard/info.h"
 #include "ext/pdo/php_pdo.h"
 #include "ext/pdo/php_pdo_driver.h"
-#include "ext/pdo/php_pdo_error.h"
 #include "php_pdo_duckdb.h"
 #include "php_pdo_duckdb_int.h"
 #include "zend_exceptions.h"
@@ -747,8 +746,8 @@ static zend_string *duckdb_handle_quoter(pdo_dbh_t *dbh, const zend_string *unqu
 	smart_str buf = {0};
 
 	if (UNEXPECTED(zend_str_has_nul_byte(unquoted))) {
+		/* Record error only; PDO core applies ERRMODE when quoter returns NULL. */
 		pdo_duckdb_error(dbh, "DuckDB PDO::quote does not support null bytes");
-		pdo_handle_error(dbh, NULL);
 		return NULL;
 	}
 
@@ -762,6 +761,8 @@ static zend_string *duckdb_handle_quoter(pdo_dbh_t *dbh, const zend_string *unqu
 	smart_str_appendc(&buf, '\'');
 	smart_str_0(&buf);
 
+	pdo_duckdb_clear_einfo(&((pdo_duckdb_db_handle *)dbh->driver_data)->einfo,
+		dbh->is_persistent);
 	return buf.s;
 }
 
@@ -801,6 +802,32 @@ static bool duckdb_handle_rollback(pdo_dbh_t *dbh)
 	return duckdb_simple_exec(dbh, "ROLLBACK");
 }
 
+/* Bool attrs: use numeric/bool truthiness. zend_is_true treats non-empty
+ * strings (including "0" and "false") as true. */
+static bool pdo_duckdb_zval_is_true(zval *val)
+{
+	ZVAL_DEREF(val);
+	switch (Z_TYPE_P(val)) {
+		case IS_TRUE:
+			return true;
+		case IS_FALSE:
+		case IS_NULL:
+			return false;
+		case IS_LONG:
+			return Z_LVAL_P(val) != 0;
+		case IS_DOUBLE:
+			return Z_DVAL_P(val) != 0.0;
+		case IS_STRING:
+			if (Z_STRLEN_P(val) == 0 ||
+					(Z_STRLEN_P(val) == 1 && Z_STRVAL_P(val)[0] == '0')) {
+				return false;
+			}
+			return true;
+		default:
+			return zend_is_true(val);
+	}
+}
+
 static bool pdo_duckdb_set_attr(pdo_dbh_t *dbh, zend_long attr, zval *val)
 {
 	switch (attr) {
@@ -811,7 +838,7 @@ static bool pdo_duckdb_set_attr(pdo_dbh_t *dbh, zend_long attr, zval *val)
 			 * turning it off rather than silently ignoring it — accepting false
 			 * would mislead the caller into thinking statements are batched into
 			 * a transaction when each still commits on its own. */
-			if (zend_is_true(val)) {
+			if (pdo_duckdb_zval_is_true(val)) {
 				return true;
 			}
 			pdo_duckdb_error(dbh, "DuckDB does not support disabling autocommit; "
@@ -824,7 +851,7 @@ static bool pdo_duckdb_set_attr(pdo_dbh_t *dbh, zend_long attr, zval *val)
 			return true;
 
 		case PDO_DUCKDB_ATTR_UNBUFFERED:
-			((pdo_duckdb_db_handle *)dbh->driver_data)->unbuffered = zend_is_true(val);
+			((pdo_duckdb_db_handle *)dbh->driver_data)->unbuffered = pdo_duckdb_zval_is_true(val);
 			return true;
 
 		case PDO_DUCKDB_ATTR_CONFIG:
@@ -860,57 +887,23 @@ static bool pdo_duckdb_query_ok(duckdb_connection conn, const char *sql)
 	return true;
 }
 
-/* SET key='value' with SQL single-quote escaping. Used only for sandbox
- * escalate helpers (paths from open_basedir / empty strings). */
-static bool pdo_duckdb_set_string_option(duckdb_connection conn, const char *key, const char *value)
-{
-	smart_str sql = {0};
-	const char *p;
-	bool ok;
-
-	smart_str_appends(&sql, "SET ");
-	smart_str_appends(&sql, key);
-	smart_str_appends(&sql, "='");
-	for (p = value; *p; p++) {
-		if (*p == '\'') {
-			smart_str_appendc(&sql, '\'');
-		}
-		smart_str_appendc(&sql, *p);
-	}
-	smart_str_appends(&sql, "'");
-	smart_str_0(&sql);
-	ok = pdo_duckdb_query_ok(conn, ZSTR_VAL(sql.s));
-	smart_str_free(&sql);
-	return ok;
-}
-
-/* Point temp_directory at the first open_basedir entry (or clear it) so that
- * DuckDB's EnableExternalAccessSetting::OnSet cannot re-allowlist an
- * attacker-chosen temp path when external access is turned off. */
+/* Clear temp_directory before enable_external_access=false. A non-empty temp
+ * path is re-allowlisted by DuckDB's OnSet and cannot be removed afterward —
+ * seeding it with the first open_basedir entry let SQL read that whole tree
+ * (and survive a later open_basedir re-narrow). Empty temp seeds nothing. */
 static bool pdo_duckdb_reset_sandbox_temp_directory(pdo_duckdb_db_handle *H)
 {
+	return pdo_duckdb_query_ok(H->conn, "SET temp_directory=''");
+}
+
+static zend_ulong pdo_duckdb_open_basedir_hash(void)
+{
 	const char *ob = PG(open_basedir);
-	char *copy;
-	char *sep;
-	bool ok;
 
 	if (!ob || !*ob) {
-		return pdo_duckdb_query_ok(H->conn, "SET temp_directory=''");
+		return 0;
 	}
-
-	copy = estrdup(ob);
-	sep = strchr(copy, DEFAULT_DIR_SEPARATOR);
-	if (sep) {
-		*sep = '\0';
-	}
-	if (!*copy) {
-		efree(copy);
-		return pdo_duckdb_query_ok(H->conn, "SET temp_directory=''");
-	}
-
-	ok = pdo_duckdb_set_string_option(H->conn, "temp_directory", copy);
-	efree(copy);
-	return ok;
+	return zend_inline_hash_func(ob, strlen(ob));
 }
 
 /* DETACH user-attached databases whose paths fall outside open_basedir.
@@ -980,13 +973,12 @@ static bool pdo_duckdb_detach_out_of_basedir(pdo_duckdb_db_handle *H)
 
 /* Disable DuckDB external access (read_csv/COPY/ATTACH/httpfs) on the live
  * connection. Order matters:
- * 1. Neutralize sticky writers (log_query_path) and OnSet re-allowlist inputs
- *    (temp_directory, out-of-basedir ATTACHes) while external access is still on.
+ * 1. Neutralize sticky writers and OnSet re-allowlist inputs (empty temp,
+ *    out-of-basedir ATTACHes) while external access is still on.
  * 2. Clear allowlists before flipping enable_external_access: DuckDB refuses
  *    allowed_directories/allowed_paths changes after external access is off, but
  *    pre-existing allowlists remain effective.
- * 3. enable_external_access=false runs DuckDB's OnSet, which re-adds the
- *    (now sandboxed) temp directory and remaining attached paths.
+ * 3. enable_external_access=false runs DuckDB's OnSet (empty temp seeds nothing).
  * 4. lock_configuration last so none of the above can be undone. */
 static bool pdo_duckdb_disable_external_access(pdo_duckdb_db_handle *H)
 {
@@ -1002,6 +994,7 @@ static bool pdo_duckdb_disable_external_access(pdo_duckdb_db_handle *H)
 			!pdo_duckdb_query_ok(H->conn, "SET allow_community_extensions=false") ||
 			!pdo_duckdb_query_ok(H->conn, "SET allow_extensions_metadata_mismatch=false") ||
 			!pdo_duckdb_query_ok(H->conn, "SET allow_persistent_secrets=false") ||
+			!pdo_duckdb_query_ok(H->conn, "SET allow_unredacted_secrets=false") ||
 			!pdo_duckdb_query_ok(H->conn, "SET allow_unsigned_extensions=false") ||
 			!pdo_duckdb_query_ok(H->conn, "SET enable_external_file_cache=false") ||
 			!pdo_duckdb_query_ok(H->conn, "SET enable_http_metadata_cache=false") ||
@@ -1010,19 +1003,28 @@ static bool pdo_duckdb_disable_external_access(pdo_duckdb_db_handle *H)
 		return false;
 	}
 	H->external_access_disabled = true;
+	H->sandbox_basedir_hash = pdo_duckdb_open_basedir_hash();
 	return true;
 }
 
-/* If the open_basedir sandbox is required for this request but this handle was
- * opened without it (open_basedir unset at open time, then tightened — whether
- * across a persistent reuse or mid-request on a normal handle), disable external
- * access on the live connection before any SQL runs. One-way in DuckDB, so once
- * applied it stays; the flag short-circuits subsequent calls (one SET per
- * handle, lifetime). */
+/* If open_basedir is set and this handle is not yet sandboxed, disable external
+ * access. After sandboxing, DuckDB allowlists are frozen — if open_basedir is
+ * later re-narrowed, fail closed (SQL cannot drop permanent allowlist entries). */
 bool pdo_duckdb_enforce_sandbox(pdo_duckdb_db_handle *H)
 {
-	if ((PG(open_basedir) && *PG(open_basedir)) && !H->external_access_disabled) {
+	zend_ulong cur;
+
+	if (!(PG(open_basedir) && *PG(open_basedir))) {
+		return true;
+	}
+
+	cur = pdo_duckdb_open_basedir_hash();
+	if (!H->external_access_disabled) {
 		return pdo_duckdb_disable_external_access(H);
+	}
+	/* Already escalated / open-time sandboxed: refuse basedir re-narrow. */
+	if (H->sandbox_basedir_hash != cur) {
+		return false;
 	}
 	return true;
 }
@@ -1226,8 +1228,11 @@ static zend_string *pdo_duckdb_config_scalar_to_string(zval *value)
 
 	switch (Z_TYPE_P(value)) {
 		case IS_NULL:
+			return ZSTR_EMPTY_ALLOC();
 		case IS_FALSE:
+			return zend_string_init("false", sizeof("false") - 1, 0);
 		case IS_TRUE:
+			return zend_string_init("true", sizeof("true") - 1, 0);
 		case IS_LONG:
 		case IS_DOUBLE:
 		case IS_STRING:
@@ -1454,14 +1459,14 @@ static int pdo_duckdb_handle_factory(pdo_dbh_t *dbh, zval *driver_options) /* {{
 	}
 	if (PG(open_basedir) && *PG(open_basedir)) {
 		H->external_access_disabled = true;
+		H->sandbox_basedir_hash = pdo_duckdb_open_basedir_hash();
 	}
 
 	/* Carry an opt-in unbuffered request through to statements on this handle. */
 	if (driver_options && Z_TYPE_P(driver_options) == IS_ARRAY) {
 		zval *unbuf = zend_hash_index_find(Z_ARRVAL_P(driver_options), PDO_DUCKDB_ATTR_UNBUFFERED);
 		if (unbuf) {
-			ZVAL_DEREF(unbuf);
-			H->unbuffered = zend_is_true(unbuf);
+			H->unbuffered = pdo_duckdb_zval_is_true(unbuf);
 		}
 	}
 
