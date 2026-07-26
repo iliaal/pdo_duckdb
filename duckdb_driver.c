@@ -19,10 +19,22 @@
 #include "ext/standard/info.h"
 #include "ext/pdo/php_pdo.h"
 #include "ext/pdo/php_pdo_driver.h"
+#include "ext/pdo/php_pdo_error.h"
 #include "php_pdo_duckdb.h"
 #include "php_pdo_duckdb_int.h"
 #include "zend_exceptions.h"
 #include "zend_smart_str.h"
+
+static void pdo_duckdb_clear_einfo(pdo_duckdb_error_info *einfo, bool persistent)
+{
+	if (einfo->errmsg) {
+		pefree(einfo->errmsg, persistent);
+		einfo->errmsg = NULL;
+	}
+	einfo->errcode = 0;
+	einfo->file = NULL;
+	einfo->line = 0;
+}
 
 int _pdo_duckdb_error(pdo_dbh_t *dbh, pdo_stmt_t *stmt, const char *msg, const char *file, int line) /* {{{ */
 {
@@ -201,8 +213,11 @@ static bool duckdb_handle_preparer(pdo_dbh_t *dbh, zend_string *sql, pdo_stmt_t 
 		/* the query was rewritten (e.g. :name -> ?) */
 		sql = rewritten;
 	} else if (parse_ret == -1) {
-		/* parse failure; pdo_parse_params already set stmt->error_code */
+		/* parse failure; pdo_parse_params already set stmt->error_code.
+		 * Drop any prior DuckDB driver message so errorInfo does not pair the
+		 * new SQLSTATE with a stale HY000 payload. */
 		strncpy(dbh->error_code, stmt->error_code, sizeof(dbh->error_code));
+		pdo_duckdb_clear_einfo(&H->einfo, dbh->is_persistent);
 		return false;
 	}
 
@@ -220,6 +235,7 @@ static bool duckdb_handle_preparer(pdo_dbh_t *dbh, zend_string *sql, pdo_stmt_t 
 	if (rewritten) {
 		zend_string_release(rewritten);
 	}
+	pdo_duckdb_clear_einfo(&H->einfo, dbh->is_persistent);
 	return true;
 }
 
@@ -648,6 +664,7 @@ static zend_long pdo_duckdb_exec_transaction_multi(pdo_dbh_t *dbh,
 		duckdb_destroy_result(&result);
 		duckdb_destroy_prepare(&prepared);
 	}
+	pdo_duckdb_clear_einfo(&H->einfo, dbh->is_persistent);
 	return changed;
 }
 
@@ -722,6 +739,7 @@ static zend_long duckdb_handle_doer(pdo_dbh_t *dbh, const zend_string *sql)
 	changed = (zend_long)duckdb_rows_changed(&result);
 	pdo_duckdb_apply_transaction_effect(dbh, transaction_effect);
 	duckdb_destroy_result(&result);
+	pdo_duckdb_clear_einfo(&H->einfo, dbh->is_persistent);
 	return changed;
 }
 
@@ -734,13 +752,8 @@ static zend_string *duckdb_handle_quoter(pdo_dbh_t *dbh, const zend_string *unqu
 	smart_str buf = {0};
 
 	if (UNEXPECTED(zend_str_has_nul_byte(unquoted))) {
-		if (dbh->error_mode == PDO_ERRMODE_EXCEPTION) {
-			zend_throw_exception_ex(php_pdo_get_exception(), 0,
-				"DuckDB PDO::quote does not support null bytes");
-		} else if (dbh->error_mode == PDO_ERRMODE_WARNING) {
-			php_error_docref(NULL, E_WARNING,
-				"DuckDB PDO::quote does not support null bytes");
-		}
+		pdo_duckdb_error(dbh, "DuckDB PDO::quote does not support null bytes");
+		pdo_handle_error(dbh, NULL);
 		return NULL;
 	}
 
@@ -763,12 +776,20 @@ static bool duckdb_simple_exec(pdo_dbh_t *dbh, const char *sql)
 	pdo_duckdb_db_handle *H = (pdo_duckdb_db_handle *)dbh->driver_data;
 	duckdb_result result;
 
+	/* Same open_basedir escalate gate as prepare/exec: sticky writers
+	 * (log_query_path) and OOB attachments must be neutralized before BEGIN. */
+	if (!pdo_duckdb_enforce_sandbox(H)) {
+		pdo_duckdb_error(dbh, "Unable to apply the open_basedir sandbox profile to DuckDB");
+		return false;
+	}
+
 	if (duckdb_query(H->conn, sql, &result) != DuckDBSuccess) {
 		pdo_duckdb_error(dbh, duckdb_result_error(&result));
 		duckdb_destroy_result(&result);
 		return false;
 	}
 	duckdb_destroy_result(&result);
+	pdo_duckdb_clear_einfo(&H->einfo, dbh->is_persistent);
 	return true;
 }
 
@@ -1021,6 +1042,9 @@ static zend_result pdo_duckdb_check_liveness(pdo_dbh_t *dbh)
 	pdo_duckdb_db_handle *H = (pdo_duckdb_db_handle *)dbh->driver_data;
 
 	H->unbuffered = false;
+	/* Persistent reuse: drop the previous request's sticky driver error payload
+	 * so errorInfo() cannot surface request-A messages under request-B SQLSTATE. */
+	pdo_duckdb_clear_einfo(&H->einfo, dbh->is_persistent);
 	return pdo_duckdb_enforce_sandbox(H)
 		? SUCCESS : FAILURE;
 }
@@ -1577,8 +1601,8 @@ static void pdo_duckdb_table_names_impl(INTERNAL_FUNCTION_PARAMETERS)
 }
 
 /* Render a duckdb_profiling_info node (and its subtree) into a PHP array shaped
- * ['metrics' => array<string,string>, 'children' => list]. Metrics arrive as a
- * MAP<VARCHAR,VARCHAR>, so every value is a string the caller casts as needed. */
+ * ['metrics' => array<string, string|null>, 'children' => list]. Metrics arrive
+ * as MAP keys/values; SQL NULL metric values become PHP null. */
 static void pdo_duckdb_build_profile_node(duckdb_profiling_info info, zval *out)
 {
 	zval metrics, children;

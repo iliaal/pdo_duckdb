@@ -82,3 +82,9 @@ Out of scope:
   reuses the DuckDB connection/session by design, so catalog state,
   attachments, and `SET` options can survive across requests in the same
   PHP process.
+- Classic TOCTOU between the DSN path `open_basedir` check and
+  `duckdb_open_ext` (DuckDB has no descriptor-based open API). Keep every
+  writable path component under trusted, non-writable directory ancestry.
+- Extensions already `LOAD`ed before `open_basedir` is tightened. Escalate
+  disables auto-install/load and external access but cannot unload in-process
+  extension code; set `open_basedir` before untrusted SQL or `LOAD`.

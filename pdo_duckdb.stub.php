@@ -54,9 +54,10 @@ namespace Pdo {
 
         /**
          * Return the profiling tree of the last executed query as a nested
-         * array shaped ['metrics' => array<string,string>, 'children' => list],
+         * array shaped ['metrics' => array<string, string|null>, 'children' => list],
          * or null if profiling is not enabled. Enable it first with
          * PRAGMA enable_profiling (the method does not execute any query).
+         * A metric whose DuckDB value is SQL NULL becomes PHP null.
          */
         public function duckdbLastProfile(): ?array {}
     }

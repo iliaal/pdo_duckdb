@@ -12,6 +12,7 @@ $st = $db->query("SELECT
     CAST(1 AS INTEGER)        AS c_int,
     CAST(1 AS BIGINT)         AS c_big,
     CAST(1 AS UBIGINT)        AS c_ubig,
+    CAST(true AS BOOLEAN)     AS c_bool,
     CAST(1.5 AS DOUBLE)       AS c_dbl,
     CAST(9.99 AS DECIMAL(10,2)) AS c_dec,
     DATE '2026-01-01'         AS c_date,
@@ -33,6 +34,7 @@ for ($i = 0; $i < $n; $i++) {
 c_int|INTEGER|pdo=1
 c_big|BIGINT|pdo=1
 c_ubig|UBIGINT|pdo=2
+c_bool|BOOLEAN|pdo=1
 c_dbl|DOUBLE|pdo=2
 c_dec|DECIMAL|pdo=2|precision=10|scale=2
 c_date|DATE|pdo=2

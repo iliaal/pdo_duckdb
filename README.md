@@ -129,7 +129,10 @@ on the destructor alone still closes (and warns on failure); prefer an explicit
 `close()`. Soft validation failures (`ValueError`/`TypeError` for arity, types,
 ranges) leave the appender live so you can retry the row. Hard DuckDB failures
 on append/flush/close poison the appender — later use throws `Error` and you must
-create a new one.
+create a new one. The same hard path applies when DuckDB rejects a PHP string
+cast into a typed column (e.g. `'not-a-date'` into `DATE`, or a non-numeric string
+into `DECIMAL`): that is a native append failure, not a soft `ValueError`, so
+buffered rows for that appender are lost and you must create a new appender.
 
 `appendRow(...$values)` takes one argument per column (left to right) and
 returns the appender for chaining. PHP `null`/`bool`/`int`/`float`/`string` map
@@ -181,7 +184,8 @@ $profile = $db->duckdbLastProfile();
 //  'children' => [ ['metrics' => ['OPERATOR_NAME' => 'SEQ_SCAN', …], 'children' => […]] ]]
 ```
 
-Profiling metric values are strings; cast the numeric ones as needed.
+Profiling metric values are strings, or PHP `null` when DuckDB reports a SQL NULL
+for that metric; cast the numeric strings as needed.
 
 ## 🧩 DuckDB extensions
 
@@ -217,11 +221,13 @@ $db->exec('INSTALL httpfs; LOAD httpfs;');  // downloadable extensions
   DuckDB, such as `LOAD json`; the sandbox blocks extension files and downloads.
 - **`lastInsertId()`** is not supported; DuckDB has no implicit rowid. Use a
   sequence and `currval()` if you need generated keys.
-- **Type mapping.** Integers up to 64-bit signed return as `int`, `FLOAT`/`DOUBLE`
-  as `float`, `BLOB` as a binary string, and everything else (`VARCHAR`,
-  `DATE`/`TIME`/`TIMESTAMP`, `DECIMAL`, `HUGEINT`/`UBIGINT`, nested types) as its
-  canonical string form. `getColumnMeta()` reports the real DuckDB type name per
-  column, plus `precision`/`scale` for `DECIMAL`. Nested values with boolean,
+- **Type mapping.** Integers up to 64-bit signed return as `int`, `BOOLEAN` as
+  PHP `int` `0`/`1` (not `bool`), `FLOAT`/`DOUBLE` as `float`, `BLOB` as a binary
+  string, and everything else (`VARCHAR`, `DATE`/`TIME`/`TIMESTAMP`, `DECIMAL`,
+  `HUGEINT`/`UBIGINT`, nested types) as its canonical string form.
+  `getColumnMeta()` reports the real DuckDB type name per column, `pdo_type`
+  matching the fetch shape (`PDO::PARAM_INT` for `BOOLEAN` and integer widths),
+  plus `precision`/`scale` for `DECIMAL`. Nested values with boolean,
   integer, `DECIMAL`, `DATE`, and `UUID` leaves use a direct renderer; nested
   values whose leaves need DuckDB's quoting rules keep DuckDB's own renderer.
   Nested fetches intentionally return canonical strings, not PHP arrays; use SQL

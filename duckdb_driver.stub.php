@@ -25,8 +25,9 @@ class PdoDuckDb_Ext
 
     /**
      * Return the profiling tree of the last executed query as a nested array
-     * shaped ['metrics' => array<string,string>, 'children' => list], or null
-     * if profiling is not enabled. Enable it first with PRAGMA enable_profiling.
+     * shaped ['metrics' => array<string, string|null>, 'children' => list], or
+     * null if profiling is not enabled. Enable it first with PRAGMA
+     * enable_profiling. A metric whose DuckDB value is SQL NULL becomes PHP null.
      */
     public function duckdbLastProfile(): ?array {}
 }

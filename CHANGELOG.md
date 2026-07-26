@@ -8,6 +8,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- Escalate the `open_basedir` sandbox from `beginTransaction()` / `commit()` /
+  `rollBack()` and from live `Appender` methods (`appendRow` / `flush` / `close`),
+  matching prepare/exec so sticky writers and OOB attachments cannot survive a
+  mid-request basedir tighten.
+- Clear sticky driver `errorInfo` payloads on successful operations and on
+  persistent `check_liveness`, and record quote NUL rejections through the
+  normal error path under all ERRMODE values.
+- Zero `PDOStatement::rowCount()` when a re-execute fails after a prior success.
+- Guard ARRAY slow-path reconstruction against `row * n` overflow (parity with
+  the fast nested renderer) and reject out-of-range ENUM dictionary indices on
+  the slow path.
+- Align `getColumnMeta()` `pdo_type` for `BOOLEAN` with fetch (`PDO::PARAM_INT`
+  / PHP int 0/1) and document cast-failure appender poison plus profile metric
+  nullability.
 - Reject callback-capable `PDO::DUCKDB_ATTR_CONFIG` values before conversion,
   preventing Stringable reentrancy during connection setup.
 - Synchronize raw SQL transaction control with PDO state, including prepared
