@@ -158,6 +158,10 @@ bool pdo_duckdb_enforce_sandbox(pdo_duckdb_db_handle *H);
 void pdo_duckdb_apply_transaction_effect(pdo_dbh_t *dbh,
 	pdo_duckdb_transaction_effect effect);
 
+/* Drop a sticky driver error payload (errmsg + errcode). persistent matches
+ * how the message was allocated (dbh vs stmt). */
+void pdo_duckdb_clear_einfo(pdo_duckdb_error_info *einfo, bool persistent);
+
 /* Records an error against the dbh (or stmt). msg is copied; pass the message
  * obtained from duckdb_result_error()/duckdb_prepare_error() or a literal. */
 extern int _pdo_duckdb_error(pdo_dbh_t *dbh, pdo_stmt_t *stmt, const char *msg, const char *file, int line);

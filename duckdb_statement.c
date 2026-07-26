@@ -119,10 +119,7 @@ static int pdo_duckdb_stmt_dtor(pdo_stmt_t *stmt)
 		duckdb_destroy_prepare(&S->prepared);
 		S->prepared = NULL;
 	}
-	if (S->einfo.errmsg) {
-		efree(S->einfo.errmsg);
-		S->einfo.errmsg = NULL;
-	}
+	pdo_duckdb_clear_einfo(&S->einfo, false);
 	efree(S);
 	return 1;
 }
@@ -132,8 +129,7 @@ static int pdo_duckdb_stmt_execute(pdo_stmt_t *stmt)
 	pdo_duckdb_stmt *S = (pdo_duckdb_stmt *)stmt->driver_data;
 
 	pdo_duckdb_stmt_reset_result(S);
-	/* Zero early so every failure path after a prior successful execute does not
-	 * report a stale rowCount() for a result that no longer exists. */
+	/* Zero before any failure return so re-execute errors do not leave a stale rowCount. */
 	stmt->row_count = 0;
 
 	/* open_basedir may have been tightened after this statement was prepared;
@@ -193,12 +189,7 @@ static int pdo_duckdb_stmt_execute(pdo_stmt_t *stmt)
 	pdo_duckdb_stmt_cache_columns(S);
 	php_pdo_stmt_set_column_count(stmt, (int)S->col_count);
 	stmt->row_count = pdo_duckdb_stmt_rows_changed(&S->result);
-	/* Success: drop any sticky stmt-level error from a prior failed execute. */
-	if (S->einfo.errmsg) {
-		efree(S->einfo.errmsg);
-		S->einfo.errmsg = NULL;
-	}
-	S->einfo.errcode = 0;
+	pdo_duckdb_clear_einfo(&S->einfo, false);
 
 	return 1;
 }
@@ -263,8 +254,6 @@ static duckdb_value pdo_duckdb_enum_value(duckdb_logical_type lt, void *data, id
 		case DUCKDB_TYPE_UTINYINT:
 		default:                    idx = ((uint8_t *)data)[row];  break;
 	}
-	/* Mirror the fast path: reject OOB physical indices instead of relying on
-	 * duckdb_create_enum_value's NULL return (which becomes a silent PHP null). */
 	if (idx >= duckdb_enum_dictionary_size(lt)) {
 		return duckdb_create_null_value();
 	}
@@ -1338,7 +1327,6 @@ static duckdb_value pdo_duckdb_cell_to_value_typed(duckdb_vector vec, idx_t row,
 			duckdb_value *vals;
 			idx_t base, i;
 
-			/* Same overflow guard as the fast nested renderer: row * n must not wrap. */
 			if (n && row > (idx_t)-1 / n) {
 				duckdb_destroy_logical_type(&ct);
 				ret = duckdb_create_null_value();
@@ -1731,8 +1719,7 @@ static int pdo_duckdb_stmt_col_meta(pdo_stmt_t *stmt, zend_long colno, zval *ret
 	add_assoc_string(return_value, "native_type", (char *)pdo_duckdb_type_name(tid));
 
 	switch (tid) {
-		/* BOOLEAN is fetched as PHP int 0/1 (ZVAL_LONG), not IS_TRUE/IS_FALSE.
-		 * Report PDO_PARAM_INT so getColumnMeta matches get_col. */
+		/* BOOLEAN is PHP int 0/1 in get_col — same pdo_type as integer widths. */
 		case DUCKDB_TYPE_BOOLEAN:
 		/* Mirror get_col: the widths it returns as a PHP int. UBIGINT/HUGEINT and
 		 * wider come back as strings, so they stay PDO_PARAM_STR via the default. */

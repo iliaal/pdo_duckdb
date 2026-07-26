@@ -311,40 +311,26 @@ ZEND_METHOD(Pdo_Duckdb_Appender, __construct)
 	zend_throw_error(NULL, "Pdo\\Duckdb\\Appender cannot be constructed directly; use PDO::duckdbAppender()");
 }
 
+/* Live gate for appendRow/flush/close: closed appender → Error; also re-apply
+ * open_basedir sandbox if basedir tightened after create. */
 static pdo_duckdb_appender *pdo_duckdb_appender_live(zval *zthis)
 {
 	pdo_duckdb_appender *a = pdo_duckdb_appender_from_obj(Z_OBJ_P(zthis));
+	pdo_duckdb_db_handle *H;
 
 	if (!a->appender || a->closed) {
 		zend_throw_error(NULL, "Pdo\\Duckdb\\Appender is closed");
 		return NULL;
 	}
+	if (a->pdo) {
+		H = (pdo_duckdb_db_handle *)php_pdo_dbh_fetch_inner(a->pdo)->driver_data;
+		if (H && !pdo_duckdb_enforce_sandbox(H)) {
+			zend_throw_exception_ex(php_pdo_get_exception(), 0,
+				"Pdo\\Duckdb\\Appender: unable to apply the open_basedir sandbox");
+			return NULL;
+		}
+	}
 	return a;
-}
-
-/* Resolve the owning connection so live appender methods can re-apply the
- * open_basedir sandbox if it was tightened after create. */
-static pdo_duckdb_db_handle *pdo_duckdb_appender_db_handle(pdo_duckdb_appender *a)
-{
-	if (!a->pdo) {
-		return NULL;
-	}
-	return (pdo_duckdb_db_handle *)php_pdo_dbh_fetch_inner(a->pdo)->driver_data;
-}
-
-static bool pdo_duckdb_appender_enforce_sandbox(pdo_duckdb_appender *a)
-{
-	pdo_duckdb_db_handle *H = pdo_duckdb_appender_db_handle(a);
-
-	if (!H) {
-		return true;
-	}
-	if (!pdo_duckdb_enforce_sandbox(H)) {
-		zend_throw_exception_ex(php_pdo_get_exception(), 0,
-			"Pdo\\Duckdb\\Appender: unable to apply the open_basedir sandbox");
-		return false;
-	}
-	return true;
 }
 
 static bool pdo_duckdb_validate_integer_range(zend_long l, duckdb_type tid, uint32_t argpos)
@@ -650,9 +636,6 @@ ZEND_METHOD(Pdo_Duckdb_Appender, appendRow)
 	if (!a) {
 		RETURN_THROWS();
 	}
-	if (!pdo_duckdb_appender_enforce_sandbox(a)) {
-		RETURN_THROWS();
-	}
 
 	/* Validate and pre-build the whole row before touching the native appender.
 	 * DuckDB appends value-by-value with no rollback: a failure partway through
@@ -802,9 +785,6 @@ ZEND_METHOD(Pdo_Duckdb_Appender, flush)
 	if (!a) {
 		RETURN_THROWS();
 	}
-	if (!pdo_duckdb_appender_enforce_sandbox(a)) {
-		RETURN_THROWS();
-	}
 	if (duckdb_appender_flush(a->appender) != DuckDBSuccess) {
 		/* A failed flush invalidates the appender (DuckDB contract): no further
 		 * appends are possible. Mark it unusable so the free path destroys it. */
@@ -822,9 +802,6 @@ ZEND_METHOD(Pdo_Duckdb_Appender, close)
 
 	a = pdo_duckdb_appender_live(ZEND_THIS);
 	if (!a) {
-		RETURN_THROWS();
-	}
-	if (!pdo_duckdb_appender_enforce_sandbox(a)) {
 		RETURN_THROWS();
 	}
 	if (duckdb_appender_close(a->appender) != DuckDBSuccess) {

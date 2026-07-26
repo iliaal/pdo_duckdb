@@ -25,7 +25,7 @@
 #include "zend_exceptions.h"
 #include "zend_smart_str.h"
 
-static void pdo_duckdb_clear_einfo(pdo_duckdb_error_info *einfo, bool persistent)
+void pdo_duckdb_clear_einfo(pdo_duckdb_error_info *einfo, bool persistent)
 {
 	if (einfo->errmsg) {
 		pefree(einfo->errmsg, persistent);
@@ -99,10 +99,7 @@ static void duckdb_handle_closer(pdo_dbh_t *dbh) /* {{{ */
 			duckdb_close(&H->db);
 			H->db = NULL;
 		}
-		if (H->einfo.errmsg) {
-			pefree(H->einfo.errmsg, dbh->is_persistent);
-			H->einfo.errmsg = NULL;
-		}
+		pdo_duckdb_clear_einfo(&H->einfo, dbh->is_persistent);
 		pefree(H, dbh->is_persistent);
 		dbh->driver_data = NULL;
 	}
@@ -213,9 +210,7 @@ static bool duckdb_handle_preparer(pdo_dbh_t *dbh, zend_string *sql, pdo_stmt_t 
 		/* the query was rewritten (e.g. :name -> ?) */
 		sql = rewritten;
 	} else if (parse_ret == -1) {
-		/* parse failure; pdo_parse_params already set stmt->error_code.
-		 * Drop any prior DuckDB driver message so errorInfo does not pair the
-		 * new SQLSTATE with a stale HY000 payload. */
+		/* parse failure; pdo_parse_params already set stmt->error_code */
 		strncpy(dbh->error_code, stmt->error_code, sizeof(dbh->error_code));
 		pdo_duckdb_clear_einfo(&H->einfo, dbh->is_persistent);
 		return false;
@@ -776,8 +771,6 @@ static bool duckdb_simple_exec(pdo_dbh_t *dbh, const char *sql)
 	pdo_duckdb_db_handle *H = (pdo_duckdb_db_handle *)dbh->driver_data;
 	duckdb_result result;
 
-	/* Same open_basedir escalate gate as prepare/exec: sticky writers
-	 * (log_query_path) and OOB attachments must be neutralized before BEGIN. */
 	if (!pdo_duckdb_enforce_sandbox(H)) {
 		pdo_duckdb_error(dbh, "Unable to apply the open_basedir sandbox profile to DuckDB");
 		return false;
@@ -1042,8 +1035,6 @@ static zend_result pdo_duckdb_check_liveness(pdo_dbh_t *dbh)
 	pdo_duckdb_db_handle *H = (pdo_duckdb_db_handle *)dbh->driver_data;
 
 	H->unbuffered = false;
-	/* Persistent reuse: drop the previous request's sticky driver error payload
-	 * so errorInfo() cannot surface request-A messages under request-B SQLSTATE. */
 	pdo_duckdb_clear_einfo(&H->einfo, dbh->is_persistent);
 	return pdo_duckdb_enforce_sandbox(H)
 		? SUCCESS : FAILURE;
