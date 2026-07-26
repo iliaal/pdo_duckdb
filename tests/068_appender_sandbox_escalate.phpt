@@ -7,7 +7,10 @@ pdo_duckdb
 <?php
 // Appender create latches the sandbox; live methods must escalate if basedir
 // is tightened after create (otherwise sticky external access stays on).
-$db = new PDO('duckdb::memory:', null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
+// On 8.4+ use PDO::connect() so duckdbAppender() is not a deprecated base-PDO method.
+$db = PHP_VERSION_ID >= 80400
+	? PDO::connect('duckdb::memory:', null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION])
+	: new PDO('duckdb::memory:', null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
 $db->exec('CREATE TABLE t (id INTEGER, name VARCHAR)');
 $app = $db->duckdbAppender('t');
 
