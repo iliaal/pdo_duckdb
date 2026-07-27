@@ -24,7 +24,7 @@ concurrency:
 
 env:
   # Keep in sync with DUCKDB_VERSION in tests.yml.
-  DUCKDB_VERSION: "1.5.4"
+  DUCKDB_VERSION: "1.5.5"
 
 jobs:
   windows-matrix:

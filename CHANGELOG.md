@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Build, test, and ship against DuckDB 1.5.5. The prebuilt binaries link it; a
+  source build still works against the advertised 1.5.3 floor.
+
 ### Fixed
 - Render `DECIMAL` values whose type has no integer digits (`width == scale`,
   e.g. `DECIMAL(2,2)`) as DuckDB does — `.05`, not `0.05`. Affected scalar cells
