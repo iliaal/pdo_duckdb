@@ -220,43 +220,6 @@ static int pdo_duckdb_stmt_execute(pdo_stmt_t *stmt)
 static duckdb_value pdo_duckdb_cell_to_value_typed(duckdb_vector vec, idx_t row,
 	duckdb_logical_type lt, bool destroy_lt, bool *unsupported_variant);
 
-static duckdb_value pdo_duckdb_decimal_value(duckdb_logical_type lt, void *data, idx_t row)
-{
-	duckdb_decimal d;
-	d.width = duckdb_decimal_width(lt);
-	d.scale = duckdb_decimal_scale(lt);
-
-	switch (duckdb_decimal_internal_type(lt)) {
-		case DUCKDB_TYPE_SMALLINT: {
-			int64_t v = ((int16_t *)data)[row];
-			d.value.lower = (uint64_t)v;
-			d.value.upper = v < 0 ? -1 : 0;
-			break;
-		}
-		case DUCKDB_TYPE_INTEGER: {
-			int64_t v = ((int32_t *)data)[row];
-			d.value.lower = (uint64_t)v;
-			d.value.upper = v < 0 ? -1 : 0;
-			break;
-		}
-		case DUCKDB_TYPE_BIGINT: {
-			int64_t v = ((int64_t *)data)[row];
-			d.value.lower = (uint64_t)v;
-			d.value.upper = v < 0 ? -1 : 0;
-			break;
-		}
-		case DUCKDB_TYPE_HUGEINT:
-			d.value = ((duckdb_hugeint *)data)[row];
-			break;
-		default:
-			/* Unknown internal width — only reachable from a corrupt storage file.
-			 * Don't fall through to a 16-byte HUGEINT read against a possibly
-			 * narrower vector; surface NULL instead. */
-			return duckdb_create_null_value();
-	}
-	return duckdb_create_decimal(d);
-}
-
 static duckdb_value pdo_duckdb_enum_value(duckdb_logical_type lt, void *data, idx_t row)
 {
 	uint64_t idx;
@@ -390,8 +353,21 @@ static bool pdo_duckdb_decimal_from_vector(duckdb_logical_type lt, void *data, i
 			d->value = ((duckdb_hugeint *)data)[row];
 			return true;
 		default:
+			/* Unknown internal width — only reachable from a corrupt storage file.
+			 * Don't fall through to a 16-byte HUGEINT read against a possibly
+			 * narrower vector. */
 			return false;
 	}
+}
+
+static duckdb_value pdo_duckdb_decimal_value(duckdb_logical_type lt, void *data, idx_t row)
+{
+	duckdb_decimal d;
+
+	if (!pdo_duckdb_decimal_from_vector(lt, data, row, &d)) {
+		return duckdb_create_null_value();
+	}
+	return duckdb_create_decimal(d);
 }
 
 static zend_string *pdo_duckdb_decimal_to_string(duckdb_decimal d)

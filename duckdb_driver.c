@@ -888,32 +888,6 @@ static bool pdo_duckdb_query_ok(duckdb_connection conn, const char *sql)
 	return true;
 }
 
-/* Record the open_basedir the sandbox was applied under, so a later re-narrow is
- * detectable (DuckDB allowlists are frozen once escalate has run). */
-static void pdo_duckdb_snapshot_open_basedir(pdo_duckdb_db_handle *H)
-{
-	const char *ob = PG(open_basedir);
-
-	if (H->sandbox_basedir) {
-		pefree(H->sandbox_basedir, H->persistent);
-		H->sandbox_basedir = NULL;
-	}
-	if (ob && *ob) {
-		H->sandbox_basedir = pestrdup(ob, H->persistent);
-	}
-}
-
-/* Whether open_basedir still matches the snapshot taken at sandbox time. */
-static bool pdo_duckdb_open_basedir_unchanged(const pdo_duckdb_db_handle *H)
-{
-	const char *ob = PG(open_basedir);
-
-	if (!ob || !*ob) {
-		return H->sandbox_basedir == NULL;
-	}
-	return H->sandbox_basedir != NULL && strcmp(ob, H->sandbox_basedir) == 0;
-}
-
 /* DETACH user-attached databases whose paths fall outside open_basedir.
  * OnSet re-adds every attached path to allowed_paths when external access is
  * disabled; those entries cannot be cleared afterward. */
@@ -1029,7 +1003,10 @@ static bool pdo_duckdb_disable_external_access(pdo_duckdb_db_handle *H)
 		}
 	}
 	H->external_access_disabled = true;
-	pdo_duckdb_snapshot_open_basedir(H);
+	/* Record the basedir this sandbox was applied under so a later re-narrow is
+	 * detectable. Reached once per handle, from enforce_sandbox, which has already
+	 * established that open_basedir is non-empty. */
+	H->sandbox_basedir = pestrdup(PG(open_basedir), H->persistent);
 	return true;
 }
 
@@ -1043,7 +1020,9 @@ bool pdo_duckdb_enforce_sandbox(pdo_duckdb_db_handle *H)
 	if (!H->external_access_disabled) {
 		return pdo_duckdb_disable_external_access(H);
 	}
-	return pdo_duckdb_open_basedir_unchanged(H);
+	/* Already sandboxed: DuckDB's allowlists are frozen, so they cannot track a
+	 * re-narrowed basedir. Anything but the recorded value fails closed. */
+	return H->sandbox_basedir != NULL && strcmp(PG(open_basedir), H->sandbox_basedir) == 0;
 }
 
 /* Persistent handles skip handle_factory on reuse, so PDO calls check_liveness
