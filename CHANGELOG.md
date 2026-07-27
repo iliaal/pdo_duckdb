@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-07-26
+
 ### Changed
 - Build, test, and ship against DuckDB 1.5.5. The prebuilt binaries link it; a
   source build still works against the advertised 1.5.3 floor.
@@ -256,7 +258,8 @@ Initial release. A PDO driver for DuckDB.
   table/schema names are rejected, rather than silently truncating the statement
   or identifier at the NUL.
 
-[Unreleased]: https://github.com/iliaal/pdo_duckdb/compare/0.4.1...HEAD
+[Unreleased]: https://github.com/iliaal/pdo_duckdb/compare/0.5.0...HEAD
+[0.5.0]: https://github.com/iliaal/pdo_duckdb/releases/tag/0.5.0
 [0.4.1]: https://github.com/iliaal/pdo_duckdb/releases/tag/0.4.1
 [0.4.0]: https://github.com/iliaal/pdo_duckdb/releases/tag/0.4.0
 [0.3.0]: https://github.com/iliaal/pdo_duckdb/releases/tag/0.3.0

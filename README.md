@@ -202,6 +202,10 @@ $db->exec('INSTALL httpfs; LOAD httpfs;');  // downloadable extensions
   PDO rewrites them to DuckDB `$N` parameters. A repeated `:name` is bound once.
   Because `:` is reserved for placeholders, inline `STRUCT`/`MAP` literals must
   keep a space after the colon (`{'k': 1}`, not `{'k':1}`) in prepared queries.
+- **Cursors are forward-only.** DuckDB hands results back one chunk at a time in
+  a single direction, so `PDO::ATTR_CURSOR => PDO::CURSOR_SCROLL` is rejected at
+  `prepare()` rather than failing later on the first backwards fetch. Use
+  `fetchAll()` and index the array if you need random access.
 - **Transactions.** `beginTransaction()` / `commit()` / `rollBack()` map to
   DuckDB `BEGIN TRANSACTION` / `COMMIT` / `ROLLBACK`. DuckDB is
   autocommit-by-default with no session toggle, so `setAttribute(PDO::ATTR_AUTOCOMMIT,
