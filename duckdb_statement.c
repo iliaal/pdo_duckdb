@@ -194,11 +194,10 @@ static int pdo_duckdb_stmt_execute(pdo_stmt_t *stmt)
 	}
 	pdo_duckdb_stmt_cache_columns(S);
 	php_pdo_stmt_set_column_count(stmt, (int)S->col_count);
-	/* reset_result_full uses set_column_count(0), which frees columns. PDO only
-	 * auto-describes when !stmt->executed (first execute). Clear the latch so
-	 * re-execute also runs pdo_stmt_describe_columns — otherwise getColumnMeta
-	 * SEGVs on a NULL columns array. */
-	if (!stmt->columns && S->col_count > 0) {
+	/* reset_result_full freed columns via set_column_count(0). PDO only
+	 * auto-describes when !stmt->executed; clear the latch so re-execute
+	 * rebuilds columns (getColumnMeta otherwise SEGVs). */
+	if (S->col_count > 0) {
 		stmt->executed = 0;
 	}
 	stmt->row_count = pdo_duckdb_stmt_rows_changed(&S->result);
@@ -420,7 +419,11 @@ static zend_string *pdo_duckdb_decimal_to_string(duckdb_decimal d)
 
 	if (len <= d.scale) {
 		size_t zeros = (size_t)d.scale - len;
-		out[pos++] = '0';
+		/* DuckDB writes the integer-part '0' only when the type has room for an
+		 * integer digit: DECIMAL(4,2) renders 0.05, DECIMAL(2,2) renders .05. */
+		if (d.width > d.scale) {
+			out[pos++] = '0';
+		}
 		out[pos++] = '.';
 		memset(out + pos, '0', zeros);
 		pos += zeros;
@@ -1471,14 +1474,6 @@ static int pdo_duckdb_stmt_fetch(pdo_stmt_t *stmt,
 	if (!S->has_result || S->done) {
 		return 0;
 	}
-	/* Unbuffered scans can open files during chunk pull; re-latch sandbox if
-	 * open_basedir was tightened after execute. */
-	if (!pdo_duckdb_enforce_sandbox(S->H)) {
-		pdo_duckdb_error_stmt(stmt, "Unable to apply the open_basedir sandbox profile to DuckDB");
-		pdo_duckdb_stmt_reset_result_full(stmt);
-		S->done = true;
-		return 0;
-	}
 	if (ori != PDO_FETCH_ORI_NEXT) {
 		pdo_duckdb_error_stmt(stmt, "DuckDB PDO driver only supports forward-only cursors");
 		return 0;
@@ -1488,6 +1483,17 @@ static int pdo_duckdb_stmt_fetch(pdo_stmt_t *stmt,
 		S->started = true;
 	} else if (++S->cur < S->chunk_size) {
 		return 1;
+	}
+
+	/* Unbuffered scans can open files during chunk pull; re-latch the sandbox if
+	 * open_basedir was tightened after execute. Pulling a chunk is the only part
+	 * of fetch that reaches DuckDB — rows served out of the chunk above touch no
+	 * filesystem — so the check belongs here rather than on every row. */
+	if (!pdo_duckdb_enforce_sandbox(S->H)) {
+		pdo_duckdb_error_stmt(stmt, "Unable to apply the open_basedir sandbox profile to DuckDB");
+		pdo_duckdb_stmt_reset_result_full(stmt);
+		S->done = true;
+		return 0;
 	}
 
 	/* Advance to the next non-empty chunk. */

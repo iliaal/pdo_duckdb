@@ -99,6 +99,10 @@ static void duckdb_handle_closer(pdo_dbh_t *dbh) /* {{{ */
 			H->db = NULL;
 		}
 		pdo_duckdb_clear_einfo(&H->einfo, dbh->is_persistent);
+		if (H->sandbox_basedir) {
+			pefree(H->sandbox_basedir, dbh->is_persistent);
+			H->sandbox_basedir = NULL;
+		}
 		pefree(H, dbh->is_persistent);
 		dbh->driver_data = NULL;
 	}
@@ -884,16 +888,30 @@ static bool pdo_duckdb_query_ok(duckdb_connection conn, const char *sql)
 	return true;
 }
 
-/* Hash of the current open_basedir string (0 if unset). Used to detect re-narrow
- * after escalate, when DuckDB allowlists are frozen. */
-static zend_ulong pdo_duckdb_open_basedir_hash(void)
+/* Record the open_basedir the sandbox was applied under, so a later re-narrow is
+ * detectable (DuckDB allowlists are frozen once escalate has run). */
+static void pdo_duckdb_snapshot_open_basedir(pdo_duckdb_db_handle *H)
+{
+	const char *ob = PG(open_basedir);
+
+	if (H->sandbox_basedir) {
+		pefree(H->sandbox_basedir, H->persistent);
+		H->sandbox_basedir = NULL;
+	}
+	if (ob && *ob) {
+		H->sandbox_basedir = pestrdup(ob, H->persistent);
+	}
+}
+
+/* Whether open_basedir still matches the snapshot taken at sandbox time. */
+static bool pdo_duckdb_open_basedir_unchanged(const pdo_duckdb_db_handle *H)
 {
 	const char *ob = PG(open_basedir);
 
 	if (!ob || !*ob) {
-		return 0;
+		return H->sandbox_basedir == NULL;
 	}
-	return zend_inline_hash_func(ob, strlen(ob));
+	return H->sandbox_basedir != NULL && strcmp(ob, H->sandbox_basedir) == 0;
 }
 
 /* DETACH user-attached databases whose paths fall outside open_basedir.
@@ -974,28 +992,44 @@ static bool pdo_duckdb_disable_external_access(pdo_duckdb_db_handle *H)
 {
 	/* Empty temp before the flip: a non-empty temp_directory is re-allowlisted by
 	 * DuckDB OnSet and cannot be cleared afterward (do not seed basedir root). */
-	if (!pdo_duckdb_query_ok(H->conn, "SET log_query_path=''") ||
-			!pdo_duckdb_query_ok(H->conn, "SET profiling_output=''") ||
-			!pdo_duckdb_query_ok(H->conn, "SET allowed_configs = []") ||
-			!pdo_duckdb_query_ok(H->conn, "SET temp_directory=''") ||
-			!pdo_duckdb_detach_out_of_basedir(H) ||
-			!pdo_duckdb_query_ok(H->conn, "SET allowed_directories = []") ||
-			!pdo_duckdb_query_ok(H->conn, "SET allowed_paths = []") ||
-			!pdo_duckdb_query_ok(H->conn, "SET autoinstall_known_extensions=false") ||
-			!pdo_duckdb_query_ok(H->conn, "SET autoload_known_extensions=false") ||
-			!pdo_duckdb_query_ok(H->conn, "SET allow_community_extensions=false") ||
-			!pdo_duckdb_query_ok(H->conn, "SET allow_extensions_metadata_mismatch=false") ||
-			!pdo_duckdb_query_ok(H->conn, "SET allow_persistent_secrets=false") ||
-			!pdo_duckdb_query_ok(H->conn, "SET allow_unredacted_secrets=false") ||
-			!pdo_duckdb_query_ok(H->conn, "SET allow_unsigned_extensions=false") ||
-			!pdo_duckdb_query_ok(H->conn, "SET enable_external_file_cache=false") ||
-			!pdo_duckdb_query_ok(H->conn, "SET enable_http_metadata_cache=false") ||
-			!pdo_duckdb_query_ok(H->conn, "SET enable_external_access=false") ||
-			!pdo_duckdb_query_ok(H->conn, "SET lock_configuration=true")) {
+	static const char *const pre_detach[] = {
+		"SET log_query_path=''",
+		"SET profiling_output=''",
+		"SET allowed_configs = []",
+		"SET temp_directory=''",
+	};
+	static const char *const post_detach[] = {
+		"SET allowed_directories = []",
+		"SET allowed_paths = []",
+		"SET autoinstall_known_extensions=false",
+		"SET autoload_known_extensions=false",
+		"SET allow_community_extensions=false",
+		"SET allow_extensions_metadata_mismatch=false",
+		"SET allow_persistent_secrets=false",
+		"SET allow_unredacted_secrets=false",
+		"SET allow_unsigned_extensions=false",
+		"SET enable_external_file_cache=false",
+		"SET enable_http_metadata_cache=false",
+		"SET enable_external_access=false",
+		"SET lock_configuration=true",
+	};
+	size_t i;
+
+	for (i = 0; i < sizeof(pre_detach) / sizeof(pre_detach[0]); i++) {
+		if (!pdo_duckdb_query_ok(H->conn, pre_detach[i])) {
+			return false;
+		}
+	}
+	if (!pdo_duckdb_detach_out_of_basedir(H)) {
 		return false;
 	}
+	for (i = 0; i < sizeof(post_detach) / sizeof(post_detach[0]); i++) {
+		if (!pdo_duckdb_query_ok(H->conn, post_detach[i])) {
+			return false;
+		}
+	}
 	H->external_access_disabled = true;
-	H->sandbox_basedir_hash = pdo_duckdb_open_basedir_hash();
+	pdo_duckdb_snapshot_open_basedir(H);
 	return true;
 }
 
@@ -1009,7 +1043,7 @@ bool pdo_duckdb_enforce_sandbox(pdo_duckdb_db_handle *H)
 	if (!H->external_access_disabled) {
 		return pdo_duckdb_disable_external_access(H);
 	}
-	return H->sandbox_basedir_hash == pdo_duckdb_open_basedir_hash();
+	return pdo_duckdb_open_basedir_unchanged(H);
 }
 
 /* Persistent handles skip handle_factory on reuse, so PDO calls check_liveness
@@ -1237,8 +1271,9 @@ static zend_string *pdo_duckdb_config_scalar_to_string(zval *value)
  *   1. DSN "key=value;..." pairs (everything after the first ';' in the DSN)
  *   2. the PDO::DUCKDB_ATTR_CONFIG array from driver_options (overrides DSN)
  *   3. if open_basedir is set: reject security/path-sensitive user options, then
- *      apply a locked sandbox profile LAST so a user attempt to re-enable external
- *      access can't defeat the sandbox.
+ *      apply open-time sandbox flags (empty temp, no extension autoload, …).
+ *      enable_external_access/lock run post-connect via pdo_duckdb_enforce_sandbox
+ *      so file-DB temp allowlists can still be cleared.
  * *out_config is NULL when nothing needs setting. Returns false (with an
  * exception thrown) on a bad option, so the caller refuses to open. */
 static bool pdo_duckdb_build_config(pdo_dbh_t *dbh, const char *dsn_opts,
@@ -1398,6 +1433,7 @@ static int pdo_duckdb_handle_factory(pdo_dbh_t *dbh, zval *driver_options) /* {{
 	H = pecalloc(1, sizeof(pdo_duckdb_db_handle), dbh->is_persistent);
 	H->einfo.errcode = 0;
 	H->einfo.errmsg = NULL;
+	H->persistent = dbh->is_persistent;
 	H->config_reapply_pending = pdo_duckdb_driver_options_has_config(driver_options);
 	dbh->driver_data = H;
 
@@ -1431,13 +1467,9 @@ static int pdo_duckdb_handle_factory(pdo_dbh_t *dbh, zval *driver_options) /* {{
 		efree(path_dsn);
 	}
 
-	/* Build the open-time config from user DSN/attr options plus the open_basedir
-	 * sandbox. open_basedir guards only the DB file path above; DuckDB SQL
-	 * (read_csv, COPY, ATTACH, httpfs, ...) can otherwise reach the filesystem
-	 * directly, so the sandbox profile disables external access, blocks extension
-	 * autoload/install, and locks runtime configuration. A security boundary: fail
-	 * closed — if the config can't be built, refuse to open rather than connect
-	 * unsandboxed. */
+	/* Open-time config: user DSN/attr options plus open_basedir open-time flags.
+	 * Fail closed — refuse to open if the config cannot be built. Full SQL
+	 * sandbox (external access off + lock) runs post-connect below. */
 	if (!pdo_duckdb_build_config(dbh, dsn_opts, driver_options, &config)) {
 		if (path) {
 			efree(path);
@@ -1481,11 +1513,9 @@ static int pdo_duckdb_handle_factory(pdo_dbh_t *dbh, zval *driver_options) /* {{
 
 	/* Full SQL sandbox after connect so allowlists seeded at open (e.g. default
 	 * temp for file DBs) can still be cleared before external access is locked. */
-	if (PG(open_basedir) && *PG(open_basedir)) {
-		if (!pdo_duckdb_disable_external_access(H)) {
-			pdo_duckdb_error(dbh, "Unable to apply the open_basedir sandbox profile to DuckDB");
-			goto cleanup;
-		}
+	if (!pdo_duckdb_enforce_sandbox(H)) {
+		pdo_duckdb_error(dbh, "Unable to apply the open_basedir sandbox profile to DuckDB");
+		goto cleanup;
 	}
 
 	dbh->alloc_own_columns = 1;

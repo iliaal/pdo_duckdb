@@ -64,10 +64,15 @@ typedef struct {
 	 * handle. Persistent handles are escalated in place on reuse; they are not
 	 * discarded when the request policy tightens. */
 	bool external_access_disabled;
-	/* Hash of PG(open_basedir) when the sandbox was applied. After escalate,
-	 * DuckDB allowlists are frozen; if basedir is re-narrowed the hash changes
-	 * and enforce_sandbox fails closed. */
-	zend_ulong sandbox_basedir_hash;
+	/* Copy of PG(open_basedir) taken when the sandbox was applied (NULL when
+	 * unset). After escalate, DuckDB allowlists are frozen; if basedir is
+	 * re-narrowed this no longer matches and enforce_sandbox fails closed.
+	 * A copy rather than a hash: the compare sits on the appender's per-row
+	 * gate, and strcmp is both cheaper than hashing and collision-free. */
+	char *sandbox_basedir;
+	/* Allocation flavour for sandbox_basedir (mirrors dbh->is_persistent, which
+	 * the sandbox helpers do not otherwise have access to). */
+	bool persistent;
 	/* Opt-in unbuffered (streaming) result mode for statements on this handle
 	 * (PDO::DUCKDB_ATTR_UNBUFFERED). Default false = the materialized path. */
 	bool unbuffered;

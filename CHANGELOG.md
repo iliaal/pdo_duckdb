@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- Render `DECIMAL` values whose type has no integer digits (`width == scale`,
+  e.g. `DECIMAL(2,2)`) as DuckDB does — `.05`, not `0.05`. Affected scalar cells
+  since 0.4.1 and nested `LIST`/`ARRAY`/`STRUCT`/`MAP` cells since the direct
+  nested renderer was added.
 - Rebuild `PDOStatement` column metadata after re-execute when columns were
   freed by `set_column_count(0)`, fixing a SEGV in `getColumnMeta()` without an
   intervening fetch.
@@ -84,6 +88,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Harden the `open_basedir` DuckDB sandbox profile by rejecting path and
   extension-loading config keys, applying the full escalate sequence after
   connect for file-backed DBs, and locking further DuckDB configuration changes.
+  The lock blocks every later `SET`, including security-irrelevant ones
+  (`threads`, `memory_limit`, …) — pass those as connect-time DSN or
+  `PDO::DUCKDB_ATTR_CONFIG` options instead. `TimeZone` has no connect-time
+  equivalent and is therefore not settable under `open_basedir`.
 - Redact raw `duckdb_open_ext()` failure details from connection exceptions, so
   filesystem paths and OS error text from DuckDB are not exposed.
 - Pass release tags and package names to Linux/macOS and Windows release scripts
@@ -95,6 +103,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   least-privilege publisher uploads the complete set.
 
 ### Performance
+- Re-latch the `open_basedir` sandbox once per fetched data chunk instead of once
+  per row, and compare the recorded basedir by string rather than by hash. Under
+  `open_basedir` the per-row cost no longer scales with the basedir length: a
+  400k-row scan with a 223-character `open_basedir` went from 133 ns/row back to
+  51 ns/row, and bulk `Appender::appendRow()` from 196 ns/row back to 96 ns/row.
 - Cache nested render descriptors and STRUCT names per result column, and bypass
   portable 128-bit division for 64-bit values.
 - Add direct string renderers for `TIME_TZ`, `TIMESTAMP_TZ`, monthless
@@ -106,6 +119,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   floating-point, and time-like leaves keep the DuckDB renderer.
 
 ### Tests
+- Add regression coverage for `DECIMAL(w,w)` canonical rendering (scalar, list,
+  and struct) and for a mid-fetch `open_basedir` re-narrow failing closed at the
+  next chunk pull.
 - Add CI coverage for the advertised DuckDB 1.5.3 source-build floor and
   for the portable integer renderers without compiler `int128` support, plus
   regression coverage for config reentrancy, raw persistent transactions,

@@ -219,6 +219,13 @@ $db->exec('INSTALL httpfs; LOAD httpfs;');  // downloadable extensions
   DuckDB path allowlists before disabling external access and locks the
   connection configuration. You can still activate an extension compiled into
   DuckDB, such as `LOAD json`; the sandbox blocks extension files and downloads.
+  Locking the configuration blocks *every* later `SET`, including ones with no
+  security relevance (`threads`, `memory_limit`, `preserve_insertion_order`,
+  `default_null_order`, …). Pass those at connect time instead, in the DSN tail
+  or `PDO::DUCKDB_ATTR_CONFIG`, where the sandbox allows anything that is not
+  path- or extension-related. `TimeZone` is the exception: it is a SQL-only
+  setting with no `duckdb_set_config` equivalent, so under `open_basedir` it
+  stays at DuckDB's default for the life of the handle.
 - **`lastInsertId()`** is not supported; DuckDB has no implicit rowid. Use a
   sequence and `currval()` if you need generated keys.
 - **Type mapping.** Integers up to 64-bit signed return as `int`, `BOOLEAN` as
@@ -235,11 +242,11 @@ $db->exec('INSTALL httpfs; LOAD httpfs;');  // downloadable extensions
   different PHP-facing shape.
   `GEOMETRY` (from the spatial extension) returns its WKB bytes as a hex string;
   call `ST_AsText()` in SQL if you want WKT. `TIMESTAMPTZ` native fetches render
-  the instant in UTC (`+00`); select `CAST(col AS VARCHAR)` if you need DuckDB's
-  session-`TimeZone` rendering. DuckDB's C result API cannot extract non-NULL
-  `VARIANT` cells safely, so fetching one reports a PDO error; cast it to
-  `VARCHAR` (or another concrete SQL type) in the query. SQL NULL remains PHP
-  `null`.
+  the instant in UTC (`+00`), at the top level and as a nested leaf; select
+  `CAST(col AS VARCHAR)` if you need DuckDB's session-`TimeZone` rendering.
+  DuckDB's C result API cannot extract non-NULL `VARIANT` cells safely, so
+  fetching one reports a PDO error; cast it to `VARCHAR` (or another concrete
+  SQL type) in the query. SQL NULL remains PHP `null`.
 - **Streaming results.** By default `execute()` returns a materialized result:
   DuckDB buffers the full result set before PDO fetches, so a large `SELECT` is
   bounded by available memory. For large scans, set `PDO::DUCKDB_ATTR_UNBUFFERED`
