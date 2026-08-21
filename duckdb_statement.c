@@ -1570,7 +1570,11 @@ static int pdo_duckdb_stmt_get_col(
 	if (!S->chunk || S->cur >= S->chunk_size) {
 		return 0;
 	}
-	if ((idx_t)colno >= duckdb_data_chunk_get_column_count(S->chunk)) {
+	/* col_types/col_logical_types are sized by the cached result column count;
+	 * the chunk's own count equals it for anything DuckDB produces, but bound
+	 * the index by the cache too rather than trusting that invariant. */
+	if ((idx_t)colno >= S->col_count ||
+			(idx_t)colno >= duckdb_data_chunk_get_column_count(S->chunk)) {
 		return 0;
 	}
 

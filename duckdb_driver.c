@@ -220,7 +220,11 @@ static bool duckdb_handle_preparer(pdo_dbh_t *dbh, zend_string *sql, pdo_stmt_t 
 	}
 
 	if (duckdb_prepare(H->conn, ZSTR_VAL(sql), &S->prepared) != DuckDBSuccess) {
-		pdo_duckdb_error(dbh, duckdb_prepare_error(S->prepared));
+		/* Guard like pdo_duckdb_exec_transaction_multi(): a prepare failure that
+		 * did not populate the out-param would make duckdb_prepare_error(NULL)
+		 * abort the process. */
+		pdo_duckdb_error(dbh, S->prepared ? duckdb_prepare_error(S->prepared)
+			: "Unable to prepare DuckDB statement");
 		if (S->prepared) {
 			duckdb_destroy_prepare(&S->prepared);
 			S->prepared = NULL;

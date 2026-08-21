@@ -216,6 +216,9 @@ $db->exec('INSTALL httpfs; LOAD httpfs;');  // downloadable extensions
   control wrapped by `EXPLAIN ANALYZE`; DuckDB reports only the outer `EXPLAIN`
   statement type, so the driver tracks the wrapped effect explicitly after
   successful execution.
+- **Multi-statement `exec()` returns the last statement's row count.**
+  `exec("BEGIN; INSERT ...; COMMIT")` reports `COMMIT`'s count — `0` — not the
+  INSERT's. Split the statements if you need the intermediate `rowCount()`.
 - **`open_basedir`.** When `open_basedir` is set, DuckDB's SQL-level external
   file access (`read_csv`, `COPY`, `ATTACH`, `httpfs`, …) is disabled so the
   sandbox holds at the SQL layer, not just for the database file path. If
