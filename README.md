@@ -132,7 +132,7 @@ flushes, finalizes the native appender, and marks the PHP object closed. Relying
 on the destructor alone still closes (and warns on failure); prefer an explicit
 `close()`. Soft validation failures (`ValueError`/`TypeError` for arity, types,
 ranges) leave the appender live so you can retry the row. Hard DuckDB failures
-on append/flush/close poison the appender — later use throws `Error` and you must
+on append/flush/close poison the appender; later use throws `Error` and you must
 create a new one. The same hard path applies when DuckDB rejects a PHP string
 cast into a typed column (e.g. `'not-a-date'` into `DATE`, or a non-numeric string
 into `DECIMAL`): that is a native append failure, not a soft `ValueError`, so
@@ -206,6 +206,15 @@ $db->exec('INSTALL httpfs; LOAD httpfs;');  // downloadable extensions
   PDO rewrites them to DuckDB `$N` parameters. A repeated `:name` is bound once.
   Because `:` is reserved for placeholders, inline `STRUCT`/`MAP` literals must
   keep a space after the colon (`{'k': 1}`, not `{'k':1}`) in prepared queries.
+- **Parameter binding re-reads the bound value on every `execute()`.** A value
+  bound by reference with `bindParam()` is converted from the variable's current
+  contents each time, so assigning to the variable between executes takes effect
+  without re-binding. A `PDO::PARAM_LOB` stream is read to the end and then
+  rewound, so re-executing the same statement binds the same bytes rather than an
+  empty value. Do not call `execute()` on a statement from inside a `__toString()`
+  that the same statement is binding: PDO core caches its bound-parameter table
+  across the conversion and crashes. That hazard is in PDO itself, not this
+  driver, and affects every driver.
 - **Cursors are forward-only.** DuckDB hands results back one chunk at a time in
   a single direction, so `PDO::ATTR_CURSOR => PDO::CURSOR_SCROLL` is rejected at
   `prepare()` rather than failing later on the first backwards fetch. Use
@@ -221,7 +230,7 @@ $db->exec('INSTALL httpfs; LOAD httpfs;');  // downloadable extensions
   statement type, so the driver tracks the wrapped effect explicitly after
   successful execution.
 - **Multi-statement `exec()` returns the last statement's row count.**
-  `exec("BEGIN; INSERT ...; COMMIT")` reports `COMMIT`'s count — `0` — not the
+  `exec("BEGIN; INSERT ...; COMMIT")` reports `COMMIT`'s count (`0`), not the
   INSERT's. Split the statements if you need the intermediate `rowCount()`.
 - **`open_basedir`.** When `open_basedir` is set, DuckDB's SQL-level external
   file access (`read_csv`, `COPY`, `ATTACH`, `httpfs`, …) is disabled so the

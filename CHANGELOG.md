@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-08-30
+
 ### Security
 - Reject `force_mbedtls_unsafe` at connect time. Falsy values SIGSEGV inside
   libduckdb 1.5.3–1.5.5 (`ForceMbedtlsUnsafeSetting::SetGlobal` on a NULL
@@ -290,7 +292,8 @@ Initial release. A PDO driver for DuckDB.
   table/schema names are rejected, rather than silently truncating the statement
   or identifier at the NUL.
 
-[Unreleased]: https://github.com/iliaal/pdo_duckdb/compare/0.5.0...HEAD
+[Unreleased]: https://github.com/iliaal/pdo_duckdb/compare/0.6.0...HEAD
+[0.6.0]: https://github.com/iliaal/pdo_duckdb/releases/tag/0.6.0
 [0.5.0]: https://github.com/iliaal/pdo_duckdb/releases/tag/0.5.0
 [0.4.1]: https://github.com/iliaal/pdo_duckdb/releases/tag/0.4.1
 [0.4.0]: https://github.com/iliaal/pdo_duckdb/releases/tag/0.4.0
