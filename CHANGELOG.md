@@ -24,8 +24,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the extension.
 - Parameter EXEC_PRE conversions run on a local zval copy and never write back
   through `param->parameter`, so a `__toString` / stream callback that
-  re-enters `execute()` cannot UAF the bound-param struct. The PDO-core
-  dispatch loop remains an upstream defect.
+  re-enters `execute()` cannot make the driver write through a freed
+  bound-param struct. This does not make re-entrant `execute()` safe: PDO core
+  itself caches the `bound_params` `HashTable` across the conversion
+  (`really_register_bound_param`, `dispatch_param_event`) and crashes first.
+  Do not call `execute()` from `__toString()` on the same statement.
+
+### Changed
+- A `PDO::PARAM_LOB` stream is rewound after the driver drains it, so
+  re-executing a statement bound to the same stream binds the same bytes
+  instead of an empty value.
+- A `PDO::PARAM_STR` / `PDO::PARAM_INT` value bound by reference with
+  `bindParam()` is now converted from the variable's current value on every
+  `execute()`. Previously the first conversion was written back into the bound
+  parameter, so later executes reused the stale converted value.
 
 ## [0.5.0] - 2026-07-26
 
