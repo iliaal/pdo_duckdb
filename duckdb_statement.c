@@ -325,10 +325,22 @@ static zend_string *pdo_duckdb_hugeint_to_string(duckdb_hugeint h)
 	return zend_string_init(digits, len, 0);
 }
 
+static bool pdo_duckdb_decimal_meta_ok(uint8_t width, uint8_t scale)
+{
+	/* DuckDB Decimal::IsValidWidthScale: width in [1,38], scale <= width.
+	 * Deserialization and Parquet only enforce width <= 38, so a hostile
+	 * scale can be any uint8. The fast renderer writes 2+scale bytes into
+	 * a 43-byte stack buffer. */
+	return width >= 1 && width <= 38 && scale <= width;
+}
+
 static bool pdo_duckdb_decimal_from_vector(duckdb_logical_type lt, void *data, idx_t row, duckdb_decimal *d)
 {
 	d->width = duckdb_decimal_width(lt);
 	d->scale = duckdb_decimal_scale(lt);
+	if (!pdo_duckdb_decimal_meta_ok(d->width, d->scale)) {
+		return false;
+	}
 
 	switch (duckdb_decimal_internal_type(lt)) {
 		case DUCKDB_TYPE_SMALLINT: {
@@ -373,6 +385,8 @@ static duckdb_value pdo_duckdb_decimal_value(duckdb_logical_type lt, void *data,
 static zend_string *pdo_duckdb_decimal_to_string(duckdb_decimal d)
 {
 	char digits[40], out[43];
+
+	ZEND_ASSERT(pdo_duckdb_decimal_meta_ok(d.width, d.scale));
 	uint64_t upper = (uint64_t)d.value.upper;
 	uint64_t lower = d.value.lower;
 	bool neg = d.value.upper < 0;
@@ -399,6 +413,9 @@ static zend_string *pdo_duckdb_decimal_to_string(duckdb_decimal d)
 		 * integer digit: DECIMAL(4,2) renders 0.05, DECIMAL(2,2) renders .05. */
 		if (d.width > d.scale) {
 			out[pos++] = '0';
+		}
+		if (pos + 1 + zeros + len > sizeof(out)) {
+			return zend_string_init("", 0, 0);
 		}
 		out[pos++] = '.';
 		memset(out + pos, '0', zeros);
@@ -817,6 +834,9 @@ static bool pdo_duckdb_struct_name_is_fast_safe(const char *name)
 
 static bool pdo_duckdb_decimal_type_fast_safe(duckdb_logical_type lt)
 {
+	if (!pdo_duckdb_decimal_meta_ok(duckdb_decimal_width(lt), duckdb_decimal_scale(lt))) {
+		return false;
+	}
 	switch (duckdb_decimal_internal_type(lt)) {
 		case DUCKDB_TYPE_SMALLINT:
 		case DUCKDB_TYPE_INTEGER:
@@ -1817,88 +1837,118 @@ static int pdo_duckdb_stmt_param_hook(pdo_stmt_t *stmt, struct pdo_bound_param_d
 		parameter = &param->parameter;
 	}
 
-	switch (PDO_PARAM_TYPE(param->param_type)) {
-		case PDO_PARAM_STMT:
-			pdo_duckdb_error_stmt(stmt, "PDO_PARAM_STMT is not supported");
-			return pdo_duckdb_stmt_bind_failure(S);
+	/* Convert a local copy. try_convert_to_string / stream_read / convert_to_long
+	 * can re-enter PDOStatement::execute(), which frees stmt->bound_params
+	 * (including `param`) under this frame. Never write back through `parameter`. */
+	{
+		HashTable *bound_at_start = stmt->bound_params;
+		zval tmp;
+		int bind_ok = 0;
 
-		case PDO_PARAM_NULL:
-			if (duckdb_bind_null(S->prepared, idx) == DuckDBSuccess) {
-				return 1;
-			}
-			pdo_duckdb_error_stmt(stmt, "Failed to bind NULL parameter");
-			return pdo_duckdb_stmt_bind_failure(S);
+		ZVAL_COPY(&tmp, parameter);
+		parameter = &tmp;
 
-		case PDO_PARAM_INT:
-		case PDO_PARAM_BOOL:
-			if (Z_TYPE_P(parameter) == IS_NULL) {
+		switch (PDO_PARAM_TYPE(param->param_type)) {
+			case PDO_PARAM_STMT:
+				pdo_duckdb_error_stmt(stmt, "PDO_PARAM_STMT is not supported");
+				break;
+
+			case PDO_PARAM_NULL:
 				if (duckdb_bind_null(S->prepared, idx) == DuckDBSuccess) {
-					return 1;
+					bind_ok = 1;
+				} else {
+					pdo_duckdb_error_stmt(stmt, "Failed to bind NULL parameter");
 				}
-			} else if (PDO_PARAM_TYPE(param->param_type) == PDO_PARAM_BOOL) {
-				if (duckdb_bind_boolean(S->prepared, idx, zend_is_true(parameter)) == DuckDBSuccess) {
-					return 1;
-				}
-			} else {
-				convert_to_long(parameter);
-				if (EG(exception)) {
-					return pdo_duckdb_stmt_bind_failure(S);
-				}
-				if (duckdb_bind_int64(S->prepared, idx, (int64_t)Z_LVAL_P(parameter)) == DuckDBSuccess) {
-					return 1;
-				}
-			}
-			pdo_duckdb_error_stmt(stmt, "Failed to bind integer parameter");
-			return pdo_duckdb_stmt_bind_failure(S);
+				break;
 
-		case PDO_PARAM_LOB:
-			if (Z_TYPE_P(parameter) == IS_RESOURCE) {
-				php_stream *stm = NULL;
-				php_stream_from_zval_no_verify(stm, parameter);
-				if (stm) {
-					zend_string *mem = php_stream_copy_to_mem(stm, PHP_STREAM_COPY_ALL, 0);
+			case PDO_PARAM_INT:
+			case PDO_PARAM_BOOL:
+				if (Z_TYPE_P(parameter) == IS_NULL) {
+					if (duckdb_bind_null(S->prepared, idx) == DuckDBSuccess) {
+						bind_ok = 1;
+					}
+				} else if (PDO_PARAM_TYPE(param->param_type) == PDO_PARAM_BOOL) {
+					bool v = zend_is_true(parameter);
+					if (stmt->bound_params == bound_at_start && !EG(exception)
+							&& duckdb_bind_boolean(S->prepared, idx, v) == DuckDBSuccess) {
+						bind_ok = 1;
+					}
+				} else {
+					convert_to_long(parameter);
+					if (stmt->bound_params == bound_at_start && !EG(exception)
+							&& duckdb_bind_int64(S->prepared, idx, (int64_t)Z_LVAL_P(parameter)) == DuckDBSuccess) {
+						bind_ok = 1;
+					}
+				}
+				if (!bind_ok && !EG(exception)) {
+					pdo_duckdb_error_stmt(stmt, "Failed to bind integer parameter");
+				}
+				break;
+
+			case PDO_PARAM_LOB:
+				if (Z_TYPE_P(parameter) == IS_RESOURCE) {
+					php_stream *stm = NULL;
+					zend_string *mem;
+
+					php_stream_from_zval_no_verify(stm, parameter);
+					if (!stm) {
+						pdo_raise_impl_error(stmt->dbh, stmt, "HY105", "Expected a stream resource");
+						break;
+					}
+					mem = php_stream_copy_to_mem(stm, PHP_STREAM_COPY_ALL, 0);
+					if (stmt->bound_params != bound_at_start || EG(exception)) {
+						if (mem) {
+							zend_string_release(mem);
+						}
+						break;
+					}
 					if (!mem) {
 						pdo_duckdb_error_stmt(stmt, "Failed to read LOB stream");
-						return pdo_duckdb_stmt_bind_failure(S);
+						break;
 					}
-					zval_ptr_dtor(parameter);
-					ZVAL_STR(parameter, mem);
-				} else {
-					pdo_raise_impl_error(stmt->dbh, stmt, "HY105", "Expected a stream resource");
-					return pdo_duckdb_stmt_bind_failure(S);
+					php_stream_seek(stm, 0, SEEK_SET);
+					if (duckdb_bind_blob(S->prepared, idx, ZSTR_VAL(mem), (idx_t)ZSTR_LEN(mem)) == DuckDBSuccess) {
+						bind_ok = 1;
+					} else {
+						pdo_duckdb_error_stmt(stmt, "Failed to bind blob parameter");
+					}
+					zend_string_release(mem);
+				} else if (Z_TYPE_P(parameter) == IS_NULL) {
+					if (duckdb_bind_null(S->prepared, idx) == DuckDBSuccess) {
+						bind_ok = 1;
+					} else {
+						pdo_duckdb_error_stmt(stmt, "Failed to bind NULL parameter");
+					}
+				} else if (try_convert_to_string(parameter) && !EG(exception)
+						&& stmt->bound_params == bound_at_start) {
+					if (duckdb_bind_blob(S->prepared, idx, Z_STRVAL_P(parameter), (idx_t)Z_STRLEN_P(parameter)) == DuckDBSuccess) {
+						bind_ok = 1;
+					} else {
+						pdo_duckdb_error_stmt(stmt, "Failed to bind blob parameter");
+					}
 				}
-			} else if (Z_TYPE_P(parameter) == IS_NULL) {
-				if (duckdb_bind_null(S->prepared, idx) == DuckDBSuccess) {
-					return 1;
-				}
-				pdo_duckdb_error_stmt(stmt, "Failed to bind NULL parameter");
-				return pdo_duckdb_stmt_bind_failure(S);
-			} else if (!try_convert_to_string(parameter) || EG(exception)) {
-				return pdo_duckdb_stmt_bind_failure(S);
-			}
+				break;
 
-			if (duckdb_bind_blob(S->prepared, idx, Z_STRVAL_P(parameter), (idx_t)Z_STRLEN_P(parameter)) == DuckDBSuccess) {
-				return 1;
-			}
-			pdo_duckdb_error_stmt(stmt, "Failed to bind blob parameter");
-			return pdo_duckdb_stmt_bind_failure(S);
+			case PDO_PARAM_STR:
+			default:
+				if (Z_TYPE_P(parameter) == IS_NULL) {
+					if (duckdb_bind_null(S->prepared, idx) == DuckDBSuccess) {
+						bind_ok = 1;
+					}
+				} else if (try_convert_to_string(parameter) && !EG(exception)
+						&& stmt->bound_params == bound_at_start) {
+					if (duckdb_bind_varchar_length(S->prepared, idx, Z_STRVAL_P(parameter), (idx_t)Z_STRLEN_P(parameter)) == DuckDBSuccess) {
+						bind_ok = 1;
+					}
+				}
+				if (!bind_ok && !EG(exception)) {
+					pdo_duckdb_error_stmt(stmt, "Failed to bind string parameter");
+				}
+				break;
+		}
 
-		case PDO_PARAM_STR:
-		default:
-			if (Z_TYPE_P(parameter) == IS_NULL) {
-				if (duckdb_bind_null(S->prepared, idx) == DuckDBSuccess) {
-					return 1;
-				}
-			} else {
-				if (!try_convert_to_string(parameter) || EG(exception)) {
-					return pdo_duckdb_stmt_bind_failure(S);
-				}
-				if (duckdb_bind_varchar_length(S->prepared, idx, Z_STRVAL_P(parameter), (idx_t)Z_STRLEN_P(parameter)) == DuckDBSuccess) {
-					return 1;
-				}
-			}
-			pdo_duckdb_error_stmt(stmt, "Failed to bind string parameter");
-			return pdo_duckdb_stmt_bind_failure(S);
+		zval_ptr_dtor(&tmp);
+		return bind_ok ? 1 : pdo_duckdb_stmt_bind_failure(S);
 	}
 }
 

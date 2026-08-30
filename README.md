@@ -88,14 +88,18 @@ $db = new PDO('duckdb::memory:', null, null, [
 ```
 
 Any DuckDB setting name works (`access_mode`, `memory_limit`, `threads`, ...);
-an unknown option fails the connection. `PDO::DUCKDB_ATTR_CONFIG` is connect-time
-only and is refused with persistent handles, because PDO's persistent key does
-not include driver option arrays.
+an unknown option fails the connection. `force_mbedtls_unsafe` is rejected at
+connect time (libduckdb 1.5.3-1.5.5 crashes on a falsy value before the
+database exists); `SET` it after open if you need it.
+`PDO::DUCKDB_ATTR_CONFIG` is connect-time only and is refused with persistent
+handles, because PDO's persistent key does not include driver option arrays.
 
 Persistent connections reuse the same DuckDB connection for a matching DSN.
 DuckDB session/catalog state such as temporary tables, `SET` options, attachments,
 and `:memory:` contents can therefore survive across requests in the same PHP
-process; do not use persistence as a tenant or request isolation boundary.
+process; do not use persistence as a tenant or request isolation boundary. On
+reuse the driver resets `http_proxy` (and proxy username/password) and turns
+profiling off, so those do not carry into the next request.
 
 When `open_basedir` is set, external file access stays disabled whatever you
 pass. The driver also rejects path/security-sensitive DuckDB settings such as

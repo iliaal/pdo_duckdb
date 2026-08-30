@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- Reject `force_mbedtls_unsafe` at connect time. Falsy values SIGSEGV inside
+  libduckdb 1.5.3–1.5.5 (`ForceMbedtlsUnsafeSetting::SetGlobal` on a NULL
+  `DatabaseInstance`). `SET` after open is unchanged.
+- Reject DECIMAL types whose width/scale fall outside DuckDB's
+  `1 <= width <= 38 && scale <= width` before the fixed-buffer fast renderer.
+  Crafted catalog/Parquet metadata can present any `uint8` scale; the renderer
+  wrote `2+scale` bytes into a 43-byte stack buffer.
+- Persistent checkout now closes the DuckDB instance before a liveness FAILURE
+  (PDO core can leak the discarded persistent dbh).
+- Persistent checkout disables profiling and `RESET`s `http_proxy` /
+  `http_proxy_username` / `http_proxy_password` so the next request cannot steer
+  httpfs through another request's proxy. httpfs-only TLS settings are reset
+  only if httpfs is already loaded; `RESET` of those options otherwise autoloads
+  the extension.
+- Parameter EXEC_PRE conversions run on a local zval copy and never write back
+  through `param->parameter`, so a `__toString` / stream callback that
+  re-enters `execute()` cannot UAF the bound-param struct. The PDO-core
+  dispatch loop remains an upstream defect.
+
 ## [0.5.0] - 2026-07-26
 
 ### Changed

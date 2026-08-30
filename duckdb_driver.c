@@ -1030,16 +1030,82 @@ bool pdo_duckdb_enforce_sandbox(pdo_duckdb_db_handle *H)
 }
 
 /* Persistent handles skip handle_factory on reuse, so PDO calls check_liveness
- * on every reuse — escalate the sandbox there (rather than returning FAILURE,
- * which forces a rebuild whose discarded persistent dbh leaks in PDO core). */
+ * on every reuse. Escalate the sandbox there. A FAILURE rebuild can leak the
+ * discarded persistent dbh in PDO core (8.1–8.3; 8.4+ only when refcount > 1),
+ * so tear our DuckDB instance down first when we are the last holder. */
+static const char *const pdo_duckdb_liveness_network_resets[] = {
+	"RESET http_proxy",
+	"RESET http_proxy_username",
+	"RESET http_proxy_password",
+};
+
+static const char *const pdo_duckdb_liveness_httpfs_resets[] = {
+	"RESET enable_curl_server_cert_verification",
+	"RESET enable_server_cert_verification",
+	"RESET ca_cert_file",
+	"RESET httpfs_client_implementation",
+};
+
+static bool pdo_duckdb_httpfs_is_loaded(duckdb_connection conn)
+{
+	duckdb_result res;
+	idx_t rows;
+
+	if (duckdb_query(conn,
+			"SELECT 1 FROM duckdb_extensions() "
+			"WHERE extension_name = 'httpfs' AND loaded",
+			&res) != DuckDBSuccess) {
+		duckdb_destroy_result(&res);
+		return false;
+	}
+	rows = duckdb_row_count(&res);
+	duckdb_destroy_result(&res);
+	return rows > 0;
+}
+
+static void pdo_duckdb_liveness_discard(pdo_dbh_t *dbh)
+{
+	if (dbh->refcount <= 1) {
+		duckdb_handle_closer(dbh);
+	}
+}
+
 static zend_result pdo_duckdb_check_liveness(pdo_dbh_t *dbh)
 {
 	pdo_duckdb_db_handle *H = (pdo_duckdb_db_handle *)dbh->driver_data;
+	size_t i;
+
+	/* Residue SQL is for a true request-boundary checkout (list-only handle).
+	 * A second live PDO wrapper (refcount > 1) may be mid-transaction; a
+	 * failed RESET there aborts it. */
+	if (dbh->refcount <= 1) {
+		if (!H->external_access_disabled) {
+			for (i = 0; i < sizeof(pdo_duckdb_liveness_network_resets)
+					/ sizeof(pdo_duckdb_liveness_network_resets[0]); i++) {
+				(void)pdo_duckdb_query_ok(H->conn, pdo_duckdb_liveness_network_resets[i]);
+			}
+			/* httpfs options autoload the extension on RESET if it
+			 * isn't loaded; only touch them when a prior request
+			 * already did. */
+			if (pdo_duckdb_httpfs_is_loaded(H->conn)) {
+				for (i = 0; i < sizeof(pdo_duckdb_liveness_httpfs_resets)
+						/ sizeof(pdo_duckdb_liveness_httpfs_resets[0]); i++) {
+					(void)pdo_duckdb_query_ok(H->conn, pdo_duckdb_liveness_httpfs_resets[i]);
+				}
+			}
+		}
+		/* PRAGMA form still runs after lock_configuration; StartQuery resets
+		 * the retained QUERY_NAME tree. */
+		(void)pdo_duckdb_query_ok(H->conn, "PRAGMA disable_profiling");
+	}
 
 	H->unbuffered = false;
 	pdo_duckdb_clear_einfo(&H->einfo, dbh->is_persistent);
-	return pdo_duckdb_enforce_sandbox(H)
-		? SUCCESS : FAILURE;
+	if (!pdo_duckdb_enforce_sandbox(H)) {
+		pdo_duckdb_liveness_discard(dbh);
+		return FAILURE;
+	}
+	return SUCCESS;
 }
 
 static int pdo_duckdb_get_attribute(pdo_dbh_t *dbh, zend_long attr, zval *return_value)
@@ -1118,6 +1184,21 @@ static char *duckdb_make_path_safe(const char *data_source, const char **deny_re
  * config) on an invalid name/value so the caller can fail the open. */
 static bool pdo_duckdb_set_one_config(duckdb_config *config, const char *key, const char *value)
 {
+	size_t key_len = strlen(key);
+
+	/* DuckDB 1.5.3–1.5.5 dereference a NULL DatabaseInstance for a falsy
+	 * force_mbedtls_unsafe at config-time (SIGSEGV inside duckdb_set_config).
+	 * SET after open still works. */
+	if (key_len == sizeof("force_mbedtls_unsafe") - 1
+			&& zend_binary_strcasecmp(key, key_len, "force_mbedtls_unsafe",
+				sizeof("force_mbedtls_unsafe") - 1) == 0) {
+		duckdb_destroy_config(config);
+		*config = NULL;
+		zend_throw_exception_ex(php_pdo_get_exception(), 0,
+			"DuckDB configuration option \"%s\" cannot be set at connect time", key);
+		return false;
+	}
+
 	if (duckdb_set_config(*config, key, value) != DuckDBSuccess) {
 		duckdb_destroy_config(config);
 		*config = NULL;
