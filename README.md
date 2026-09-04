@@ -149,7 +149,8 @@ never flushed are lost — `flush()` per unit to bound the loss.
 returns the appender for chaining. PHP `null`/`bool`/`int`/`float`/`string` map
 to DuckDB values; DuckDB casts them to the target column types. For nested
 columns, pass a PHP array: a list fills `LIST`/`ARRAY`, and an associative array
-fills `STRUCT` (by field name) or `MAP`.
+fills `STRUCT` (by field name) or `MAP`. Nesting deeper than 128 levels is
+rejected.
 
 ```php
 $db->exec('CREATE TABLE t (tags VARCHAR[], attrs STRUCT(x INTEGER, y VARCHAR))');
@@ -216,9 +217,10 @@ $db->exec('INSTALL httpfs; LOAD httpfs;');  // downloadable extensions
 - **Parameter binding re-reads the bound value on every `execute()`.** A value
   bound by reference with `bindParam()` is converted from the variable's current
   contents each time, so assigning to the variable between executes takes effect
-  without re-binding. A `PDO::PARAM_LOB` stream is read to the end and then
   rewound, so re-executing the same statement binds the same bytes rather than an
-  empty value. Do not call `execute()` on a statement from inside a `__toString()`
+  empty value. Streams larger than 64MB are rejected instead of buffered whole.
+  Non-seekable streams cannot be rewound: re-executing binds the remainder.
+  Do not call `execute()` on a statement from inside a `__toString()`
   that the same statement is binding: PDO core caches its bound-parameter table
   across the conversion and crashes. That hazard is in PDO itself, not this
   driver, and affects every driver.
