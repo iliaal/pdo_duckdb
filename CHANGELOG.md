@@ -7,11 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed
-- Free substituted GEOMETRY child types in nested `STRUCT`/`UNION` containers
-  (24-byte logical-type leak per fetch, LSan-clean).
+## [0.7.1] - 2026-09-04
 
-## [0.7.0] - 2026-09-04
+### Fixed
 
 ### Security
 - Reject `PDO::PARAM_LOB` binds over 64MB (worker OOM guardrail); non-seekable
@@ -314,7 +312,8 @@ Initial release. A PDO driver for DuckDB.
   table/schema names are rejected, rather than silently truncating the statement
   or identifier at the NUL.
 
-[Unreleased]: https://github.com/iliaal/pdo_duckdb/compare/0.7.0...HEAD
+[Unreleased]: https://github.com/iliaal/pdo_duckdb/compare/0.7.1...HEAD
+[0.7.1]: https://github.com/iliaal/pdo_duckdb/releases/tag/0.7.1
 [0.7.0]: https://github.com/iliaal/pdo_duckdb/releases/tag/0.7.0
 [0.6.0]: https://github.com/iliaal/pdo_duckdb/releases/tag/0.6.0
 [0.5.0]: https://github.com/iliaal/pdo_duckdb/releases/tag/0.5.0
