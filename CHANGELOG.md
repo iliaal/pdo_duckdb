@@ -10,6 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.7.1] - 2026-09-04
 
 ### Fixed
+- Free substituted GEOMETRY child types in nested `STRUCT`/`UNION` containers
+  (24-byte logical-type leak per fetch, LSan-clean).
 
 ### Security
 - Reject `PDO::PARAM_LOB` binds over 64MB (worker OOM guardrail); non-seekable
