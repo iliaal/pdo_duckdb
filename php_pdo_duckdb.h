@@ -24,6 +24,8 @@ extern zend_module_entry pdo_duckdb_module_entry;
 
 PHP_MINIT_FUNCTION(pdo_duckdb);
 PHP_MSHUTDOWN_FUNCTION(pdo_duckdb);
+PHP_RINIT_FUNCTION(pdo_duckdb);
+PHP_RSHUTDOWN_FUNCTION(pdo_duckdb);
 PHP_MINFO_FUNCTION(pdo_duckdb);
 
 #endif /* PHP_PDO_DUCKDB_H */

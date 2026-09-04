@@ -49,6 +49,22 @@ static zend_always_inline zend_class_entry *zend_register_internal_class_with_fl
 #define PDO_DUCKDB_ATTR_CONFIG     (PDO_ATTR_DRIVER_SPECIFIC)      /* array, connect-time */
 #define PDO_DUCKDB_ATTR_UNBUFFERED (PDO_ATTR_DRIVER_SPECIFIC + 1)  /* bool, default false */
 
+/* Driver error taxonomy (driver codes surfaced as PDO errorInfo[1]; the
+ * SQLSTATE in errorInfo[0] follows the code: CONNECT maps to 08000, SYNTAX
+ * to 42000, everything else to HY000):
+ *   GENERAL   (1) default for runtime failures (also exec-time SQL errors
+ *                 such as a missing table, which surface at execution, not
+ *                 at parse time);
+ *   CONNECT   (2) open/connect failures (handle factory, incl. refused config);
+ *   SYNTAX    (3) prepare/parse failures (duckdb_prepare, statement extract);
+ *   SANDBOX   (4) open_basedir sandbox denials (message text unchanged);
+ *   STREAMING (5) mid-fetch / pending-stream errors (unbuffered results). */
+#define PDO_DUCKDB_ERRCODE_GENERAL   1
+#define PDO_DUCKDB_ERRCODE_CONNECT   2
+#define PDO_DUCKDB_ERRCODE_SYNTAX    3
+#define PDO_DUCKDB_ERRCODE_SANDBOX   4
+#define PDO_DUCKDB_ERRCODE_STREAMING 5
+
 typedef struct {
 	const char *file;
 	int line;
@@ -89,6 +105,9 @@ typedef struct _pdo_duckdb_nested_render_type {
 	idx_t child_count;
 	struct _pdo_duckdb_nested_render_type **children;
 	char **child_names;
+	/* ARRAY fixed element count, cached alongside the child type so the
+	 * appender need not query it per row (0 when not an ARRAY). */
+	idx_t array_size;
 } pdo_duckdb_nested_render_type;
 
 typedef enum {
@@ -131,7 +150,6 @@ typedef struct {
 extern const pdo_driver_t pdo_duckdb_driver;
 extern const struct pdo_stmt_methods duckdb_stmt_methods;
 
-/* Bulk-insert appender (driver-specific feature). */
 typedef struct {
 	duckdb_appender appender;
 	bool closed;
@@ -142,6 +160,18 @@ typedef struct {
 										 * PHP arrays. */
 	duckdb_type *col_type_ids;		/* per-column duckdb_get_type_id(col_types[i]) */
 	unsigned char *col_flags;		/* per-column fast-path flags */
+	/* Per-column cached nested descriptors (CR-003): for nested columns the
+	 * child names + child logical types (+ ARRAY size) are resolved once at
+	 * appender creation so appendRow() reuses them instead of issuing
+	 * duckdb_struct/list/array/map child queries per row. Scalar columns
+	 * hold a leaf descriptor borrowing col_types[i] (owns_logical_type
+	 * false). NULL when ncols == 0. */
+	pdo_duckdb_nested_render_type **col_desc;
+	/* Per-column string-cast probes (CR-007): cached prepared
+	 * "SELECT CAST(? AS <T>)" statements validating string scalars before
+	 * the native appender row is touched. NULL for columns needing no probe
+	 * (VARCHAR/BLOB/nested/unspellable types); NULL when ncols == 0. */
+	duckdb_prepared_statement *col_probes;
 	zend_object *pdo;	/* PDO object kept alive; it owns the connection */
 	zend_object std;
 } pdo_duckdb_appender;
@@ -155,6 +185,12 @@ static inline pdo_duckdb_appender *pdo_duckdb_appender_from_obj(zend_object *o)
 
 zend_result pdo_duckdb_appender_minit(void);
 const zend_function_entry *pdo_duckdb_get_driver_methods(pdo_dbh_t *dbh, int kind);
+
+/* Release the statement-layer thread-local caches (chunk vector cache, column
+ * aux cache). Safe any time; entries regrow on next use. Called at request
+ * shutdown and module shutdown so grow-only malloc'd buffers are not reported
+ * as leaks. */
+void pdo_duckdb_tls_caches_shutdown(void);
 
 /* Ensure the open_basedir SQL sandbox is applied to this handle before running
  * SQL. Covers handles opened before open_basedir was tightened (their open-time
@@ -171,8 +207,16 @@ void pdo_duckdb_apply_transaction_effect(pdo_dbh_t *dbh,
  * how the message was allocated (dbh vs stmt). */
 void pdo_duckdb_clear_einfo(pdo_duckdb_error_info *einfo, bool persistent);
 
-/* Records an error against the dbh (or stmt). msg is copied; pass the message
+/* Records an error against the dbh (or stmt) with an explicit taxonomy code
+ * (PDO_DUCKDB_ERRCODE_*); the SQLSTATE follows the code (08000 for CONNECT,
+ * 42000 for SYNTAX, HY000 otherwise). msg is copied; pass the message
  * obtained from duckdb_result_error()/duckdb_prepare_error() or a literal. */
+extern int _pdo_duckdb_error_with_code(pdo_dbh_t *dbh, pdo_stmt_t *stmt, unsigned int code, const char *msg, const char *file, int line);
+#define pdo_duckdb_error_code(dbh, code, msg) _pdo_duckdb_error_with_code(dbh, NULL, code, msg, __FILE__, __LINE__)
+#define pdo_duckdb_error_stmt_code(stmt, code, msg) _pdo_duckdb_error_with_code((stmt)->dbh, stmt, code, msg, __FILE__, __LINE__)
+/* Records an error against the dbh (or stmt) with the default GENERAL code.
+ * msg is copied; pass the message obtained from
+ * duckdb_result_error()/duckdb_prepare_error() or a literal. */
 extern int _pdo_duckdb_error(pdo_dbh_t *dbh, pdo_stmt_t *stmt, const char *msg, const char *file, int line);
 #define pdo_duckdb_error(dbh, msg) _pdo_duckdb_error(dbh, NULL, msg, __FILE__, __LINE__)
 #define pdo_duckdb_error_stmt(stmt, msg) _pdo_duckdb_error((stmt)->dbh, stmt, msg, __FILE__, __LINE__)

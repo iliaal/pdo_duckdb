@@ -34,6 +34,190 @@
 static pdo_duckdb_nested_render_type *pdo_duckdb_nested_render_type_build(
 	duckdb_type tid, duckdb_logical_type lt, bool owns_lt);
 static void pdo_duckdb_nested_render_type_destroy(pdo_duckdb_nested_render_type *type);
+/* LOB cap (CR-005): PARAM_LOB streams larger than this fail the bind. */
+#define PDO_DUCKDB_LOB_MAX_BYTES ((size_t)67108864)
+
+/* Per-chunk column cache (CR-001). fetch() (re)loads it whenever a chunk is
+ * pulled; get_col() indexes it instead of calling
+ * duckdb_data_chunk_get_column_count/get_vector and
+ * duckdb_vector_get_validity/get_data per cell. Thread-local, so statements
+ * on different threads never share it. The entry is published for a chunk
+ * only after every slot is filled, and invalidated whenever that chunk is
+ * destroyed (DuckDB may reuse the address for a later chunk). Buffers are
+ * malloc'd (they outlive a request) and grow-only. Callers always revalidate
+ * the entry against S->chunk before indexing it, and fetch() repopulates on
+ * every load, so a stale entry can only trigger a best-effort refresh, never
+ * a wrong read. */
+typedef struct {
+	duckdb_data_chunk chunk;	/* identity key; NULL when empty */
+	idx_t ncols;			/* column count at load time */
+	idx_t cap;			/* allocated slots */
+	void *blob;			/* single buffer holding all three arrays */
+	duckdb_vector *vecs;
+	void **datas;
+	uint64_t **validities;
+} pdo_duckdb_chunk_cache;
+
+ZEND_TLS pdo_duckdb_chunk_cache pdo_duckdb_tls_chunk_cache;
+
+static void pdo_duckdb_chunk_cache_invalidate(duckdb_data_chunk chunk)
+{
+	if (chunk && pdo_duckdb_tls_chunk_cache.chunk == chunk) {
+		pdo_duckdb_tls_chunk_cache.chunk = NULL;
+	}
+}
+
+static bool pdo_duckdb_chunk_cache_load(pdo_duckdb_stmt *S)
+{
+	pdo_duckdb_chunk_cache *c = &pdo_duckdb_tls_chunk_cache;
+	size_t stride = sizeof(duckdb_vector) + sizeof(void *) + sizeof(uint64_t *);
+	idx_t n, i;
+
+	c->chunk = NULL;
+	c->ncols = 0;
+	if (!S->chunk) {
+		return false;
+	}
+	n = duckdb_data_chunk_get_column_count(S->chunk);
+	if (n > c->cap) {
+		void *blob;
+
+		if ((uint64_t)n > (uint64_t)SIZE_MAX / (uint64_t)stride) {
+			return false;
+		}
+		blob = realloc(c->blob, (size_t)n * stride);
+		if (!blob) {
+			return false;
+		}
+		c->blob = blob;
+		c->cap = n;
+		c->vecs = (duckdb_vector *)blob;
+		c->datas = (void **)((char *)blob + (size_t)n * sizeof(duckdb_vector));
+		c->validities = (uint64_t **)((char *)blob
+			+ (size_t)n * (sizeof(duckdb_vector) + sizeof(void *)));
+	}
+	for (i = 0; i < n; i++) {
+		duckdb_vector v = duckdb_data_chunk_get_vector(S->chunk, i);
+
+		c->vecs[i] = v;
+		c->datas[i] = duckdb_vector_get_data(v);
+		c->validities[i] = duckdb_vector_get_validity(v);
+	}
+	c->ncols = n;
+	c->chunk = S->chunk;
+	return true;
+}
+
+/* Per-result-column scalar cache (CR-009). Built in cache_columns() at
+ * execute time from the already-cached logical types: DECIMAL width, scale
+ * and internal type plus interned ENUM dictionary strings, so per-cell
+ * fetches skip the per-cell decimal/enum metadata calls and the per-cell
+ * duckdb_enum_dictionary_value malloc/free. Single entry keyed by owning
+ * statement; a statement whose entry was evicted (or never built) falls back
+ * to the generic logical-type path with identical output. ENUM strings are
+ * malloc'd copies, never zend_string: the entry outlives a request. */
+typedef struct {
+	bool is_decimal;
+	uint8_t dec_width;
+	uint8_t dec_scale;
+	duckdb_type dec_internal;
+	bool is_enum;
+	duckdb_type enum_internal;
+	char **enum_vals;		/* malloc'd copies, enum_size slots */
+	size_t *enum_lens;
+	uint64_t enum_size;
+} pdo_duckdb_col_aux;
+
+typedef struct {
+	pdo_duckdb_stmt *owner;	/* statement the entry was built for */
+	idx_t ncols;
+	idx_t cap;
+	pdo_duckdb_col_aux *cols;	/* malloc'd, cap slots */
+} pdo_duckdb_col_aux_cache;
+
+ZEND_TLS pdo_duckdb_col_aux_cache pdo_duckdb_tls_col_aux;
+
+static void pdo_duckdb_col_aux_free_content(void)
+{
+	pdo_duckdb_col_aux_cache *a = &pdo_duckdb_tls_col_aux;
+	idx_t c;
+
+	if (!a->cols) {
+		return;
+	}
+	for (c = 0; c < a->ncols; c++) {
+		uint64_t i;
+
+		for (i = 0; i < a->cols[c].enum_size; i++) {
+			free(a->cols[c].enum_vals[i]);
+		}
+		free(a->cols[c].enum_vals);
+		free(a->cols[c].enum_lens);
+		a->cols[c].enum_vals = NULL;
+		a->cols[c].enum_lens = NULL;
+		a->cols[c].enum_size = 0;
+		a->cols[c].is_decimal = false;
+		a->cols[c].is_enum = false;
+	}
+}
+
+/* Release the entry when its owner resets (execute/dtor/cursor close). Kept
+ * as a buffer for reuse; only the content is freed. */
+static void pdo_duckdb_col_aux_release(pdo_duckdb_stmt *S)
+{
+	pdo_duckdb_col_aux_cache *a = &pdo_duckdb_tls_col_aux;
+
+	if (a->owner == S) {
+		pdo_duckdb_col_aux_free_content();
+		a->owner = NULL;
+		a->ncols = 0;
+	}
+}
+
+static pdo_duckdb_col_aux *pdo_duckdb_col_aux_for(pdo_duckdb_stmt *S, idx_t colno)
+{
+	pdo_duckdb_col_aux_cache *a = &pdo_duckdb_tls_col_aux;
+	pdo_duckdb_col_aux *aux;
+
+	if (a->owner != S || !a->cols || colno >= a->ncols) {
+		return NULL;
+	}
+	aux = &a->cols[colno];
+	if (!aux->is_decimal && !aux->is_enum) {
+		return NULL;
+	}
+	return aux;
+}
+
+/* Request/process shutdown cleanup for the TLS caches above. The index
+ * buffers are grow-only and malloc'd (they outlive a request), so without
+ * this they are still reachable at thread exit and trip LSan. Safe to call
+ * any time: every user revalidates (chunk key, aux owner) and falls back to
+ * direct reads/generic rendering on a miss, and a later request simply
+ * regrows the buffers. Wired by the module RSHUTDOWN/MSHUTDOWN. */
+void pdo_duckdb_tls_caches_shutdown(void)
+{
+	pdo_duckdb_chunk_cache *c = &pdo_duckdb_tls_chunk_cache;
+	pdo_duckdb_col_aux_cache *a = &pdo_duckdb_tls_col_aux;
+
+	pdo_duckdb_col_aux_free_content();
+	free(a->cols);
+	a->cols = NULL;
+	a->cap = 0;
+	a->ncols = 0;
+	a->owner = NULL;
+
+	free(c->blob);
+	c->blob = NULL;
+	c->vecs = NULL;
+	c->datas = NULL;
+	c->validities = NULL;
+	c->cap = 0;
+	c->ncols = 0;
+	c->chunk = NULL;
+}
+
+static void pdo_duckdb_stmt_cache_col_aux(pdo_duckdb_stmt *S);
 
 static void pdo_duckdb_stmt_reset_result(pdo_duckdb_stmt *S)
 {
@@ -58,8 +242,10 @@ static void pdo_duckdb_stmt_reset_result(pdo_duckdb_stmt *S)
 		S->col_types = NULL;
 	}
 	S->col_count = 0;
+	pdo_duckdb_col_aux_release(S);
 
 	if (S->chunk) {
+		pdo_duckdb_chunk_cache_invalidate(S->chunk);
 		duckdb_destroy_data_chunk(&S->chunk);
 		S->chunk = NULL;
 	}
@@ -114,6 +300,7 @@ static void pdo_duckdb_stmt_cache_columns(pdo_duckdb_stmt *S)
 				break;
 		}
 	}
+	pdo_duckdb_stmt_cache_col_aux(S);
 }
 
 static int pdo_duckdb_stmt_dtor(pdo_stmt_t *stmt)
@@ -144,7 +331,7 @@ static int pdo_duckdb_stmt_execute(pdo_stmt_t *stmt)
 	 * execute does not skip duckdb_clear_bindings. */
 	if (!pdo_duckdb_enforce_sandbox(S->H)) {
 		S->binds_cleared = false;
-		pdo_duckdb_error_stmt(stmt, "Unable to apply the open_basedir sandbox profile to DuckDB");
+		pdo_duckdb_error_stmt_code(stmt, PDO_DUCKDB_ERRCODE_SANDBOX, "Unable to apply the open_basedir sandbox profile to DuckDB");
 		return 0;
 	}
 
@@ -165,12 +352,12 @@ static int pdo_duckdb_stmt_execute(pdo_stmt_t *stmt)
 		duckdb_pending_result pending = NULL;
 
 		if (duckdb_pending_prepared_streaming(S->prepared, &pending) != DuckDBSuccess) {
-			pdo_duckdb_error_stmt(stmt, pending ? duckdb_pending_error(pending) : "Unable to create streaming result");
+			pdo_duckdb_error_stmt_code(stmt, PDO_DUCKDB_ERRCODE_STREAMING, pending ? duckdb_pending_error(pending) : "Unable to create streaming result");
 			duckdb_destroy_pending(&pending);
 			return 0;
 		}
 		if (duckdb_execute_pending(pending, &S->result) != DuckDBSuccess) {
-			pdo_duckdb_error_stmt(stmt, duckdb_result_error(&S->result));
+			pdo_duckdb_error_stmt_code(stmt, PDO_DUCKDB_ERRCODE_STREAMING, duckdb_result_error(&S->result));
 			duckdb_destroy_result(&S->result);
 			duckdb_destroy_pending(&pending);
 			return 0;
@@ -334,6 +521,115 @@ static bool pdo_duckdb_decimal_meta_ok(uint8_t width, uint8_t scale)
 	return width >= 1 && width <= 38 && scale <= width;
 }
 
+/* Build the CR-009 per-column cache from the already-cached logical types.
+ * DECIMAL columns remember width/scale/internal-type (validated once here so
+ * per-cell fetches do no C-API meta calls); ENUM columns intern the whole
+ * dictionary (malloc'd copies freed with the entry) so per-cell fetches are
+ * an index, a bounds check and a copy. Anything unexpected (bad meta,
+ * unknown internal type, allocation failure) simply leaves the column
+ * unflagged and the generic logical-type path renders it as before. */
+static void pdo_duckdb_stmt_cache_col_aux(pdo_duckdb_stmt *S)
+{
+	pdo_duckdb_col_aux_cache *a = &pdo_duckdb_tls_col_aux;
+	idx_t c;
+
+	/* An entry owned by another statement is evicted here; that statement
+	 * keeps working via the generic logical-type path (its own
+	 * col_logical_types stay alive until its own reset). */
+	pdo_duckdb_col_aux_free_content();
+	a->owner = NULL;
+	a->ncols = 0;
+	if (S->col_count == 0) {
+		return;
+	}
+	if (S->col_count > a->cap) {
+		pdo_duckdb_col_aux *cols = realloc(a->cols, sizeof(*cols) * (size_t)S->col_count);
+
+		if (!cols) {
+			return;
+		}
+		a->cols = cols;
+		a->cap = S->col_count;
+	}
+	memset(a->cols, 0, sizeof(*a->cols) * (size_t)S->col_count);
+	for (c = 0; c < S->col_count; c++) {
+		duckdb_type tid = S->col_types[c];
+		duckdb_logical_type lt = S->col_logical_types[c];
+
+		if (tid == DUCKDB_TYPE_DECIMAL) {
+			uint8_t width = duckdb_decimal_width(lt);
+			uint8_t scale = duckdb_decimal_scale(lt);
+			duckdb_type internal = duckdb_decimal_internal_type(lt);
+
+			if (pdo_duckdb_decimal_meta_ok(width, scale)
+					&& (internal == DUCKDB_TYPE_SMALLINT || internal == DUCKDB_TYPE_INTEGER
+						|| internal == DUCKDB_TYPE_BIGINT || internal == DUCKDB_TYPE_HUGEINT)) {
+				a->cols[c].is_decimal = true;
+				a->cols[c].dec_width = width;
+				a->cols[c].dec_scale = scale;
+				a->cols[c].dec_internal = internal;
+			}
+		} else if (tid == DUCKDB_TYPE_ENUM) {
+			duckdb_type internal = duckdb_enum_internal_type(lt);
+
+			if (internal == DUCKDB_TYPE_UTINYINT || internal == DUCKDB_TYPE_USMALLINT
+					|| internal == DUCKDB_TYPE_UINTEGER) {
+				uint64_t n = duckdb_enum_dictionary_size(lt);
+				uint64_t i, j;
+				char **vals;
+				size_t *lens;
+				bool ok = true;
+
+				if (n > (uint64_t)SIZE_MAX / sizeof(*vals)
+						|| n > (uint64_t)SIZE_MAX / sizeof(*lens)) {
+					continue;
+				}
+				vals = n ? malloc(sizeof(*vals) * (size_t)n) : NULL;
+				lens = n ? malloc(sizeof(*lens) * (size_t)n) : NULL;
+				if (n && (!vals || !lens)) {
+					free(vals);
+					free(lens);
+					continue;
+				}
+				for (i = 0; i < n; i++) {
+					char *s = duckdb_enum_dictionary_value(lt, i);
+					size_t len;
+
+					if (!s) {
+						ok = false;
+						break;
+					}
+					len = strlen(s);
+					vals[i] = malloc(len + 1);
+					if (!vals[i]) {
+						duckdb_free(s);
+						ok = false;
+						break;
+					}
+					memcpy(vals[i], s, len + 1);
+					lens[i] = len;
+					duckdb_free(s);
+				}
+				if (!ok) {
+					for (j = 0; j < i; j++) {
+						free(vals[j]);
+					}
+					free(vals);
+					free(lens);
+					continue;
+				}
+				a->cols[c].is_enum = true;
+				a->cols[c].enum_internal = internal;
+				a->cols[c].enum_vals = vals;
+				a->cols[c].enum_lens = lens;
+				a->cols[c].enum_size = n;
+			}
+		}
+	}
+	a->owner = S;
+	a->ncols = S->col_count;
+}
+
 static bool pdo_duckdb_decimal_from_vector(duckdb_logical_type lt, void *data, idx_t row, duckdb_decimal *d)
 {
 	d->width = duckdb_decimal_width(lt);
@@ -382,36 +678,30 @@ static duckdb_value pdo_duckdb_decimal_value(duckdb_logical_type lt, void *data,
 	return duckdb_create_decimal(d);
 }
 
-static zend_string *pdo_duckdb_decimal_to_string(duckdb_decimal d)
+/* Shared decimal-point placement (CR-009): renders already-formatted magnitude
+ * digits with the type's width/scale, including DuckDB's leading-zero rule
+ * (the integer-part '0' is printed only when width > scale). Logic moved
+ * verbatim out of the monolithic renderer so the 128-bit and 64-bit
+ * magnitude paths share it. */
+static zend_string *pdo_duckdb_decimal_digits_to_string(const char *digits, size_t len, bool neg, uint8_t width, uint8_t scale)
 {
-	char digits[40], out[43];
+	char out[43];
+	size_t pos = 0, int_len;
 
-	ZEND_ASSERT(pdo_duckdb_decimal_meta_ok(d.width, d.scale));
-	uint64_t upper = (uint64_t)d.value.upper;
-	uint64_t lower = d.value.lower;
-	bool neg = d.value.upper < 0;
-	size_t len, pos = 0, int_len;
-
-	if (neg) {
-		lower = ~lower + 1;
-		upper = ~upper + (lower == 0 ? 1 : 0);
-	}
-
-	len = pdo_duckdb_format_u128(upper, lower, digits);
 	if (neg) {
 		out[pos++] = '-';
 	}
 
-	if (d.scale == 0) {
+	if (scale == 0) {
 		memcpy(out + pos, digits, len);
 		return zend_string_init(out, pos + len, 0);
 	}
 
-	if (len <= d.scale) {
-		size_t zeros = (size_t)d.scale - len;
+	if (len <= scale) {
+		size_t zeros = (size_t)scale - len;
 		/* DuckDB writes the integer-part '0' only when the type has room for an
 		 * integer digit: DECIMAL(4,2) renders 0.05, DECIMAL(2,2) renders .05. */
-		if (d.width > d.scale) {
+		if (width > scale) {
 			out[pos++] = '0';
 		}
 		if (pos + 1 + zeros + len > sizeof(out)) {
@@ -424,12 +714,30 @@ static zend_string *pdo_duckdb_decimal_to_string(duckdb_decimal d)
 		return zend_string_init(out, pos + len, 0);
 	}
 
-	int_len = len - d.scale;
+	int_len = len - scale;
 	memcpy(out + pos, digits, int_len);
 	pos += int_len;
 	out[pos++] = '.';
-	memcpy(out + pos, digits + int_len, d.scale);
-	return zend_string_init(out, pos + d.scale, 0);
+	memcpy(out + pos, digits + int_len, scale);
+	return zend_string_init(out, pos + scale, 0);
+}
+
+static zend_string *pdo_duckdb_decimal_to_string(duckdb_decimal d)
+{
+	char digits[40];
+	uint64_t upper = (uint64_t)d.value.upper;
+	uint64_t lower = d.value.lower;
+	bool neg = d.value.upper < 0;
+	size_t len;
+
+	ZEND_ASSERT(pdo_duckdb_decimal_meta_ok(d.width, d.scale));
+	if (neg) {
+		lower = ~lower + 1;
+		upper = ~upper + (lower == 0 ? 1 : 0);
+	}
+
+	len = pdo_duckdb_format_u128(upper, lower, digits);
+	return pdo_duckdb_decimal_digits_to_string(digits, len, neg, d.width, d.scale);
 }
 
 static size_t pdo_duckdb_append_fraction(char *buf, size_t len, int64_t fraction, int width)
@@ -506,6 +814,89 @@ static size_t pdo_duckdb_format_tz_offset(int32_t offset, char *buf)
 static uint64_t pdo_duckdb_abs_i64(int64_t v)
 {
 	return v < 0 ? ((uint64_t) -(v + 1)) + 1 : (uint64_t)v;
+}
+
+/* 64-bit decimal magnitude path (CR-009): SMALLINT/INTEGER/BIGINT-internal
+ * decimals always fit an int64, so they render through format_u64 and never
+ * touch 128-bit division (nor the no-INT128 fallback bit loop). Output is
+ * identical: the magnitude digits feed the same shared placement above. */
+static zend_string *pdo_duckdb_decimal_to_string_i64(int64_t value, uint8_t width, uint8_t scale)
+{
+	char digits[20];
+	bool neg = value < 0;
+	size_t len = pdo_duckdb_format_u64(neg ? pdo_duckdb_abs_i64(value) : (uint64_t)value, digits);
+
+	return pdo_duckdb_decimal_digits_to_string(digits, len, neg, width, scale);
+}
+
+/* Top-level DECIMAL cell from the CR-009 column cache: no per-cell
+ * duckdb_decimal_width/scale/internal_type calls, 64-bit magnitudes without
+ * 128-bit division. HUGEINT-internal magnitudes that truly exceed 64 bits
+ * take the 128-bit formatter. Meta was validated at cache time. */
+static bool pdo_duckdb_cached_decimal_to_zval(const pdo_duckdb_col_aux *aux, void *data, idx_t row, zval *result)
+{
+	switch (aux->dec_internal) {
+		case DUCKDB_TYPE_SMALLINT:
+			ZVAL_STR(result, pdo_duckdb_decimal_to_string_i64(
+				((int16_t *)data)[row], aux->dec_width, aux->dec_scale));
+			return true;
+		case DUCKDB_TYPE_INTEGER:
+			ZVAL_STR(result, pdo_duckdb_decimal_to_string_i64(
+				((int32_t *)data)[row], aux->dec_width, aux->dec_scale));
+			return true;
+		case DUCKDB_TYPE_BIGINT:
+			ZVAL_STR(result, pdo_duckdb_decimal_to_string_i64(
+				((int64_t *)data)[row], aux->dec_width, aux->dec_scale));
+			return true;
+		case DUCKDB_TYPE_HUGEINT: {
+			duckdb_hugeint h = ((duckdb_hugeint *)data)[row];
+			uint64_t upper = (uint64_t)h.upper;
+			uint64_t lower = h.lower;
+			bool neg = h.upper < 0;
+
+			if (neg) {
+				lower = ~lower + 1;
+				upper = ~upper + (lower == 0 ? 1 : 0);
+			}
+			if (upper == 0) {
+				char digits[20];
+				size_t len = pdo_duckdb_format_u64(lower, digits);
+
+				ZVAL_STR(result, pdo_duckdb_decimal_digits_to_string(
+					digits, len, neg, aux->dec_width, aux->dec_scale));
+			} else {
+				char digits[40];
+				size_t len = pdo_duckdb_format_u128(upper, lower, digits);
+
+				ZVAL_STR(result, pdo_duckdb_decimal_digits_to_string(
+					digits, len, neg, aux->dec_width, aux->dec_scale));
+			}
+			return true;
+		}
+		default:
+			return false;
+	}
+}
+
+/* Top-level ENUM cell from the CR-009 interned dictionary: the index width
+ * was cached, the label is a bounds-checked copy. Out-of-range indexes (only
+ * from a corrupt file) return false so the generic path renders SQL NULL as
+ * before. */
+static bool pdo_duckdb_cached_enum_to_zval(const pdo_duckdb_col_aux *aux, void *data, idx_t row, zval *result)
+{
+	uint64_t idx;
+
+	switch (aux->enum_internal) {
+		case DUCKDB_TYPE_USMALLINT: idx = ((uint16_t *)data)[row]; break;
+		case DUCKDB_TYPE_UINTEGER:  idx = ((uint32_t *)data)[row]; break;
+		case DUCKDB_TYPE_UTINYINT:  idx = ((uint8_t *)data)[row]; break;
+		default: return false;
+	}
+	if (idx >= aux->enum_size) {
+		return false;
+	}
+	ZVAL_STRINGL(result, aux->enum_vals[idx], aux->enum_lens[idx]);
+	return true;
 }
 
 static size_t pdo_duckdb_format_interval_time_part(int64_t micros, char *buf)
@@ -754,7 +1145,106 @@ static void pdo_duckdb_smart_append_i64(smart_str *out, int64_t value)
 	}
 }
 
-static bool pdo_duckdb_smart_append_fast_scalar(duckdb_type tid, duckdb_logical_type lt, void *data, idx_t row, smart_str *out)
+/* Nested VARCHAR quoting (CR-002): mirrors DuckDB's
+ * VectorCastHelpers::Calculate/WriteEscapedString<false> (the list/struct/map
+ * scalar positions in function/cast/vector_cast_helpers.hpp) and
+ * NestedToVarcharCast::LOOKUP_TABLE (nested_to_varchar_cast.cpp). A value is
+ * single-quoted (backslash-escaping only '\'' and '\\') when empty, padded
+ * with recognized whitespace, case-insensitively "null", or containing one
+ * of "'(),:=[]{}; otherwise it is emitted bare. UNION members render raw in
+ * the engine, so the recursion below passes escape=false for those. */
+static const bool pdo_duckdb_varchar_quote_table[256] = {
+	['"'] = true, ['\''] = true, ['('] = true, [')'] = true, [','] = true,
+	[':'] = true, ['='] = true, ['['] = true, [']'] = true, ['{'] = true,
+	['}'] = true,
+};
+
+static bool pdo_duckdb_nested_varchar_is_space(char c)
+{
+	return c == ' ' || c == '\t' || c == '\n' || c == '\v' || c == '\f' || c == '\r';
+}
+
+static bool pdo_duckdb_nested_varchar_needs_quotes(const char *p, size_t len)
+{
+	size_t i;
+
+	if (len == 0) {
+		return true;
+	}
+	if (pdo_duckdb_nested_varchar_is_space(p[0])) {
+		return true;
+	}
+	if (len >= 2 && pdo_duckdb_nested_varchar_is_space(p[len - 1])) {
+		return true;
+	}
+	if (len == 4
+			&& (p[0] == 'n' || p[0] == 'N') && (p[1] == 'u' || p[1] == 'U')
+			&& (p[2] == 'l' || p[2] == 'L') && (p[3] == 'l' || p[3] == 'L')) {
+		return true;
+	}
+	for (i = 0; i < len; i++) {
+		if (pdo_duckdb_varchar_quote_table[(unsigned char)p[i]]) {
+			return true;
+		}
+	}
+	return false;
+}
+
+/* Append a nested VARCHAR leaf. needs_quotes is decided on the full value
+ * (like the engine); emission stops at the first NUL so the result matches
+ * the legacy duckdb_get_varchar C-string truncation byte-for-byte (notably,
+ * no closing quote is emitted after a truncation). */
+static void pdo_duckdb_smart_append_escaped_varchar(smart_str *out, const char *p, size_t len)
+{
+	size_t i;
+
+	if (len == 0) {
+		smart_str_appends(out, "''");
+		return;
+	}
+	if (!pdo_duckdb_nested_varchar_needs_quotes(p, len)) {
+		const char *nul = memchr(p, '\0', len);
+
+		smart_str_appendl(out, p, nul ? (size_t)(nul - p) : len);
+		return;
+	}
+	smart_str_appendc(out, '\'');
+	for (i = 0; i < len && p[i] != '\0'; i++) {
+		if (p[i] == '\'' || p[i] == '\\') {
+			smart_str_appendc(out, '\\');
+		}
+		smart_str_appendc(out, p[i]);
+	}
+	if (i == len) {
+		smart_str_appendc(out, '\'');
+	}
+}
+
+/* Nested FLOAT/DOUBLE leaf (CR-002): the engine renders floats with
+ * duckdb_fmt shortest-round-trip ("1", "2.5", "1e+100", "inf"/"-inf"/"nan";
+ * see the engine's nan_cast/infinity tests), which has no cheap exact
+ * reimplementation in C. Render through the engine's scalar primitive instead
+ * of the recursive cell_to_value_typed reconstruct: byte-identical by
+ * construction (both go through StringCast::Operation(float/double)), minus
+ * the recursion and logical-type handling. */
+static bool pdo_duckdb_nested_float_to_smart_str(duckdb_type tid, void *data, idx_t row, smart_str *out)
+{
+	duckdb_value v = tid == DUCKDB_TYPE_FLOAT
+		? duckdb_create_float(((float *)data)[row])
+		: duckdb_create_double(((double *)data)[row]);
+	char *s = duckdb_get_varchar(v);
+
+	if (!s) {
+		duckdb_destroy_value(&v);
+		return false;
+	}
+	smart_str_appends(out, s);
+	duckdb_free(s);
+	duckdb_destroy_value(&v);
+	return true;
+}
+
+static bool pdo_duckdb_smart_append_fast_scalar(duckdb_type tid, duckdb_logical_type lt, void *data, idx_t row, smart_str *out, bool escape_varchar)
 {
 	zval tmp;
 
@@ -796,6 +1286,8 @@ static bool pdo_duckdb_smart_append_fast_scalar(duckdb_type tid, duckdb_logical_
 		case DUCKDB_TYPE_UHUGEINT:
 		case DUCKDB_TYPE_DECIMAL:
 		case DUCKDB_TYPE_DATE:
+		case DUCKDB_TYPE_TIMESTAMP:
+		case DUCKDB_TYPE_TIME:
 		case DUCKDB_TYPE_UUID:
 			ZVAL_UNDEF(&tmp);
 			if (!pdo_duckdb_fast_col_to_string(tid, lt, data, row, &tmp)) {
@@ -808,6 +1300,23 @@ static bool pdo_duckdb_smart_append_fast_scalar(duckdb_type tid, duckdb_logical_
 			smart_str_appendl(out, Z_STRVAL(tmp), Z_STRLEN(tmp));
 			zval_ptr_dtor(&tmp);
 			return true;
+		case DUCKDB_TYPE_VARCHAR: {
+			duckdb_string_t s = ((duckdb_string_t *)data)[row];
+			const char *p = duckdb_string_t_data(&s);
+			size_t len = (size_t)duckdb_string_t_length(s);
+
+			if (escape_varchar) {
+				pdo_duckdb_smart_append_escaped_varchar(out, p, len);
+			} else {
+				const char *nul = memchr(p, '\0', len);
+
+				smart_str_appendl(out, p, nul ? (size_t)(nul - p) : len);
+			}
+			return true;
+		}
+		case DUCKDB_TYPE_FLOAT:
+		case DUCKDB_TYPE_DOUBLE:
+			return pdo_duckdb_nested_float_to_smart_str(tid, data, row, out);
 		default:
 			return false;
 	}
@@ -978,6 +1487,11 @@ static pdo_duckdb_nested_render_type *pdo_duckdb_nested_render_type_build(
 		case DUCKDB_TYPE_HUGEINT:
 		case DUCKDB_TYPE_UHUGEINT:
 		case DUCKDB_TYPE_DATE:
+		case DUCKDB_TYPE_TIMESTAMP:
+		case DUCKDB_TYPE_TIME:
+		case DUCKDB_TYPE_FLOAT:
+		case DUCKDB_TYPE_DOUBLE:
+		case DUCKDB_TYPE_VARCHAR:
 		case DUCKDB_TYPE_UUID:
 			return type;
 		case DUCKDB_TYPE_DECIMAL:
@@ -993,7 +1507,7 @@ static pdo_duckdb_nested_render_type *pdo_duckdb_nested_render_type_build(
 }
 
 static bool pdo_duckdb_fast_nested_cell_to_smart_str(duckdb_vector vec, idx_t row,
-		const pdo_duckdb_nested_render_type *type, smart_str *out)
+		const pdo_duckdb_nested_render_type *type, smart_str *out, bool escape_varchar)
 {
 	uint64_t *validity = duckdb_vector_get_validity(vec);
 	void *data;
@@ -1022,7 +1536,7 @@ static bool pdo_duckdb_fast_nested_cell_to_smart_str(duckdb_vector vec, idx_t ro
 					smart_str_appends(out, ", ");
 				}
 				if (!pdo_duckdb_fast_nested_cell_to_smart_str(
-						child, e.offset + i, type->children[0], out)) {
+						child, e.offset + i, type->children[0], out, true)) {
 					return false;
 				}
 			}
@@ -1030,6 +1544,8 @@ static bool pdo_duckdb_fast_nested_cell_to_smart_str(duckdb_vector vec, idx_t ro
 			return true;
 		}
 		case DUCKDB_TYPE_ARRAY: {
+			/* Unlike LIST, the engine's ArrayToVarcharCast joins pre-cast
+			 * children with a raw memcpy (no quoting), so members render raw. */
 			idx_t n = duckdb_array_type_array_size(type->logical_type);
 			duckdb_vector child = duckdb_array_vector_get_child(vec);
 			idx_t base, i;
@@ -1045,7 +1561,7 @@ static bool pdo_duckdb_fast_nested_cell_to_smart_str(duckdb_vector vec, idx_t ro
 					smart_str_appends(out, ", ");
 				}
 				if (!pdo_duckdb_fast_nested_cell_to_smart_str(
-						child, base + i, type->children[0], out)) {
+						child, base + i, type->children[0], out, false)) {
 					return false;
 				}
 			}
@@ -1066,7 +1582,7 @@ static bool pdo_duckdb_fast_nested_cell_to_smart_str(duckdb_vector vec, idx_t ro
 				smart_str_appends(out, type->child_names[i]);
 				smart_str_appends(out, "': ");
 				if (!pdo_duckdb_fast_nested_cell_to_smart_str(
-						child, row, type->children[i], out)) {
+						child, row, type->children[i], out, true)) {
 					return false;
 				}
 			}
@@ -1093,12 +1609,12 @@ static bool pdo_duckdb_fast_nested_cell_to_smart_str(duckdb_vector vec, idx_t ro
 					smart_str_appends(out, ", ");
 				}
 				if (!pdo_duckdb_fast_nested_cell_to_smart_str(
-						kvec, e.offset + i, type->children[0], out)) {
+						kvec, e.offset + i, type->children[0], out, true)) {
 					return false;
 				}
 				smart_str_appendc(out, '=');
 				if (!pdo_duckdb_fast_nested_cell_to_smart_str(
-						vvec, e.offset + i, type->children[1], out)) {
+						vvec, e.offset + i, type->children[1], out, true)) {
 					return false;
 				}
 			}
@@ -1117,11 +1633,11 @@ static bool pdo_duckdb_fast_nested_cell_to_smart_str(duckdb_vector vec, idx_t ro
 
 			member_vec = duckdb_struct_vector_get_child(vec, tag + 1);
 			return pdo_duckdb_fast_nested_cell_to_smart_str(
-				member_vec, row, type->children[tag], out);
+				member_vec, row, type->children[tag], out, false);
 		}
 		default:
 			return pdo_duckdb_smart_append_fast_scalar(
-				type->type, type->logical_type, data, row, out);
+				type->type, type->logical_type, data, row, out, escape_varchar);
 	}
 }
 
@@ -1141,13 +1657,141 @@ static bool pdo_duckdb_fast_nested_col_to_string(duckdb_vector vec, idx_t row,
 			return false;
 	}
 
-	if (!pdo_duckdb_fast_nested_cell_to_smart_str(vec, row, type, &out)) {
+	if (!pdo_duckdb_fast_nested_cell_to_smart_str(vec, row, type, &out, true)) {
 		smart_str_free(&out);
 		return false;
 	}
 
 	ZVAL_STR(result, smart_str_extract(&out));
 	return true;
+}
+
+/* Nested GEOMETRY substitution. The DUCKDB_TYPE_GEOMETRY case below encodes an
+ * element as a VARCHAR hex value (the C API has no geometry value
+ * constructor), but duckdb_create_*_value rejects values whose type differs
+ * from the declared child type, so a container declared with a GEOMETRY child
+ * would come back NULL. Rebuild a container logical type with VARCHAR in
+ * place of GEOMETRY anywhere in its tree; element recursion still runs
+ * against the original GEOMETRY logical types (which hit the hex encoder),
+ * while the declared container type matches the produced VARCHAR values.
+ * Borrows lt; on true *out owns a fresh logical type, otherwise *out is
+ * untouched. Type constructors borrow their inputs, so rebuilt children are
+ * destroyed after use like every other owned logical type here. */
+static bool pdo_duckdb_substitute_geometry(duckdb_logical_type lt, duckdb_logical_type *out)
+{
+	duckdb_type tid = duckdb_get_type_id(lt);
+	idx_t i;
+
+	if (tid == DUCKDB_TYPE_GEOMETRY) {
+		*out = duckdb_create_logical_type(DUCKDB_TYPE_VARCHAR);
+		return true;
+	}
+	if (tid == DUCKDB_TYPE_LIST) {
+		duckdb_logical_type child = duckdb_list_type_child_type(lt);
+		duckdb_logical_type sub;
+		bool changed = pdo_duckdb_substitute_geometry(child, &sub);
+		if (changed) {
+			*out = duckdb_create_list_type(sub);
+			duckdb_destroy_logical_type(&sub);
+		}
+		duckdb_destroy_logical_type(&child);
+		return changed;
+	}
+	if (tid == DUCKDB_TYPE_ARRAY) {
+		duckdb_logical_type child = duckdb_array_type_child_type(lt);
+		duckdb_logical_type sub;
+		bool changed = pdo_duckdb_substitute_geometry(child, &sub);
+		if (changed) {
+			*out = duckdb_create_array_type(sub, duckdb_array_type_array_size(lt));
+			duckdb_destroy_logical_type(&sub);
+		}
+		duckdb_destroy_logical_type(&child);
+		return changed;
+	}
+	if (tid == DUCKDB_TYPE_STRUCT) {
+		idx_t n = duckdb_struct_type_child_count(lt);
+		duckdb_logical_type *members = n ? emalloc(sizeof(*members) * n) : NULL;
+		const char **names = n ? emalloc(sizeof(*names) * n) : NULL;
+		bool changed = false;
+		for (i = 0; i < n; i++) {
+			duckdb_logical_type child = duckdb_struct_type_child_type(lt, i);
+			duckdb_logical_type sub;
+			names[i] = duckdb_struct_type_child_name(lt, i);
+			if (pdo_duckdb_substitute_geometry(child, &sub)) {
+				members[i] = sub;
+				changed = true;
+			} else {
+				members[i] = child;
+			}
+		}
+		if (changed) {
+			*out = duckdb_create_struct_type(members, names, n);
+		}
+		for (i = 0; i < n; i++) {
+			duckdb_destroy_logical_type(&members[i]);
+			duckdb_free((void *)names[i]);
+		}
+		efree(members);
+		efree(names);
+		return changed;
+	}
+	if (tid == DUCKDB_TYPE_MAP) {
+		duckdb_logical_type key = duckdb_map_type_key_type(lt);
+		duckdb_logical_type value = duckdb_map_type_value_type(lt);
+		duckdb_logical_type skey, svalue;
+		bool changed = false;
+		if (pdo_duckdb_substitute_geometry(key, &skey)) {
+			changed = true;
+		} else {
+			skey = key;
+		}
+		if (pdo_duckdb_substitute_geometry(value, &svalue)) {
+			changed = true;
+		} else {
+			svalue = value;
+		}
+		if (changed) {
+			*out = duckdb_create_map_type(skey, svalue);
+		}
+		/* skey/svalue alias key/value when unchanged; destroy exactly once. */
+		if (skey != key) {
+			duckdb_destroy_logical_type(&skey);
+		}
+		if (svalue != value) {
+			duckdb_destroy_logical_type(&svalue);
+		}
+		duckdb_destroy_logical_type(&key);
+		duckdb_destroy_logical_type(&value);
+		return changed;
+	}
+	if (tid == DUCKDB_TYPE_UNION) {
+		idx_t n = duckdb_union_type_member_count(lt);
+		duckdb_logical_type *members = n ? emalloc(sizeof(*members) * n) : NULL;
+		const char **names = n ? emalloc(sizeof(*names) * n) : NULL;
+		bool changed = false;
+		for (i = 0; i < n; i++) {
+			duckdb_logical_type member = duckdb_union_type_member_type(lt, i);
+			duckdb_logical_type sub;
+			names[i] = duckdb_union_type_member_name(lt, i);
+			if (pdo_duckdb_substitute_geometry(member, &sub)) {
+				members[i] = sub;
+				changed = true;
+			} else {
+				members[i] = member;
+			}
+		}
+		if (changed) {
+			*out = duckdb_create_union_type(members, names, n);
+		}
+		for (i = 0; i < n; i++) {
+			duckdb_destroy_logical_type(&members[i]);
+			duckdb_free((void *)names[i]);
+		}
+		efree(members);
+		efree(names);
+		return changed;
+	}
+	return false;
 }
 
 static duckdb_value pdo_duckdb_cell_to_value_typed(duckdb_vector vec, idx_t row,
@@ -1306,8 +1950,8 @@ static duckdb_value pdo_duckdb_cell_to_value_typed(duckdb_vector vec, idx_t row,
 			duckdb_list_entry e = ((duckdb_list_entry *)data)[row];
 			duckdb_vector child = duckdb_list_vector_get_child(vec);
 			idx_t child_size = duckdb_list_vector_get_size(vec);
-			duckdb_logical_type ct = duckdb_list_type_child_type(lt);
-			duckdb_value *vals;
+		duckdb_logical_type ct = duckdb_list_type_child_type(lt);
+		duckdb_value *vals;
 			idx_t i;
 			/* {offset,length} is an engine invariant for any chunk DuckDB
 			 * produces; a corrupt storage file could violate it. Clamp before
@@ -1317,19 +1961,26 @@ static duckdb_value pdo_duckdb_cell_to_value_typed(duckdb_vector vec, idx_t row,
 				ret = duckdb_create_null_value();
 				break;
 			}
-			/* always non-NULL: create_list_value() segfaults on a NULL values
-			 * pointer, so an empty list must still pass a valid buffer. */
-			vals = emalloc(sizeof(duckdb_value) * (e.length ? e.length : 1));
+		/* always non-NULL: create_list_value() segfaults on a NULL values
+		 * pointer, so an empty list must still pass a valid buffer. */
+		duckdb_logical_type decl = ct;
+		/* GEOMETRY elements are encoded as VARCHAR hex values, so declare
+		 * the child with a substituted type (no-op otherwise). */
+		bool geo_sub = pdo_duckdb_substitute_geometry(ct, &decl);
+		vals = emalloc(sizeof(duckdb_value) * (e.length ? e.length : 1));
 			for (i = 0; i < e.length; i++) {
 				vals[i] = pdo_duckdb_cell_to_value_typed(
 					child, e.offset + i, ct, false, unsupported_variant);
 			}
-			ret = duckdb_create_list_value(ct, vals, e.length);
-			for (i = 0; i < e.length; i++) {
-				duckdb_destroy_value(&vals[i]);
-			}
-			efree(vals);
-			duckdb_destroy_logical_type(&ct);
+		ret = duckdb_create_list_value(geo_sub ? decl : ct, vals, e.length);
+		for (i = 0; i < e.length; i++) {
+			duckdb_destroy_value(&vals[i]);
+		}
+		efree(vals);
+		if (geo_sub) {
+			duckdb_destroy_logical_type(&decl);
+		}
+		duckdb_destroy_logical_type(&ct);
 			break;
 		}
 		case DUCKDB_TYPE_ARRAY: {
@@ -1345,18 +1996,25 @@ static duckdb_value pdo_duckdb_cell_to_value_typed(duckdb_vector vec, idx_t row,
 				break;
 			}
 
-			vals = emalloc(sizeof(duckdb_value) * (n ? n : 1));
-			base = row * n;
-			for (i = 0; i < n; i++) {
-				vals[i] = pdo_duckdb_cell_to_value_typed(
-					child, base + i, ct, false, unsupported_variant);
+		vals = emalloc(sizeof(duckdb_value) * (n ? n : 1));
+		base = row * n;
+		for (i = 0; i < n; i++) {
+			vals[i] = pdo_duckdb_cell_to_value_typed(
+				child, base + i, ct, false, unsupported_variant);
+		}
+		{
+			duckdb_logical_type decl = ct;
+			bool geo_sub = pdo_duckdb_substitute_geometry(ct, &decl);
+			ret = duckdb_create_array_value(geo_sub ? decl : ct, vals, n);
+			if (geo_sub) {
+				duckdb_destroy_logical_type(&decl);
 			}
-			ret = duckdb_create_array_value(ct, vals, n);
-			for (i = 0; i < n; i++) {
-				duckdb_destroy_value(&vals[i]);
-			}
-			efree(vals);
-			duckdb_destroy_logical_type(&ct);
+		}
+		for (i = 0; i < n; i++) {
+			duckdb_destroy_value(&vals[i]);
+		}
+		efree(vals);
+		duckdb_destroy_logical_type(&ct);
 			break;
 		}
 		case DUCKDB_TYPE_STRUCT: {
@@ -1370,7 +2028,14 @@ static duckdb_value pdo_duckdb_cell_to_value_typed(duckdb_vector vec, idx_t row,
 					child, row, ct, false, unsupported_variant);
 				duckdb_destroy_logical_type(&ct);
 			}
-			ret = duckdb_create_struct_value(lt, vals);
+		{
+			duckdb_logical_type decl = lt;
+			bool geo_sub = pdo_duckdb_substitute_geometry(lt, &decl);
+			ret = duckdb_create_struct_value(geo_sub ? decl : lt, vals);
+			if (geo_sub) {
+				duckdb_destroy_logical_type(&decl);
+			}
+		}
 			for (i = 0; i < n; i++) {
 				duckdb_destroy_value(&vals[i]);
 			}
@@ -1396,15 +2061,22 @@ static duckdb_value pdo_duckdb_cell_to_value_typed(duckdb_vector vec, idx_t row,
 			vvec = duckdb_struct_vector_get_child(entries, 1);
 			duckdb_logical_type kt = duckdb_map_type_key_type(lt);
 			duckdb_logical_type vt = duckdb_map_type_value_type(lt);
-			keys = emalloc(sizeof(duckdb_value) * (e.length ? e.length : 1));
-			vals = emalloc(sizeof(duckdb_value) * (e.length ? e.length : 1));
+		keys = emalloc(sizeof(duckdb_value) * (e.length ? e.length : 1));
+		vals = emalloc(sizeof(duckdb_value) * (e.length ? e.length : 1));
 			for (i = 0; i < e.length; i++) {
 				keys[i] = pdo_duckdb_cell_to_value_typed(
 					kvec, e.offset + i, kt, false, unsupported_variant);
 				vals[i] = pdo_duckdb_cell_to_value_typed(
 					vvec, e.offset + i, vt, false, unsupported_variant);
 			}
-			ret = duckdb_create_map_value(lt, keys, vals, e.length);
+		{
+			duckdb_logical_type decl = lt;
+			bool geo_sub = pdo_duckdb_substitute_geometry(lt, &decl);
+			ret = duckdb_create_map_value(geo_sub ? decl : lt, keys, vals, e.length);
+			if (geo_sub) {
+				duckdb_destroy_logical_type(&decl);
+			}
+		}
 			for (i = 0; i < e.length; i++) {
 				duckdb_destroy_value(&keys[i]);
 				duckdb_destroy_value(&vals[i]);
@@ -1436,7 +2108,14 @@ static duckdb_value pdo_duckdb_cell_to_value_typed(duckdb_vector vec, idx_t row,
 			duckdb_logical_type mt = duckdb_union_type_member_type(lt, tag);
 			duckdb_value member = pdo_duckdb_cell_to_value_typed(
 				member_vec, row, mt, false, unsupported_variant);
-			ret = duckdb_create_union_value(lt, tag, member);
+		{
+			duckdb_logical_type decl = lt;
+			bool geo_sub = pdo_duckdb_substitute_geometry(lt, &decl);
+			ret = duckdb_create_union_value(geo_sub ? decl : lt, tag, member);
+			if (geo_sub) {
+				duckdb_destroy_logical_type(&decl);
+			}
+		}
 			duckdb_destroy_value(&member);
 			duckdb_destroy_logical_type(&mt);
 			break;
@@ -1486,7 +2165,7 @@ static int pdo_duckdb_stmt_fetch(pdo_stmt_t *stmt,
 	 * of fetch that reaches DuckDB — rows served out of the chunk above touch no
 	 * filesystem — so the check belongs here rather than on every row. */
 	if (!pdo_duckdb_enforce_sandbox(S->H)) {
-		pdo_duckdb_error_stmt(stmt, "Unable to apply the open_basedir sandbox profile to DuckDB");
+		pdo_duckdb_error_stmt_code(stmt, PDO_DUCKDB_ERRCODE_SANDBOX, "Unable to apply the open_basedir sandbox profile to DuckDB");
 		pdo_duckdb_stmt_reset_result_full(stmt);
 		S->done = true;
 		return 0;
@@ -1495,6 +2174,7 @@ static int pdo_duckdb_stmt_fetch(pdo_stmt_t *stmt,
 	/* Advance to the next non-empty chunk. */
 	for (;;) {
 		if (S->chunk) {
+			pdo_duckdb_chunk_cache_invalidate(S->chunk);
 			duckdb_destroy_data_chunk(&S->chunk);
 			S->chunk = NULL;
 		}
@@ -1504,7 +2184,7 @@ static int pdo_duckdb_stmt_fetch(pdo_stmt_t *stmt,
 			if (err && *err) {
 				/* Release the native result (esp. unbuffered streams) so the
 				 * connection is not pinned until a later re-execute/dtor. */
-				pdo_duckdb_error_stmt(stmt, err);
+				pdo_duckdb_error_stmt_code(stmt, PDO_DUCKDB_ERRCODE_STREAMING, err);
 				pdo_duckdb_stmt_reset_result_full(stmt);
 				S->done = true;
 				return 0;
@@ -1512,6 +2192,8 @@ static int pdo_duckdb_stmt_fetch(pdo_stmt_t *stmt,
 			S->done = true;
 			return 0;
 		}
+		/* Load the per-chunk column cache (CR-001) for the new chunk. */
+		pdo_duckdb_chunk_cache_load(S);
 		S->chunk_size = duckdb_data_chunk_get_size(S->chunk);
 		S->cur = 0;
 		if (S->chunk_size > 0) {
@@ -1581,6 +2263,7 @@ static int pdo_duckdb_stmt_get_col(
 		pdo_stmt_t *stmt, int colno, zval *result, enum pdo_param_type *type)
 {
 	pdo_duckdb_stmt *S = (pdo_duckdb_stmt *)stmt->driver_data;
+	pdo_duckdb_chunk_cache *cc = &pdo_duckdb_tls_chunk_cache;
 	duckdb_vector vec;
 	duckdb_type tid;
 	uint64_t *validity;
@@ -1593,22 +2276,39 @@ static int pdo_duckdb_stmt_get_col(
 	/* col_types/col_logical_types are sized by the cached result column count;
 	 * the chunk's own count equals it for anything DuckDB produces, but bound
 	 * the index by the cache too rather than trusting that invariant. */
-	if ((idx_t)colno >= S->col_count ||
-			(idx_t)colno >= duckdb_data_chunk_get_column_count(S->chunk)) {
+	if ((idx_t)colno >= S->col_count) {
 		return 0;
+	}
+	/* CR-001: index the per-chunk column cache loaded in fetch() instead of
+	 * re-querying the vector/validity/data pointers per cell. On a miss
+	 * (another statement pulled a chunk since) refresh it best-effort; only
+	 * when the cache itself is unavailable fall back to direct reads. */
+	if (cc->chunk != S->chunk) {
+		pdo_duckdb_chunk_cache_load(S);
+	}
+	if (cc->chunk == S->chunk) {
+		if ((idx_t)colno >= cc->ncols) {
+			return 0;
+		}
+		vec = cc->vecs[colno];
+		validity = cc->validities[colno];
+		data = cc->datas[colno];
+	} else {
+		if ((idx_t)colno >= duckdb_data_chunk_get_column_count(S->chunk)) {
+			return 0;
+		}
+		vec = duckdb_data_chunk_get_vector(S->chunk, (idx_t)colno);
+		validity = duckdb_vector_get_validity(vec);
+		data = duckdb_vector_get_data(vec);
 	}
 
 	row = S->cur;
-	vec = duckdb_data_chunk_get_vector(S->chunk, (idx_t)colno);
 	tid = S->col_types[colno];
 
-	validity = duckdb_vector_get_validity(vec);
 	if (validity && !duckdb_validity_row_is_valid(validity, row)) {
 		ZVAL_NULL(result);
 		return 1;
 	}
-
-	data = duckdb_vector_get_data(vec);
 
 	switch (tid) {
 		case DUCKDB_TYPE_BOOLEAN:   ZVAL_LONG(result, ((bool *)data)[row] ? 1 : 0); return 1;
@@ -1652,14 +2352,26 @@ static int pdo_duckdb_stmt_get_col(
 
 		case DUCKDB_TYPE_VARIANT:
 			ZVAL_NULL(result);
-			pdo_duckdb_error_stmt(stmt,
+			pdo_duckdb_error_stmt_code(stmt, PDO_DUCKDB_ERRCODE_STREAMING,
 				"DuckDB VARIANT values are not supported by the C result API; cast the value to VARCHAR in SQL");
 			pdo_handle_error(stmt->dbh, stmt);
 			return 1;
 
-		default:
+		default: {
+			pdo_duckdb_col_aux *aux = pdo_duckdb_col_aux_for(S, colno);
+
 			/* Extended scalar and nested types are returned as their canonical
 			 * DuckDB string form; common scalar formats use fast renderers first. */
+			if (aux != NULL) {
+				if (aux->is_decimal
+						&& pdo_duckdb_cached_decimal_to_zval(aux, data, row, result)) {
+					return 1;
+				}
+				if (aux->is_enum
+						&& pdo_duckdb_cached_enum_to_zval(aux, data, row, result)) {
+					return 1;
+				}
+			}
 			if (S->col_nested_renderers[colno] &&
 					pdo_duckdb_fast_nested_col_to_string(
 						vec, row, S->col_nested_renderers[colno], result)) {
@@ -1671,11 +2383,12 @@ static int pdo_duckdb_stmt_get_col(
 			}
 			if (!pdo_duckdb_col_to_string(
 					vec, row, S->col_logical_types[colno], result)) {
-				pdo_duckdb_error_stmt(stmt,
+				pdo_duckdb_error_stmt_code(stmt, PDO_DUCKDB_ERRCODE_STREAMING,
 					"DuckDB VARIANT values are not supported by the C result API; cast the value to VARCHAR in SQL");
 				pdo_handle_error(stmt->dbh, stmt);
 			}
 			return 1;
+		}
 	}
 }
 
@@ -1884,7 +2597,6 @@ static int pdo_duckdb_stmt_param_hook(pdo_stmt_t *stmt, struct pdo_bound_param_d
 					pdo_duckdb_error_stmt(stmt, "Failed to bind integer parameter");
 				}
 				break;
-
 			case PDO_PARAM_LOB:
 				if (Z_TYPE_P(parameter) == IS_RESOURCE) {
 					php_stream *stm = NULL;
@@ -1895,18 +2607,57 @@ static int pdo_duckdb_stmt_param_hook(pdo_stmt_t *stmt, struct pdo_bound_param_d
 						pdo_raise_impl_error(stmt->dbh, stmt, "HY105", "Expected a stream resource");
 						break;
 					}
-					mem = php_stream_copy_to_mem(stm, PHP_STREAM_COPY_ALL, 0);
+					/* CR-005: cheap size probe first (seekable streams report
+					 * their size without reading); otherwise the bounded copy
+					 * below stops just past the cap, so a huge stream is never
+					 * read whole nor kept. Either way the bind fails with the
+					 * cap message through the normal bind-failure path. */
+					{
+						php_stream_statbuf ssb;
+
+						memset(&ssb, 0, sizeof(ssb));
+						if (php_stream_stat(stm, &ssb) == 0 && ssb.sb.st_size > 0
+								&& (uint64_t)ssb.sb.st_size > (uint64_t)PDO_DUCKDB_LOB_MAX_BYTES) {
+							pdo_duckdb_error_stmt(stmt, "LOB stream exceeds maximum size of 64MB");
+							break;
+						}
+					}
+					mem = php_stream_copy_to_mem(stm, PDO_DUCKDB_LOB_MAX_BYTES + 1, 0);
 					if (stmt->bound_params != bound_at_start || EG(exception)) {
 						if (mem) {
 							zend_string_release(mem);
 						}
 						break;
 					}
-					if (!mem) {
+				if (!mem) {
+					/* An exhausted non-seekable stream reads zero bytes: bind
+					 * the empty remainder rather than failing the re-execute.
+					 * A fresh stream that yields nothing and is not at EOF is
+					 * a genuine read failure. */
+					if (php_stream_eof(stm)) {
+						mem = ZSTR_EMPTY_ALLOC();
+					} else {
 						pdo_duckdb_error_stmt(stmt, "Failed to read LOB stream");
 						break;
 					}
+				}
+					if (ZSTR_LEN(mem) > PDO_DUCKDB_LOB_MAX_BYTES) {
+						zend_string_release(mem);
+						pdo_duckdb_error_stmt(stmt, "LOB stream exceeds maximum size of 64MB");
+						break;
+					}
+				/* Rewind for the next re-execute; non-seekable streams have no
+				 * rewind, so later executes bind from the current position.
+				 * Best-effort and result-ignored: user-space wrappers without
+				 * stream_seek warn from inside their seek handler, so mute
+				 * warnings across the call (PHP 8.4 exports no silence API;
+				 * save/restore EG(error_reporting) around this one call). */
+				if (!(stm->flags & PHP_STREAM_FLAG_NO_SEEK) && stm->ops->seek) {
+					zend_long orig_reporting = EG(error_reporting);
+					EG(error_reporting) = 0;
 					php_stream_seek(stm, 0, SEEK_SET);
+					EG(error_reporting) = orig_reporting;
+				}
 					if (duckdb_bind_blob(S->prepared, idx, ZSTR_VAL(mem), (idx_t)ZSTR_LEN(mem)) == DuckDBSuccess) {
 						bind_ok = 1;
 					} else {

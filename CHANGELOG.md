@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- Reject `PDO::PARAM_LOB` binds over 64MB (worker OOM guardrail); non-seekable
+  streams bind the remainder on re-execute instead of failing.
+- Reject appender rows nested deeper than 128 levels (C stack guardrail).
+
+### Added
+- Driver error taxonomy in `errorInfo()[1]`: 1 general, 2/`08000` connect,
+  3/`42000` syntax, 4 sandbox, 5 streaming.
+
+### Changed
+- Probe-caught appender cast failures throw without poisoning the appender;
+  native-path failures still invalidate it. Documented exception matrix.
+
+### Fixed
+- Nested `GEOMETRY` containers fetch as uppercase-hex renders, not NULL.
+
 ## [0.6.0] - 2026-08-30
 
 ### Security

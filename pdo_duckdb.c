@@ -38,8 +38,8 @@ zend_module_entry pdo_duckdb_module_entry = {
 	NULL,
 	PHP_MINIT(pdo_duckdb),
 	PHP_MSHUTDOWN(pdo_duckdb),
-	NULL,
-	NULL,
+	PHP_RINIT(pdo_duckdb),
+	PHP_RSHUTDOWN(pdo_duckdb),
 	PHP_MINFO(pdo_duckdb),
 	PHP_PDO_DUCKDB_VERSION,
 	STANDARD_MODULE_PROPERTIES
@@ -83,6 +83,22 @@ PHP_MINIT_FUNCTION(pdo_duckdb)
 PHP_MSHUTDOWN_FUNCTION(pdo_duckdb)
 {
 	php_pdo_unregister_driver(&pdo_duckdb_driver);
+	pdo_duckdb_tls_caches_shutdown();
+	return SUCCESS;
+}
+/* }}} */
+
+/* {{{ PHP_RINIT_FUNCTION */
+PHP_RINIT_FUNCTION(pdo_duckdb)
+{
+	return SUCCESS;
+}
+/* }}} */
+
+/* {{{ PHP_RSHUTDOWN_FUNCTION */
+PHP_RSHUTDOWN_FUNCTION(pdo_duckdb)
+{
+	pdo_duckdb_tls_caches_shutdown();
 	return SUCCESS;
 }
 /* }}} */

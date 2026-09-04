@@ -3,6 +3,18 @@ pdo_duckdb: PDO::PARAM_LOB stream resource binds binary data
 --EXTENSIONS--
 pdo
 pdo_duckdb
+--SKIPIF--
+<?php
+if (!function_exists('proc_open')) die('skip proc_open() unavailable');
+$probe = @proc_open('true', [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $probe_pipes);
+if (!is_resource($probe)) die('skip proc_open() probe failed');
+foreach ($probe_pipes as $p) {
+    if (is_resource($p)) {
+        fclose($p);
+    }
+}
+proc_close($probe);
+?>
 --FILE--
 <?php
 $db = new PDO('duckdb::memory:', null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
@@ -21,17 +33,8 @@ fclose($stream);
 $got = $db->query('SELECT b FROM t')->fetchColumn();
 var_dump($got === $bin);
 
-// Non-stream resource must fail cleanly without poisoning the next execute.
-$proc = @proc_open('true', [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
-if (!is_resource($proc)) {
-    echo "skip_proc\n";
-    exit(0);
-}
-foreach ($pipes as $p) {
-    if (is_resource($p)) {
-        fclose($p);
-    }
-}
+// Non-stream resources must fail cleanly without poisoning the next execute.
+$proc = proc_open('true', [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
 
 $stmt2 = $db->prepare('INSERT INTO t VALUES (?)');
 try {

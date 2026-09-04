@@ -35,13 +35,26 @@ void pdo_duckdb_clear_einfo(pdo_duckdb_error_info *einfo, bool persistent)
 	einfo->line = 0;
 }
 
-int _pdo_duckdb_error(pdo_dbh_t *dbh, pdo_stmt_t *stmt, const char *msg, const char *file, int line) /* {{{ */
+static const char *pdo_duckdb_sqlstate_for_code(unsigned int code)
+{
+	switch (code) {
+		case PDO_DUCKDB_ERRCODE_CONNECT:
+			return "08000";
+		case PDO_DUCKDB_ERRCODE_SYNTAX:
+			return "42000";
+		default:
+			return "HY000";
+	}
+}
+
+int _pdo_duckdb_error_with_code(pdo_dbh_t *dbh, pdo_stmt_t *stmt, unsigned int code, const char *msg, const char *file, int line) /* {{{ */
 {
 	pdo_duckdb_db_handle *H = (pdo_duckdb_db_handle *)dbh->driver_data;
 	pdo_error_type *pdo_err = stmt ? &stmt->error_code : &dbh->error_code;
 	pdo_duckdb_error_info *einfo;
 	bool persistent = dbh->is_persistent;
 	const char *errmsg = (msg && *msg) ? msg : "DuckDB operation failed";
+	const char *sqlstate = pdo_duckdb_sqlstate_for_code(code);
 
 	if (stmt && stmt->driver_data) {
 		pdo_duckdb_stmt *S = (pdo_duckdb_stmt *)stmt->driver_data;
@@ -54,18 +67,24 @@ int _pdo_duckdb_error(pdo_dbh_t *dbh, pdo_stmt_t *stmt, const char *msg, const c
 	einfo->file = file;
 	einfo->line = line;
 
-	einfo->errcode = 1;
+	einfo->errcode = (int)code;
 	if (einfo->errmsg) {
 		pefree(einfo->errmsg, persistent);
 	}
 	einfo->errmsg = pestrdup(errmsg, persistent);
-	strncpy(*pdo_err, "HY000", sizeof(*pdo_err));
+	strncpy(*pdo_err, sqlstate, sizeof(*pdo_err));
 
 	if (!dbh->methods) {
 		pdo_throw_exception(einfo->errcode, einfo->errmsg, pdo_err);
 	}
 
 	return einfo->errcode;
+}
+/* }}} */
+
+int _pdo_duckdb_error(pdo_dbh_t *dbh, pdo_stmt_t *stmt, const char *msg, const char *file, int line) /* {{{ */
+{
+	return _pdo_duckdb_error_with_code(dbh, stmt, PDO_DUCKDB_ERRCODE_GENERAL, msg, file, line);
 }
 /* }}} */
 
@@ -192,7 +211,7 @@ static bool duckdb_handle_preparer(pdo_dbh_t *dbh, zend_string *sql, pdo_stmt_t 
 		ZSTR_VAL(sql), ZSTR_LEN(sql));
 
 	if (!pdo_duckdb_enforce_sandbox(H)) {
-		pdo_duckdb_error(dbh, "Unable to apply the open_basedir sandbox profile to DuckDB");
+		pdo_duckdb_error_code(dbh, PDO_DUCKDB_ERRCODE_SANDBOX, "Unable to apply the open_basedir sandbox profile to DuckDB");
 		return false;
 	}
 
@@ -223,7 +242,7 @@ static bool duckdb_handle_preparer(pdo_dbh_t *dbh, zend_string *sql, pdo_stmt_t 
 		/* Guard like pdo_duckdb_exec_transaction_multi(): a prepare failure that
 		 * did not populate the out-param would make duckdb_prepare_error(NULL)
 		 * abort the process. */
-		pdo_duckdb_error(dbh, S->prepared ? duckdb_prepare_error(S->prepared)
+		pdo_duckdb_error_code(dbh, PDO_DUCKDB_ERRCODE_SYNTAX, S->prepared ? duckdb_prepare_error(S->prepared)
 			: "Unable to prepare DuckDB statement");
 		if (S->prepared) {
 			duckdb_destroy_prepare(&S->prepared);
@@ -651,7 +670,7 @@ static zend_long pdo_duckdb_exec_transaction_multi(pdo_dbh_t *dbh,
 		duckdb_result result;
 
 		if (duckdb_prepare_extracted_statement(H->conn, extracted, i, &prepared) != DuckDBSuccess) {
-			pdo_duckdb_error(dbh, prepared ? duckdb_prepare_error(prepared) : "Unable to prepare DuckDB statement");
+			pdo_duckdb_error_code(dbh, PDO_DUCKDB_ERRCODE_SYNTAX, prepared ? duckdb_prepare_error(prepared) : "Unable to prepare DuckDB statement");
 			duckdb_destroy_prepare(&prepared);
 			return -1;
 		}
@@ -696,7 +715,7 @@ static zend_long duckdb_handle_doer(pdo_dbh_t *dbh, const zend_string *sql)
 	}
 
 	if (!pdo_duckdb_enforce_sandbox(H)) {
-		pdo_duckdb_error(dbh, "Unable to apply the open_basedir sandbox profile to DuckDB");
+		pdo_duckdb_error_code(dbh, PDO_DUCKDB_ERRCODE_SANDBOX, "Unable to apply the open_basedir sandbox profile to DuckDB");
 		return -1;
 	}
 
@@ -713,7 +732,7 @@ static zend_long duckdb_handle_doer(pdo_dbh_t *dbh, const zend_string *sql)
 			effects, statement_count, &verified_statement_count);
 
 		if (count == 0) {
-			pdo_duckdb_error(dbh, duckdb_extract_statements_error(extracted));
+			pdo_duckdb_error_code(dbh, PDO_DUCKDB_ERRCODE_SYNTAX, duckdb_extract_statements_error(extracted));
 			efree(effects);
 			duckdb_destroy_extracted(&extracted);
 			return -1;
@@ -783,7 +802,7 @@ static bool duckdb_simple_exec(pdo_dbh_t *dbh, const char *sql)
 	duckdb_result result;
 
 	if (!pdo_duckdb_enforce_sandbox(H)) {
-		pdo_duckdb_error(dbh, "Unable to apply the open_basedir sandbox profile to DuckDB");
+		pdo_duckdb_error_code(dbh, PDO_DUCKDB_ERRCODE_SANDBOX, "Unable to apply the open_basedir sandbox profile to DuckDB");
 		return false;
 	}
 
@@ -1046,7 +1065,9 @@ static const char *const pdo_duckdb_liveness_httpfs_resets[] = {
 	"RESET httpfs_client_implementation",
 };
 
-static bool pdo_duckdb_httpfs_is_loaded(duckdb_connection conn)
+/* Tri-state httpfs probe: 1 when loaded, 0 when not, -1 when the probe query
+ * itself failed (a sick connection, not an unloaded extension). */
+static int pdo_duckdb_httpfs_loaded_state(duckdb_connection conn)
 {
 	duckdb_result res;
 	idx_t rows;
@@ -1056,11 +1077,11 @@ static bool pdo_duckdb_httpfs_is_loaded(duckdb_connection conn)
 			"WHERE extension_name = 'httpfs' AND loaded",
 			&res) != DuckDBSuccess) {
 		duckdb_destroy_result(&res);
-		return false;
+		return -1;
 	}
 	rows = duckdb_row_count(&res);
 	duckdb_destroy_result(&res);
-	return rows > 0;
+	return rows > 0 ? 1 : 0;
 }
 
 static void pdo_duckdb_liveness_discard(pdo_dbh_t *dbh)
@@ -1074,6 +1095,10 @@ static zend_result pdo_duckdb_check_liveness(pdo_dbh_t *dbh)
 {
 	pdo_duckdb_db_handle *H = (pdo_duckdb_db_handle *)dbh->driver_data;
 	size_t i;
+	/* A failed residue reset means the connection may carry another
+	 * request's session state (or be sick); take the discard path rather
+	 * than silently reusing it. */
+	bool dirty = false;
 
 	/* Residue SQL is for a true request-boundary checkout (list-only handle).
 	 * A second live PDO wrapper (refcount > 1) may be mid-transaction; a
@@ -1082,26 +1107,41 @@ static zend_result pdo_duckdb_check_liveness(pdo_dbh_t *dbh)
 		if (!H->external_access_disabled) {
 			for (i = 0; i < sizeof(pdo_duckdb_liveness_network_resets)
 					/ sizeof(pdo_duckdb_liveness_network_resets[0]); i++) {
-				(void)pdo_duckdb_query_ok(H->conn, pdo_duckdb_liveness_network_resets[i]);
+				if (!pdo_duckdb_query_ok(H->conn, pdo_duckdb_liveness_network_resets[i])) {
+					dirty = true;
+				}
 			}
 			/* httpfs options autoload the extension on RESET if it
 			 * isn't loaded; only touch them when a prior request
 			 * already did. */
-			if (pdo_duckdb_httpfs_is_loaded(H->conn)) {
-				for (i = 0; i < sizeof(pdo_duckdb_liveness_httpfs_resets)
-						/ sizeof(pdo_duckdb_liveness_httpfs_resets[0]); i++) {
-					(void)pdo_duckdb_query_ok(H->conn, pdo_duckdb_liveness_httpfs_resets[i]);
+			{
+				int httpfs = pdo_duckdb_httpfs_loaded_state(H->conn);
+				if (httpfs < 0) {
+					dirty = true;
+				} else if (httpfs > 0) {
+					for (i = 0; i < sizeof(pdo_duckdb_liveness_httpfs_resets)
+							/ sizeof(pdo_duckdb_liveness_httpfs_resets[0]); i++) {
+						if (!pdo_duckdb_query_ok(H->conn, pdo_duckdb_liveness_httpfs_resets[i])) {
+							dirty = true;
+						}
+					}
 				}
 			}
 		}
-		/* PRAGMA form still runs after lock_configuration; StartQuery resets
-		 * the retained QUERY_NAME tree. */
-		(void)pdo_duckdb_query_ok(H->conn, "PRAGMA disable_profiling");
+	}
+
+	/* PRAGMA form still runs after lock_configuration; StartQuery resets
+	 * the retained QUERY_NAME tree. Unlike the RESETs above this is
+	 * transaction-neutral, so it runs on every checkout — including
+	 * refcount > 1 — rather than leaking one request's profiling flag
+	 * into the next holder of a shared handle. */
+	if (!pdo_duckdb_query_ok(H->conn, "PRAGMA disable_profiling")) {
+		dirty = true;
 	}
 
 	H->unbuffered = false;
 	pdo_duckdb_clear_einfo(&H->einfo, dbh->is_persistent);
-	if (!pdo_duckdb_enforce_sandbox(H)) {
+	if (dirty || !pdo_duckdb_enforce_sandbox(H)) {
 		pdo_duckdb_liveness_discard(dbh);
 		return FAILURE;
 	}
@@ -1180,9 +1220,9 @@ static char *duckdb_make_path_safe(const char *data_source, const char **deny_re
 	return fullpath;
 }
 
-/* Set one DuckDB config option, throwing a clear error (and destroying the
- * config) on an invalid name/value so the caller can fail the open. */
-static bool pdo_duckdb_set_one_config(duckdb_config *config, const char *key, const char *value)
+/* Set one DuckDB config option, recording a CONNECT-coded error (and destroying
+ * the config) on an invalid name/value so the caller can fail the open. */
+static bool pdo_duckdb_set_one_config(pdo_dbh_t *dbh, duckdb_config *config, const char *key, const char *value)
 {
 	size_t key_len = strlen(key);
 
@@ -1194,16 +1234,20 @@ static bool pdo_duckdb_set_one_config(duckdb_config *config, const char *key, co
 				sizeof("force_mbedtls_unsafe") - 1) == 0) {
 		duckdb_destroy_config(config);
 		*config = NULL;
-		zend_throw_exception_ex(php_pdo_get_exception(), 0,
-			"DuckDB configuration option \"%s\" cannot be set at connect time", key);
+		pdo_duckdb_error_code(dbh, PDO_DUCKDB_ERRCODE_CONNECT,
+			"DuckDB configuration option \"force_mbedtls_unsafe\" cannot be set at connect time");
 		return false;
 	}
 
 	if (duckdb_set_config(*config, key, value) != DuckDBSuccess) {
 		duckdb_destroy_config(config);
 		*config = NULL;
-		zend_throw_exception_ex(php_pdo_get_exception(), 0,
-			"Invalid DuckDB configuration option \"%s\"", key);
+		/* Name the key but never the value: DSN option tails and array values
+		 * can carry secrets (tests/033). */
+		char *msg;
+		spprintf(&msg, 0, "Invalid DuckDB configuration option \"%s\"", key);
+		pdo_duckdb_error_code(dbh, PDO_DUCKDB_ERRCODE_CONNECT, msg);
+		efree(msg);
 		return false;
 	}
 	return true;
@@ -1252,15 +1296,18 @@ static bool pdo_duckdb_sandbox_forbids_config_key(const char *key, size_t key_le
 
 #undef PDO_DUCKDB_CONFIG_KEY_MATCHES
 
-static bool pdo_duckdb_reject_sandbox_config_key(duckdb_config *config, const char *key, size_t key_len)
+static bool pdo_duckdb_reject_sandbox_config_key(pdo_dbh_t *dbh, duckdb_config *config, const char *key, size_t key_len)
 {
 	if (pdo_duckdb_sandbox_forbids_config_key(key, key_len)) {
 		if (*config) {
 			duckdb_destroy_config(config);
 		}
-		zend_throw_exception_ex(php_pdo_get_exception(), 0,
+		char *msg;
+		spprintf(&msg, 0,
 			"DuckDB configuration option \"%.*s\" is not allowed when open_basedir is set",
 			(int)key_len, key);
+		pdo_duckdb_error_code(dbh, PDO_DUCKDB_ERRCODE_CONNECT, msg);
+		efree(msg);
 		return false;
 	}
 	return true;
@@ -1270,7 +1317,7 @@ static bool pdo_duckdb_reject_sandbox_config_key(duckdb_config *config, const ch
  * lock_configuration here: DuckDB Configure would permanently allowlist the
  * default temp dir, and lock would prevent the post-connect escalate cleaner
  * (pdo_duckdb_disable_external_access) from clearing it. */
-static bool pdo_duckdb_apply_sandbox_config(duckdb_config *config)
+static bool pdo_duckdb_apply_sandbox_config(pdo_dbh_t *dbh, duckdb_config *config)
 {
 	static const char *const sandbox_options[][2] = {
 		{"temp_directory", ""},
@@ -1290,9 +1337,11 @@ static bool pdo_duckdb_apply_sandbox_config(duckdb_config *config)
 		if (duckdb_set_config(*config, sandbox_options[i][0], sandbox_options[i][1]) != DuckDBSuccess) {
 			duckdb_destroy_config(config);
 			*config = NULL;
-			zend_throw_exception_ex(php_pdo_get_exception(), 0,
-				"Unable to apply the open_basedir sandbox (%s) to DuckDB",
+			char *msg;
+			spprintf(&msg, 0, "Unable to apply the open_basedir sandbox (%s) to DuckDB",
 				sandbox_options[i][0]);
+			pdo_duckdb_error_code(dbh, PDO_DUCKDB_ERRCODE_CONNECT, msg);
+			efree(msg);
 			return false;
 		}
 	}
@@ -1307,7 +1356,7 @@ static const char *pdo_duckdb_open_error_message(const char *open_error)
 	return "Unable to open DuckDB database";
 }
 
-static zend_string *pdo_duckdb_config_scalar_to_string(zval *value)
+static zend_string *pdo_duckdb_config_scalar_to_string(pdo_dbh_t *dbh, zval *value)
 {
 	ZVAL_DEREF(value);
 
@@ -1322,11 +1371,15 @@ static zend_string *pdo_duckdb_config_scalar_to_string(zval *value)
 		case IS_DOUBLE:
 		case IS_STRING:
 			return zval_get_string(value);
-		default:
-			zend_throw_exception_ex(php_pdo_get_exception(), 0,
+		default: {
+			char *msg;
+			spprintf(&msg, 0,
 				"PDO::DUCKDB_ATTR_CONFIG values must be scalar or null, %s given",
 				zend_zval_type_name(value));
+			pdo_duckdb_error_code(dbh, PDO_DUCKDB_ERRCODE_CONNECT, msg);
+			efree(msg);
 			return NULL;
+		}
 	}
 }
 
@@ -1351,7 +1404,7 @@ static bool pdo_duckdb_build_config(pdo_dbh_t *dbh, const char *dsn_opts,
 #define DUCKDB_ENSURE_CONFIG() do { \
 		if (!config) { \
 			if (duckdb_create_config(&config) != DuckDBSuccess) { \
-				zend_throw_exception_ex(php_pdo_get_exception(), 0, \
+				pdo_duckdb_error_code(dbh, PDO_DUCKDB_ERRCODE_CONNECT, \
 					"Unable to allocate DuckDB configuration"); \
 				return false; \
 			} \
@@ -1368,12 +1421,12 @@ static bool pdo_duckdb_build_config(pdo_dbh_t *dbh, const char *dsn_opts,
 			char *eq = strchr(pair, '=');
 			if (eq && eq != pair) {
 				*eq = '\0';
-				if (sandbox && !pdo_duckdb_reject_sandbox_config_key(&config, pair, strlen(pair))) {
+				if (sandbox && !pdo_duckdb_reject_sandbox_config_key(dbh, &config, pair, strlen(pair))) {
 					efree(copy);
 					return false;
 				}
 				DUCKDB_ENSURE_CONFIG();
-				if (!pdo_duckdb_set_one_config(&config, pair, eq + 1)) {
+				if (!pdo_duckdb_set_one_config(dbh, &config, pair, eq + 1)) {
 					efree(copy);
 					return false;
 				}
@@ -1384,7 +1437,7 @@ static bool pdo_duckdb_build_config(pdo_dbh_t *dbh, const char *dsn_opts,
 				if (config) {
 					duckdb_destroy_config(&config);
 				}
-				zend_throw_exception_ex(php_pdo_get_exception(), 0,
+				pdo_duckdb_error_code(dbh, PDO_DUCKDB_ERRCODE_CONNECT,
 					"Malformed DuckDB DSN option (expected key=value)");
 				efree(copy);
 				return false;
@@ -1406,7 +1459,7 @@ static bool pdo_duckdb_build_config(pdo_dbh_t *dbh, const char *dsn_opts,
 				if (config) {
 					duckdb_destroy_config(&config);
 				}
-				zend_throw_exception_ex(php_pdo_get_exception(), 0,
+				pdo_duckdb_error_code(dbh, PDO_DUCKDB_ERRCODE_CONNECT,
 					"PDO::DUCKDB_ATTR_CONFIG must be an array of option => value");
 				return false;
 			}
@@ -1418,7 +1471,7 @@ static bool pdo_duckdb_build_config(pdo_dbh_t *dbh, const char *dsn_opts,
 					if (config) {
 						duckdb_destroy_config(&config);
 					}
-					zend_throw_exception_ex(php_pdo_get_exception(), 0,
+					pdo_duckdb_error_code(dbh, PDO_DUCKDB_ERRCODE_CONNECT,
 						"PDO::DUCKDB_ATTR_CONFIG keys must be option-name strings");
 					return false;
 				}
@@ -1429,11 +1482,11 @@ static bool pdo_duckdb_build_config(pdo_dbh_t *dbh, const char *dsn_opts,
 					if (config) {
 						duckdb_destroy_config(&config);
 					}
-					zend_throw_exception_ex(php_pdo_get_exception(), 0,
+					pdo_duckdb_error_code(dbh, PDO_DUCKDB_ERRCODE_CONNECT,
 						"PDO::DUCKDB_ATTR_CONFIG option names and values must not contain a NUL byte");
 					return false;
 				}
-				sval = pdo_duckdb_config_scalar_to_string(val);
+				sval = pdo_duckdb_config_scalar_to_string(dbh, val);
 				if (!sval) {
 					if (config) {
 						duckdb_destroy_config(&config);
@@ -1445,16 +1498,16 @@ static bool pdo_duckdb_build_config(pdo_dbh_t *dbh, const char *dsn_opts,
 					if (config) {
 						duckdb_destroy_config(&config);
 					}
-					zend_throw_exception_ex(php_pdo_get_exception(), 0,
+					pdo_duckdb_error_code(dbh, PDO_DUCKDB_ERRCODE_CONNECT,
 						"PDO::DUCKDB_ATTR_CONFIG option names and values must not contain a NUL byte");
 					return false;
 				}
-				if (sandbox && !pdo_duckdb_reject_sandbox_config_key(&config, ZSTR_VAL(key), ZSTR_LEN(key))) {
+				if (sandbox && !pdo_duckdb_reject_sandbox_config_key(dbh, &config, ZSTR_VAL(key), ZSTR_LEN(key))) {
 					zend_string_release(sval);
 					return false;
 				}
 				DUCKDB_ENSURE_CONFIG();
-				if (!pdo_duckdb_set_one_config(&config, ZSTR_VAL(key), ZSTR_VAL(sval))) {
+				if (!pdo_duckdb_set_one_config(dbh, &config, ZSTR_VAL(key), ZSTR_VAL(sval))) {
 					zend_string_release(sval);
 					return false;
 				}
@@ -1469,7 +1522,7 @@ static bool pdo_duckdb_build_config(pdo_dbh_t *dbh, const char *dsn_opts,
 	 * applied. */
 	if (sandbox) {
 		DUCKDB_ENSURE_CONFIG();
-		if (!pdo_duckdb_apply_sandbox_config(&config)) {
+		if (!pdo_duckdb_apply_sandbox_config(dbh, &config)) {
 			return false;
 		}
 	}
@@ -1502,7 +1555,7 @@ static int pdo_duckdb_handle_factory(pdo_dbh_t *dbh, zval *driver_options) /* {{
 	dbh->driver_data = H;
 
 	if (dbh->is_persistent && H->config_reapply_pending) {
-		zend_throw_exception_ex(php_pdo_get_exception(), 0,
+		pdo_duckdb_error_code(dbh, PDO_DUCKDB_ERRCODE_CONNECT,
 			"PDO::DUCKDB_ATTR_CONFIG cannot be used with persistent DuckDB connections");
 		goto cleanup;
 	}
@@ -1520,16 +1573,13 @@ static int pdo_duckdb_handle_factory(pdo_dbh_t *dbh, zval *driver_options) /* {{
 	display_source = path_dsn ? path_dsn : dbh->data_source;
 	path = duckdb_make_path_safe(display_source, &deny_reason);
 	if (deny_reason) {
-		zend_throw_exception_ex(php_pdo_get_exception(), 0,
-			"Cannot open DuckDB database %s: %s", display_source, deny_reason);
-		if (path_dsn) {
-			efree(path_dsn);
-		}
+		char *msg;
+		spprintf(&msg, 0, "Cannot open DuckDB database %s: %s", display_source, deny_reason);
+		pdo_duckdb_error_code(dbh, PDO_DUCKDB_ERRCODE_CONNECT, msg);
+		efree(msg);
 		goto cleanup;
 	}
-	if (path_dsn) {
-		efree(path_dsn);
-	}
+	/* path_dsn stays alive for the open_error taint check below; freed at cleanup. */
 
 	/* Open-time config: user DSN/attr options plus open_basedir open-time flags.
 	 * Fail closed — refuse to open if the config cannot be built. Full SQL
@@ -1553,7 +1603,31 @@ static int pdo_duckdb_handle_factory(pdo_dbh_t *dbh, zval *driver_options) /* {{
 		duckdb_destroy_config(&config);
 	}
 	if (open_state != DuckDBSuccess) {
-		pdo_duckdb_error(dbh, pdo_duckdb_open_error_message(open_error));
+		const char *base = pdo_duckdb_open_error_message(open_error);
+		/* Forward DuckDB's detail appended to the existing message — unless it
+		 * echoes the database path/DSN (open errors name the file, and
+		 * tests/033 requires the path hidden). NULL/empty/":memory:" needles
+		 * are never sensitive; the DSN option tail never reaches open_error
+		 * (DuckDB never sees the DSN), so path needles suffice here. */
+		bool tainted = false;
+		if (open_error && base != open_error) {
+			if (path && *path && strstr(open_error, path)) {
+				tainted = true;
+			}
+			if (!tainted && display_source && *display_source
+					&& strcmp(display_source, ":memory:") != 0
+					&& strstr(open_error, display_source)) {
+				tainted = true;
+			}
+		}
+		if (!tainted && open_error && base != open_error) {
+			char *msg;
+			spprintf(&msg, 0, "%s: %s", base, open_error);
+			pdo_duckdb_error_code(dbh, PDO_DUCKDB_ERRCODE_CONNECT, msg);
+			efree(msg);
+		} else {
+			pdo_duckdb_error_code(dbh, PDO_DUCKDB_ERRCODE_CONNECT, base);
+		}
 		if (open_error) {
 			duckdb_free(open_error);
 		}
@@ -1571,14 +1645,14 @@ static int pdo_duckdb_handle_factory(pdo_dbh_t *dbh, zval *driver_options) /* {{
 	}
 
 	if (duckdb_connect(H->db, &H->conn) != DuckDBSuccess) {
-		pdo_duckdb_error(dbh, "Unable to connect to DuckDB database");
+		pdo_duckdb_error_code(dbh, PDO_DUCKDB_ERRCODE_CONNECT, "Unable to connect to DuckDB database");
 		goto cleanup;
 	}
 
 	/* Full SQL sandbox after connect so allowlists seeded at open (e.g. default
 	 * temp for file DBs) can still be cleared before external access is locked. */
 	if (!pdo_duckdb_enforce_sandbox(H)) {
-		pdo_duckdb_error(dbh, "Unable to apply the open_basedir sandbox profile to DuckDB");
+		pdo_duckdb_error_code(dbh, PDO_DUCKDB_ERRCODE_SANDBOX, "Unable to apply the open_basedir sandbox profile to DuckDB");
 		goto cleanup;
 	}
 
@@ -1588,8 +1662,10 @@ static int pdo_duckdb_handle_factory(pdo_dbh_t *dbh, zval *driver_options) /* {{
 	ret = 1;
 
 cleanup:
+	if (path_dsn) {
+		efree(path_dsn);
+	}
 	dbh->methods = &duckdb_methods;
-
 	return ret;
 }
 /* }}} */
@@ -1651,7 +1727,7 @@ static void pdo_duckdb_table_names_impl(INTERNAL_FUNCTION_PARAMETERS)
 	 * the invariant holds unconditionally rather than relying on get_table_names
 	 * never touching the filesystem during bind. */
 	if (!pdo_duckdb_enforce_sandbox(H)) {
-		zend_throw_exception_ex(php_pdo_get_exception(), 0,
+		zend_throw_exception_ex(php_pdo_get_exception(), PDO_DUCKDB_ERRCODE_SANDBOX,
 			"PDO::duckdbTableNames(): unable to apply the open_basedir sandbox");
 		RETURN_THROWS();
 	}
@@ -1660,7 +1736,7 @@ static void pdo_duckdb_table_names_impl(INTERNAL_FUNCTION_PARAMETERS)
 	if (!list) {
 		/* NULL means the query did not parse. get_table_names exposes no error
 		 * detail; prepare() the query for the specific message. */
-		zend_throw_exception_ex(php_pdo_get_exception(), 0,
+		zend_throw_exception_ex(php_pdo_get_exception(), PDO_DUCKDB_ERRCODE_SYNTAX,
 			"PDO::duckdbTableNames(): could not parse the query");
 		RETURN_THROWS();
 	}

@@ -71,6 +71,10 @@ duckdb:/path/to/database.duckdb   # file-backed database
 duckdb::memory:                   # in-memory database
 duckdb:                           # in-memory database (empty path)
 ```
+Only the exact path `:memory:` (or an empty path) opens an in-memory database.
+Anything else is a file path — including `:memory:foo`, which creates a real
+file literally named `:memory:foo` rather than a named in-memory database. For
+a named in-memory database, attach one in SQL: `ATTACH ':memory:' AS name`.
 
 ### Connection options
 
@@ -131,12 +135,15 @@ $app->close();   // flush + finalize; further append/flush/close throw
 flushes, finalizes the native appender, and marks the PHP object closed. Relying
 on the destructor alone still closes (and warns on failure); prefer an explicit
 `close()`. Soft validation failures (`ValueError`/`TypeError` for arity, types,
-ranges) leave the appender live so you can retry the row. Hard DuckDB failures
-on append/flush/close poison the appender; later use throws `Error` and you must
-create a new one. The same hard path applies when DuckDB rejects a PHP string
-cast into a typed column (e.g. `'not-a-date'` into `DATE`, or a non-numeric string
-into `DECIMAL`): that is a native append failure, not a soft `ValueError`, so
-buffered rows for that appender are lost and you must create a new appender.
+ranges) leave the appender live so you can retry the row. String scalars bound
+for spellable non-`VARCHAR`/`BLOB` columns (e.g. `'not-a-date'` into `DATE`) are
+checked with a prepared `CAST` probe before any native append touches the row:
+a probe failure throws `PDOException("Failed to append value: …")` and likewise
+leaves the appender live. Hard DuckDB failures on append/flush/close (or a
+scalar the probe cannot spell, failing on the native path) poison the
+appender; later use throws `Error` and you must create a new one. Whenever the
+appender is poisoned, rows already flushed survive, but buffered rows that were
+never flushed are lost — `flush()` per unit to bound the loss.
 
 `appendRow(...$values)` takes one argument per column (left to right) and
 returns the appender for chaining. PHP `null`/`bool`/`int`/`float`/`string` map
@@ -248,19 +255,28 @@ $db->exec('INSTALL httpfs; LOAD httpfs;');  // downloadable extensions
   stays at DuckDB's default for the life of the handle.
 - **`lastInsertId()`** is not supported; DuckDB has no implicit rowid. Use a
   sequence and `currval()` if you need generated keys.
-- **Type mapping.** Integers up to 64-bit signed return as `int`, `BOOLEAN` as
-  PHP `int` `0`/`1` (not `bool`), `FLOAT`/`DOUBLE` as `float`, `BLOB` as a binary
-  string, and everything else (`VARCHAR`, `DATE`/`TIME`/`TIMESTAMP`, `DECIMAL`,
-  `HUGEINT`/`UBIGINT`, nested types) as its canonical string form.
+- **Type mapping.** `BOOLEAN` fetches as PHP `int` `0`/`1` (not `bool`),
+  `FLOAT`/`DOUBLE` as `float`, `BLOB` as a binary string, and everything without
+  a native mapping (`VARCHAR`, `DATE`/`TIME`/`TIMESTAMP`, `DECIMAL`,
+  `HUGEINT`/`UBIGINT`/`UHUGEINT`, nested types) as its canonical string form.
   `getColumnMeta()` reports the real DuckDB type name per column, `pdo_type`
-  matching the fetch shape (`PDO::PARAM_INT` for `BOOLEAN` and integer widths),
-  plus `precision`/`scale` for `DECIMAL`. Nested values with boolean,
+  matching the fetch shape: `PDO::PARAM_INT` for exactly `BOOLEAN`, `TINYINT`,
+  `SMALLINT`, `INTEGER`, `BIGINT`, `UTINYINT`, `USMALLINT`, `UINTEGER`;
+  `PDO::PARAM_LOB` for `BLOB`; `PDO::PARAM_STR` for everything else (so
+  `UBIGINT` and `HUGEINT` stay `PARAM_STR`), plus `precision`/`scale` for
+  `DECIMAL`. On 32-bit PHP, a `BIGINT`/`UINTEGER` value that overflows
+  `zend_long` is returned as a string rather than silently wrapping. Nested
+  values with boolean,
   integer, `DECIMAL`, `DATE`, and `UUID` leaves use a direct renderer; nested
   values whose leaves need DuckDB's quoting rules keep DuckDB's own renderer.
   Nested fetches intentionally return canonical strings, not PHP arrays; use SQL
   projections such as `unnest`, `struct_extract`, or `json` when you want a
   different PHP-facing shape.
-  `GEOMETRY` (from the spatial extension) returns its WKB bytes as a hex string;
+  `GEOMETRY` (from the spatial extension) returns its WKB bytes as an uppercase
+  hex string; nested `GEOMETRY` elements inside `LIST`/`ARRAY`/`STRUCT`/`MAP`/
+  `UNION` render the same uppercase hex per element (the C API has no geometry
+  value constructor, so containers are declared with `VARCHAR` in place of
+  `GEOMETRY`);
   call `ST_AsText()` in SQL if you want WKT. `TIMESTAMPTZ` native fetches render
   the instant in UTC (`+00`), at the top level and as a nested leaf; select
   `CAST(col AS VARCHAR)` if you need DuckDB's session-`TimeZone` rendering.
@@ -284,6 +300,59 @@ $db->exec('INSTALL httpfs; LOAD httpfs;');  // downloadable extensions
   Persistent connections reset `DUCKDB_ATTR_UNBUFFERED` to false on every checkout
   (`check_liveness`). Pass it again in the constructor options or call
   `setAttribute` after each `new PDO(..., [PDO::ATTR_PERSISTENT => true])`.
+
+## Errors and exceptions
+
+Driver errors report a numeric driver code (`errorInfo()[1]`) alongside the
+SQLSTATE (`errorInfo()[0]`):
+
+| driver code | SQLSTATE | meaning                                                                |
+|-------------|----------|------------------------------------------------------------------------|
+| 1           | `HY000`  | general errors (the default)                                           |
+| 2           | `08000`  | connection and open failures                                           |
+| 3           | `42000`  | SQL syntax and prepare failures                                        |
+| 4           | `HY000`  | `open_basedir` sandbox denials (the denial message text is unchanged)  |
+| 5           | `HY000`  | streaming / fetch errors                                               |
+
+Code 4 covers the driver's own sandbox refusals (fail-closed re-narrowing and
+rejected sandbox-bypass options). When DuckDB itself refuses the work because
+the sandbox disabled external access (e.g. `read_csv()` failing at prepare
+with an access error), the failure surfaces at the phase that reported it —
+code 3 for prepare failures — with the engine's message intact.
+
+Whether a failure throws depends on the entry point and `PDO::ATTR_ERRMODE`:
+
+| entry point | NUL byte in input | failure mode |
+|-------------|-------------------|--------------|
+| `query()` / `prepare()` / `exec()` | rejected (`SQL statement contains a NUL byte`) | ERRMODE-gated: `PDOException` under `ERRMODE_EXCEPTION`, otherwise warning/`false` |
+| `quote()` | rejected (`DuckDB PDO::quote does not support null bytes`) | ERRMODE-gated, same as above |
+| `PDO::DUCKDB_ATTR_CONFIG` keys/values | rejected (`… must not contain a NUL byte`) | always `PDOException`, raised while opening the connection |
+| `duckdbTableNames()` query; `duckdbAppender()` table, schema, and column names | rejected | always `ValueError`, regardless of ERRMODE |
+
+Other contracts:
+
+- **Closed or poisoned appender.** `appendRow()`, `flush()`, and `close()` on a
+  closed or poisoned appender throw `Error("Pdo\Duckdb\Appender is closed")`.
+  `close()` is not idempotent: closing an already-closed appender throws the
+  same `Error`. A failed native append/flush/close poisons the appender (later
+  use throws `Error`); rows already flushed survive, but buffered rows that
+  were never flushed are lost — `flush()` per unit to bound the loss. Probe
+  rejections (`Failed to append value: …`) and soft validation failures do not
+  poison.
+- **`VARIANT`.** Fetching a non-NULL `VARIANT` cell is ERRMODE-gated: under
+  `ERRMODE_EXCEPTION` it throws, otherwise the cell reads back as PHP `null`.
+  A genuine SQL NULL also reads back as `null`, so use `errorInfo()` to tell
+  them apart: it is set after a `VARIANT` failure and clear for a real NULL.
+  Cast to `VARCHAR` in SQL to fetch the value.
+- **`getAttribute()`.** Returns the library version for
+  `ATTR_CLIENT_VERSION`/`ATTR_SERVER_VERSION`, `"duckdb"` for
+  `ATTR_DRIVER_NAME`, and the streaming flag for
+  `PDO::DUCKDB_ATTR_UNBUFFERED`. `PDO::DUCKDB_ATTR_CONFIG` and
+  `PDO::ATTR_AUTOCOMMIT` are not gettable.
+- **`duckdbTableNames()`.** An unparseable query throws `PDOException` with a
+  detail-free message (`could not parse the query`) — `prepare()` the query
+  for the engine's specific error. DML statements yield `[]`; DDL behavior is
+  unspecified.
 
 ## Status
 

@@ -25,10 +25,12 @@ try {
     $st->execute([':a' => 'second']);
     echo "BAD: reused stale binding: " . $st->fetchColumn() . "\n";
 } catch (\PDOException $e) {
-    var_dump(str_contains($e->getMessage(), 'parameters: 2')
-        || str_contains($e->getMessage(), 'not provided')
-        || str_contains($e->getMessage(), 'Values were not'));
+    var_dump(str_contains($e->getMessage(), 'Values were not provided for the following prepared statement parameters: 2'));
 }
+
+// A failed re-execute leaves no row behind: fetch() is false, and the
+// handle stays usable (positive control below re-binds both params).
+var_dump($st->fetch(PDO::FETCH_ASSOC));
 
 // Binding both again still works (latch re-armed for each execute).
 $st->execute([':a' => 'x', ':b' => 'y']);
@@ -38,4 +40,5 @@ echo "$row[a],$row[b]\n";
 --EXPECT--
 first,secret
 bool(true)
+bool(false)
 x,y
