@@ -1719,6 +1719,7 @@ static bool pdo_duckdb_substitute_geometry(duckdb_logical_type lt, duckdb_logica
 			names[i] = duckdb_struct_type_child_name(lt, i);
 			if (pdo_duckdb_substitute_geometry(child, &sub)) {
 				members[i] = sub;
+				duckdb_destroy_logical_type(&child);
 				changed = true;
 			} else {
 				members[i] = child;
@@ -1731,8 +1732,12 @@ static bool pdo_duckdb_substitute_geometry(duckdb_logical_type lt, duckdb_logica
 			duckdb_destroy_logical_type(&members[i]);
 			duckdb_free((void *)names[i]);
 		}
-		efree(members);
-		efree(names);
+		if (members) {
+			efree(members);
+		}
+		if (names) {
+			efree(names);
+		}
 		return changed;
 	}
 	if (tid == DUCKDB_TYPE_MAP) {
@@ -1775,6 +1780,7 @@ static bool pdo_duckdb_substitute_geometry(duckdb_logical_type lt, duckdb_logica
 			names[i] = duckdb_union_type_member_name(lt, i);
 			if (pdo_duckdb_substitute_geometry(member, &sub)) {
 				members[i] = sub;
+				duckdb_destroy_logical_type(&member);
 				changed = true;
 			} else {
 				members[i] = member;
@@ -1787,8 +1793,12 @@ static bool pdo_duckdb_substitute_geometry(duckdb_logical_type lt, duckdb_logica
 			duckdb_destroy_logical_type(&members[i]);
 			duckdb_free((void *)names[i]);
 		}
-		efree(members);
-		efree(names);
+		if (members) {
+			efree(members);
+		}
+		if (names) {
+			efree(names);
+		}
 		return changed;
 	}
 	return false;
