@@ -21,7 +21,6 @@ unset($a, $db);
 gc_collect_cycles();
 var_dump($w->get() === null);
 
-// not serializable
 $db2 = connect();
 $db2->exec('CREATE TABLE t (i INTEGER)');
 $app = $db2->duckdbAppender('t');
@@ -32,7 +31,6 @@ try {
     var_dump(str_contains($e->getMessage(), 'not allowed'));
 }
 
-// strict properties (no dynamic props)
 try {
     $app->nope = 1;
     echo "BAD: dynamic property allowed\n";

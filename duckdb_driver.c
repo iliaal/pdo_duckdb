@@ -199,9 +199,7 @@ static bool duckdb_handle_preparer(pdo_dbh_t *dbh, zend_string *sql, pdo_stmt_t 
 		return false;
 	}
 
-	/* duckdb_prepare() takes a NUL-terminated const char*, so an embedded NUL
-	 * would silently truncate the statement (e.g. "SELECT 1\0DROP ..." prepares
-	 * as "SELECT 1"). Reject it rather than run a different query than intended. */
+	/* DuckDB's C-string API would silently truncate embedded NULs. */
 	if (zend_str_has_nul_byte(sql)) {
 		pdo_duckdb_error(dbh, "SQL statement contains a NUL byte");
 		return false;
@@ -220,16 +218,13 @@ static bool duckdb_handle_preparer(pdo_dbh_t *dbh, zend_string *sql, pdo_stmt_t 
 	S->transaction_effect = transaction_effect;
 	stmt->driver_data = S;
 	stmt->methods = &duckdb_stmt_methods;
-	/* DuckDB understands $1/$2 numbered parameters. Declaring NAMED support with
-	 * the "$%d" rewrite template makes PDO rewrite BOTH positional '?' and named
-	 * ':name' placeholders to $N — and crucially coalesces a repeated ':name'
-	 * onto a single $N (the pgsql model), so `WHERE a = :x OR b = :x` works. */
+	/* NAMED coalesces repeated :name placeholders into one DuckDB $N binding;
+	 * PDO also rewrites positional ? placeholders through this template. */
 	stmt->supports_placeholders = PDO_PLACEHOLDER_NAMED;
 	stmt->named_rewrite_template = "$%d";
 
 	parse_ret = pdo_parse_params(stmt, sql, &rewritten);
 	if (parse_ret == 1) {
-		/* the query was rewritten (e.g. :name -> ?) */
 		sql = rewritten;
 	} else if (parse_ret == -1) {
 		/* parse failure; pdo_parse_params already set stmt->error_code */
@@ -831,7 +826,6 @@ static bool duckdb_handle_rollback(pdo_dbh_t *dbh)
 	return duckdb_simple_exec(dbh, "ROLLBACK");
 }
 
-/* Attr truthiness: unlike zend_is_true, empty string and "0" are false. */
 static bool pdo_duckdb_zval_is_true(zval *val)
 {
 	ZVAL_DEREF(val);
@@ -856,12 +850,7 @@ static bool pdo_duckdb_set_attr(pdo_dbh_t *dbh, zend_long attr, zval *val)
 {
 	switch (attr) {
 		case PDO_ATTR_AUTOCOMMIT:
-			/* DuckDB is autocommit-by-default with no session-level toggle;
-			 * explicit transactions go through begin/commit/rollback. Accept a
-			 * request to keep autocommit on (the real behaviour), but reject
-			 * turning it off rather than silently ignoring it — accepting false
-			 * would mislead the caller into thinking statements are batched into
-			 * a transaction when each still commits on its own. */
+			/* DuckDB has no session-level autocommit toggle. */
 			if (pdo_duckdb_zval_is_true(val)) {
 				return true;
 			}
@@ -881,11 +870,7 @@ static bool pdo_duckdb_set_attr(pdo_dbh_t *dbh, zend_long attr, zval *val)
 		case PDO_DUCKDB_ATTR_CONFIG:
 		{
 			pdo_duckdb_db_handle *H = (pdo_duckdb_db_handle *)dbh->driver_data;
-			/* Consumed at open time by the handle factory (DuckDB config is
-			 * open-time only). PDO core re-applies constructor driver-options
-			 * through set_attribute after the factory; accept that one reapply,
-			 * then reject runtime attempts instead of pretending to reconfigure
-			 * an already-open database. */
+			/* PDO reapplies constructor options once; DuckDB config is open-time only. */
 			if (H->config_reapply_pending) {
 				H->config_reapply_pending = false;
 				return true;
@@ -1171,9 +1156,7 @@ static int pdo_duckdb_get_attribute(pdo_dbh_t *dbh, zend_long attr, zval *return
 	return 1;
 }
 
-/* Designated initializers: order-independent and only sets the slots we
- * implement. Fields absent on older PDO (e.g. scanner, added after 8.3) are
- * simply not named, so the table compiles cleanly on every supported PHP. */
+/* Omit newer PDO fields so this table also builds on older PHP versions. */
 static const struct pdo_dbh_methods duckdb_methods = {
 	.closer = duckdb_handle_closer,
 	.preparer = duckdb_handle_preparer,
@@ -1411,7 +1394,6 @@ static bool pdo_duckdb_build_config(pdo_dbh_t *dbh, const char *dsn_opts,
 		} \
 	} while (0)
 
-	/* 1. DSN key=value pairs */
 	if (dsn_opts && *dsn_opts) {
 		char *copy = estrdup(dsn_opts);
 		char *save = NULL;
@@ -1447,7 +1429,6 @@ static bool pdo_duckdb_build_config(pdo_dbh_t *dbh, const char *dsn_opts,
 		efree(copy);
 	}
 
-	/* 2. PDO::DUCKDB_ATTR_CONFIG => [ "key" => value, ... ] */
 	if (driver_options && Z_TYPE_P(driver_options) == IS_ARRAY) {
 		zval *cfg = zend_hash_index_find(Z_ARRVAL_P(driver_options), PDO_DUCKDB_ATTR_CONFIG);
 		if (cfg) {
@@ -1560,10 +1541,6 @@ static int pdo_duckdb_handle_factory(pdo_dbh_t *dbh, zval *driver_options) /* {{
 		goto cleanup;
 	}
 
-	/* Split the DSN at the first ';': the path is the part before it, and any
-	 * "key=value;..." tail is DuckDB config (handled by pdo_duckdb_build_config).
-	 * ":memory:" and bare file paths contain no ';', so existing DSNs are
-	 * unaffected. */
 	semi = strchr(dbh->data_source, ';');
 	if (semi) {
 		path_dsn = estrndup(dbh->data_source, semi - dbh->data_source);
@@ -1590,7 +1567,6 @@ static int pdo_duckdb_handle_factory(pdo_dbh_t *dbh, zval *driver_options) /* {{
 		}
 		goto cleanup;  /* exception already thrown */
 	}
-	/* Carry an opt-in unbuffered request through to statements on this handle. */
 	if (driver_options && Z_TYPE_P(driver_options) == IS_ARRAY) {
 		zval *unbuf = zend_hash_index_find(Z_ARRVAL_P(driver_options), PDO_DUCKDB_ATTR_UNBUFFERED);
 		if (unbuf) {
@@ -1722,10 +1698,7 @@ static void pdo_duckdb_table_names_impl(INTERNAL_FUNCTION_PARAMETERS)
 		RETURN_THROWS();
 	}
 
-	/* get_table_names parses and catalog-binds the query, so treat it as a SQL
-	 * entry point: latch the open_basedir sandbox first (one-way, idempotent) so
-	 * the invariant holds unconditionally rather than relying on get_table_names
-	 * never touching the filesystem during bind. */
+	/* Sandbox catalog binding too; absence of execution does not guarantee no file access. */
 	if (!pdo_duckdb_enforce_sandbox(H)) {
 		zend_throw_exception_ex(php_pdo_get_exception(), PDO_DUCKDB_ERRCODE_SANDBOX,
 			"PDO::duckdbTableNames(): unable to apply the open_basedir sandbox");

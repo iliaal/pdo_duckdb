@@ -7,14 +7,8 @@
 #   - pdo_duckdb built with -fsanitize=address against that PHP.
 #   - libduckdb reachable (DUCKDB_PREFIX/lib).
 #
-# Why the LD_PRELOAD dance: the prebuilt libduckdb links *shared* libstdc++ and
-# throws C++ exceptions internally during ordinary query binding
-# (LogicalType::NormalizeType). ASan's __cxa_throw interceptor resolves the real
-# __cxa_throw lazily; if libstdc++/libasan are not loaded first it stays NULL and
-# ASan aborts ("AddressSanitizer CHECK failed: real___cxa_throw != 0") on the
-# first internal DuckDB exception -- which looks like a crash but is purely a
-# C++-runtime load-order issue, not a driver bug. Preloading libasan + libstdc++
-# fixes it.
+# Preload libasan and libstdc++ so ASan resolves __cxa_throw before DuckDB's
+# first internal C++ exception; otherwise the interceptor aborts.
 #
 # Usage:
 #   PHP=/path/to/asan/bin/php \
@@ -35,9 +29,7 @@ if [ -z "$libasan" ]; then
     echo "error: $PHP is not linked against libasan (not an ASan build)" >&2
     exit 1
 fi
-# libstdc++ is pulled in by libduckdb, not by php directly -- resolve it from
-# libduckdb's own deps, falling back to the system loader cache. It must be
-# preloaded alongside libasan or ASan's __cxa_throw interceptor stays NULL.
+# libstdc++ is a dependency of libduckdb, not PHP.
 libstdcpp=$(ldd "$DUCKDB_PREFIX/lib/libduckdb.so" 2>/dev/null | awk '/libstdc\+\+/ {print $3; exit}')
 [ -z "$libstdcpp" ] && libstdcpp=$(ldconfig -p 2>/dev/null | awk '/libstdc\+\+\.so\.6/ {print $NF; exit}')
 
@@ -48,9 +40,7 @@ export ASAN_OPTIONS="${ASAN_OPTIONS:-detect_leaks=1:abort_on_error=1}"
 # spatial extension's bundled sqlite3/GDAL) so a local run matches the ASan job.
 SUPP="$(pwd)/.github/lsan-suppressions.txt"
 [ -f "$SUPP" ] && export LSAN_OPTIONS="${LSAN_OPTIONS:-suppressions=$SUPP:print_suppressions=0}"
-# Disable ZendMM so emalloc/efree hit the real allocator: otherwise ASan can't
-# see a use-after-efree (ZendMM pools the freed block), and such bugs slip past
-# locally only to fail in CI's USE_ZEND_ALLOC=0 ASan build.
+# Bypass ZendMM's pools so ASan can detect use-after-efree.
 export USE_ZEND_ALLOC=0
 
 echo "PHP=$PHP"

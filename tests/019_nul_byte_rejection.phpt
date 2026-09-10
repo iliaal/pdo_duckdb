@@ -19,23 +19,18 @@ $nul = "SELECT 1\0 INVALID";
 try { $db->query($nul); echo "BAD: query truncated+ran\n"; }
 catch (\PDOException $e) { var_dump(str_contains($e->getMessage(), 'NUL byte')); }
 
-// prepare()
 try { $db->prepare($nul); echo "BAD: prepare truncated+ran\n"; }
 catch (\PDOException $e) { var_dump(str_contains($e->getMessage(), 'NUL byte')); }
 
-// exec()
 try { $db->exec($nul); echo "BAD: exec truncated+ran\n"; }
 catch (\PDOException $e) { var_dump(str_contains($e->getMessage(), 'NUL byte')); }
 
-// appender table name
 try { $db->duckdbAppender("t\0bad"); echo "BAD: appender table truncated\n"; }
 catch (\ValueError $e) { var_dump(str_contains($e->getMessage(), 'NUL byte')); }
 
-// appender schema name
 try { $db->duckdbAppender('t', "main\0bad"); echo "BAD: appender schema truncated\n"; }
 catch (\ValueError $e) { var_dump(str_contains($e->getMessage(), 'NUL byte')); }
 
-// A normal statement still works.
 var_dump((int) $db->query('SELECT 1')->fetchColumn());
 ?>
 --EXPECT--

@@ -34,20 +34,11 @@
 static pdo_duckdb_nested_render_type *pdo_duckdb_nested_render_type_build(
 	duckdb_type tid, duckdb_logical_type lt, bool owns_lt);
 static void pdo_duckdb_nested_render_type_destroy(pdo_duckdb_nested_render_type *type);
-/* LOB cap (CR-005): PARAM_LOB streams larger than this fail the bind. */
 #define PDO_DUCKDB_LOB_MAX_BYTES ((size_t)67108864)
 
-/* Per-chunk column cache (CR-001). fetch() (re)loads it whenever a chunk is
- * pulled; get_col() indexes it instead of calling
- * duckdb_data_chunk_get_column_count/get_vector and
- * duckdb_vector_get_validity/get_data per cell. Thread-local, so statements
- * on different threads never share it. The entry is published for a chunk
- * only after every slot is filled, and invalidated whenever that chunk is
- * destroyed (DuckDB may reuse the address for a later chunk). Buffers are
- * malloc'd (they outlive a request) and grow-only. Callers always revalidate
- * the entry against S->chunk before indexing it, and fetch() repopulates on
- * every load, so a stale entry can only trigger a best-effort refresh, never
- * a wrong read. */
+/* Avoid per-cell vector lookups. Publish only complete entries; invalidate on
+ * chunk destruction because DuckDB can reuse addresses. Readers check S->chunk,
+ * and fetch repopulates on every load. TLS buffers use malloc and grow on demand. */
 typedef struct {
 	duckdb_data_chunk chunk;	/* identity key; NULL when empty */
 	idx_t ncols;			/* column count at load time */
@@ -108,14 +99,9 @@ static bool pdo_duckdb_chunk_cache_load(pdo_duckdb_stmt *S)
 	return true;
 }
 
-/* Per-result-column scalar cache (CR-009). Built in cache_columns() at
- * execute time from the already-cached logical types: DECIMAL width, scale
- * and internal type plus interned ENUM dictionary strings, so per-cell
- * fetches skip the per-cell decimal/enum metadata calls and the per-cell
- * duckdb_enum_dictionary_value malloc/free. Single entry keyed by owning
- * statement; a statement whose entry was evicted (or never built) falls back
- * to the generic logical-type path with identical output. ENUM strings are
- * malloc'd copies, never zend_string: the entry outlives a request. */
+/* Cache DECIMAL metadata and ENUM labels to avoid per-cell C-API allocations.
+ * One statement owns the entry; evicted statements use the generic renderer.
+ * ENUM labels use malloc because the TLS storage can outlive a request. */
 typedef struct {
 	bool is_decimal;
 	uint8_t dec_width;
@@ -189,12 +175,8 @@ static pdo_duckdb_col_aux *pdo_duckdb_col_aux_for(pdo_duckdb_stmt *S, idx_t coln
 	return aux;
 }
 
-/* Request/process shutdown cleanup for the TLS caches above. The index
- * buffers are grow-only and malloc'd (they outlive a request), so without
- * this they are still reachable at thread exit and trip LSan. Safe to call
- * any time: every user revalidates (chunk key, aux owner) and falls back to
- * direct reads/generic rendering on a miss, and a later request simply
- * regrows the buffers. Wired by the module RSHUTDOWN/MSHUTDOWN. */
+/* Release malloc-backed TLS buffers at shutdown. Safe between reads: callers
+ * revalidate cache ownership and fall back to direct reads on a miss. */
 void pdo_duckdb_tls_caches_shutdown(void)
 {
 	pdo_duckdb_chunk_cache *c = &pdo_duckdb_tls_chunk_cache;
@@ -521,13 +503,8 @@ static bool pdo_duckdb_decimal_meta_ok(uint8_t width, uint8_t scale)
 	return width >= 1 && width <= 38 && scale <= width;
 }
 
-/* Build the CR-009 per-column cache from the already-cached logical types.
- * DECIMAL columns remember width/scale/internal-type (validated once here so
- * per-cell fetches do no C-API meta calls); ENUM columns intern the whole
- * dictionary (malloc'd copies freed with the entry) so per-cell fetches are
- * an index, a bounds check and a copy. Anything unexpected (bad meta,
- * unknown internal type, allocation failure) simply leaves the column
- * unflagged and the generic logical-type path renders it as before. */
+/* Invalid metadata or allocation failure leaves the column unflagged so the
+ * generic renderer handles it. */
 static void pdo_duckdb_stmt_cache_col_aux(pdo_duckdb_stmt *S)
 {
 	pdo_duckdb_col_aux_cache *a = &pdo_duckdb_tls_col_aux;
@@ -678,11 +655,6 @@ static duckdb_value pdo_duckdb_decimal_value(duckdb_logical_type lt, void *data,
 	return duckdb_create_decimal(d);
 }
 
-/* Shared decimal-point placement (CR-009): renders already-formatted magnitude
- * digits with the type's width/scale, including DuckDB's leading-zero rule
- * (the integer-part '0' is printed only when width > scale). Logic moved
- * verbatim out of the monolithic renderer so the 128-bit and 64-bit
- * magnitude paths share it. */
 static zend_string *pdo_duckdb_decimal_digits_to_string(const char *digits, size_t len, bool neg, uint8_t width, uint8_t scale)
 {
 	char out[43];
@@ -816,10 +788,7 @@ static uint64_t pdo_duckdb_abs_i64(int64_t v)
 	return v < 0 ? ((uint64_t) -(v + 1)) + 1 : (uint64_t)v;
 }
 
-/* 64-bit decimal magnitude path (CR-009): SMALLINT/INTEGER/BIGINT-internal
- * decimals always fit an int64, so they render through format_u64 and never
- * touch 128-bit division (nor the no-INT128 fallback bit loop). Output is
- * identical: the magnitude digits feed the same shared placement above. */
+/* Avoid 128-bit division for magnitudes that fit in 64 bits. */
 static zend_string *pdo_duckdb_decimal_to_string_i64(int64_t value, uint8_t width, uint8_t scale)
 {
 	char digits[20];
@@ -829,10 +798,7 @@ static zend_string *pdo_duckdb_decimal_to_string_i64(int64_t value, uint8_t widt
 	return pdo_duckdb_decimal_digits_to_string(digits, len, neg, width, scale);
 }
 
-/* Top-level DECIMAL cell from the CR-009 column cache: no per-cell
- * duckdb_decimal_width/scale/internal_type calls, 64-bit magnitudes without
- * 128-bit division. HUGEINT-internal magnitudes that truly exceed 64 bits
- * take the 128-bit formatter. Meta was validated at cache time. */
+/* Column metadata was validated when cached. */
 static bool pdo_duckdb_cached_decimal_to_zval(const pdo_duckdb_col_aux *aux, void *data, idx_t row, zval *result)
 {
 	switch (aux->dec_internal) {
@@ -878,10 +844,7 @@ static bool pdo_duckdb_cached_decimal_to_zval(const pdo_duckdb_col_aux *aux, voi
 	}
 }
 
-/* Top-level ENUM cell from the CR-009 interned dictionary: the index width
- * was cached, the label is a bounds-checked copy. Out-of-range indexes (only
- * from a corrupt file) return false so the generic path renders SQL NULL as
- * before. */
+/* Invalid indexes fall back to the generic renderer's SQL NULL. */
 static bool pdo_duckdb_cached_enum_to_zval(const pdo_duckdb_col_aux *aux, void *data, idx_t row, zval *result)
 {
 	uint64_t idx;
@@ -1220,13 +1183,7 @@ static void pdo_duckdb_smart_append_escaped_varchar(smart_str *out, const char *
 	}
 }
 
-/* Nested FLOAT/DOUBLE leaf (CR-002): the engine renders floats with
- * duckdb_fmt shortest-round-trip ("1", "2.5", "1e+100", "inf"/"-inf"/"nan";
- * see the engine's nan_cast/infinity tests), which has no cheap exact
- * reimplementation in C. Render through the engine's scalar primitive instead
- * of the recursive cell_to_value_typed reconstruct: byte-identical by
- * construction (both go through StringCast::Operation(float/double)), minus
- * the recursion and logical-type handling. */
+/* Use DuckDB's scalar renderer to preserve its exact float formatting. */
 static bool pdo_duckdb_nested_float_to_smart_str(duckdb_type tid, void *data, idx_t row, smart_str *out)
 {
 	duckdb_value v = tid == DUCKDB_TYPE_FLOAT
@@ -1841,9 +1798,6 @@ static duckdb_value pdo_duckdb_cell_to_value_typed(duckdb_vector vec, idx_t row,
 		case DUCKDB_TYPE_TIMESTAMP: ret = duckdb_create_timestamp(((duckdb_timestamp *)data)[row]); break;
 		case DUCKDB_TYPE_TIMESTAMP_TZ: ret = duckdb_create_timestamp_tz(((duckdb_timestamp *)data)[row]); break;
 		case DUCKDB_TYPE_INTERVAL:  ret = duckdb_create_interval(((duckdb_interval *)data)[row]); break;
-		/* Sub-/super-second precision variants store a single int64 (seconds /
-		 * millis / nanos since the epoch, nanos since midnight). Without these the
-		 * default branch would render them as a silent SQL NULL. */
 		case DUCKDB_TYPE_TIMESTAMP_S: {
 			duckdb_timestamp_s t; t.seconds = ((int64_t *)data)[row];
 			ret = duckdb_create_timestamp_s(t); break;
@@ -2181,7 +2135,6 @@ static int pdo_duckdb_stmt_fetch(pdo_stmt_t *stmt,
 		return 0;
 	}
 
-	/* Advance to the next non-empty chunk. */
 	for (;;) {
 		if (S->chunk) {
 			pdo_duckdb_chunk_cache_invalidate(S->chunk);
@@ -2202,7 +2155,6 @@ static int pdo_duckdb_stmt_fetch(pdo_stmt_t *stmt,
 			S->done = true;
 			return 0;
 		}
-		/* Load the per-chunk column cache (CR-001) for the new chunk. */
 		pdo_duckdb_chunk_cache_load(S);
 		S->chunk_size = duckdb_data_chunk_get_size(S->chunk);
 		S->cur = 0;

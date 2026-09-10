@@ -30,10 +30,8 @@ echo 'fetch_driver=' . var_export($info[1], true) . "\n";
 
 $db->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
 
-// The handle is reusable right after the mid-stream failure ...
 echo $db->query('SELECT 7')->fetchColumn(), "\n";
 
-// ... and streaming DML still reports affected rows.
 $db->exec('CREATE TABLE t (i INTEGER)');
 $ins = $db->prepare('INSERT INTO t VALUES (1), (2), (3)');
 $ins->execute();

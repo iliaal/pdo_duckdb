@@ -17,7 +17,6 @@ var_dump(count($rows));
 var_dump($rows[0]);
 var_dump($rows[9999]);
 
-// running sum sanity check over the whole set
 var_dump(array_sum($rows));
 ?>
 --EXPECT--

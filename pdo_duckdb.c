@@ -59,9 +59,7 @@ PHP_MINIT_FUNCTION(pdo_duckdb)
 		return FAILURE;
 	}
 
-	/* Driver-specific attributes as PDO::DUCKDB_* constants. Declared on the base
-	 * PDO class (not the 8.4+ Pdo\Duckdb subclass) so they resolve on the 8.1
-	 * floor too, matching how the other driver methods stay cross-version. */
+	/* Base-PDO constants also work before the PHP 8.4 driver subclass API. */
 	pdo_ce = php_pdo_get_dbh_ce();
 	zend_declare_class_constant_long(pdo_ce,
 		ZEND_STRL("DUCKDB_ATTR_CONFIG"), PDO_DUCKDB_ATTR_CONFIG);

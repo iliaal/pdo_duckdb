@@ -12,10 +12,8 @@ function connect($dsn = 'duckdb::memory:') {
 $db = connect();
 $db->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
 
-// Autocommit on is DuckDB's real behaviour -> accepted.
 var_dump($db->setAttribute(PDO::ATTR_AUTOCOMMIT, true));
 
-// Turning autocommit off is unsupported -> rejected, not silently swallowed.
 try {
     $db->setAttribute(PDO::ATTR_AUTOCOMMIT, false);
     echo "BAD: autocommit=false accepted\n";
@@ -23,14 +21,12 @@ try {
     var_dump(str_contains($e->getMessage(), 'does not support disabling autocommit'));
 }
 
-// Explicit transactions still work regardless.
 $db->exec('CREATE TABLE t (i INTEGER)');
 $db->beginTransaction();
 $db->exec('INSERT INTO t VALUES (1), (2)');
 $db->commit();
 var_dump((int) $db->query('SELECT count(*) FROM t')->fetchColumn());
 
-// autocommit=true as a constructor option must not raise (no IM001).
 try {
     new PDO('duckdb::memory:', null, null, [PDO::ATTR_AUTOCOMMIT => true]);
     echo "ctor autocommit=true: ok\n";

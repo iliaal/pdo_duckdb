@@ -21,7 +21,6 @@ var_dump($got === $payload);
 var_dump(bin2hex($got));
 var_dump(strlen($got));
 
-// empty blob
 $db->exec("INSERT INTO b VALUES (2, ''::BLOB)");
 $empty = $db->query("SELECT data FROM b WHERE id = 2")->fetchColumn();
 var_dump($empty);

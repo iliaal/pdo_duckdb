@@ -11,19 +11,15 @@ $db = PHP_VERSION_ID >= 80400 ? PDO::connect('duckdb::memory:') : new PDO('duckd
 $db->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
 $db->exec("CREATE SCHEMA s; CREATE TABLE s.orders(id INT); CREATE TABLE users(id INT);");
 
-// unqualified
 var_dump($db->duckdbTableNames("SELECT * FROM users u JOIN s.orders o ON u.id = o.id"));
 
-// qualified: non-default schema prefixed, alias stripped
 var_dump($db->duckdbTableNames("SELECT * FROM users u JOIN s.orders o ON u.id = o.id", true));
 
 // CTE name is not a table
 var_dump($db->duckdbTableNames("WITH c AS (SELECT 1) SELECT * FROM c, users"));
 
-// a query referencing no table
 var_dump($db->duckdbTableNames("SELECT 1 + 1"));
 
-// unparseable query throws
 try {
     $db->duckdbTableNames("SELECT FROM )(");
     echo "no throw\n";
@@ -31,7 +27,6 @@ try {
     echo "PDOException: ", $e->getMessage(), "\n";
 }
 
-// embedded NUL is rejected
 try {
     $db->duckdbTableNames("SELECT * FROM users\0; DROP TABLE users");
     echo "no throw\n";

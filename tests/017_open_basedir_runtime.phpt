@@ -27,7 +27,6 @@ try {
     var_dump(str_contains($e->getMessage(), 'disabled by configuration'));
 }
 
-// Plain SQL still works.
 var_dump((int) $db->query('SELECT 42')->fetchColumn());
 ?>
 --EXPECT--

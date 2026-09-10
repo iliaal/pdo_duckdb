@@ -55,13 +55,8 @@ static void pdo_duckdb_appender_warning(duckdb_appender ap, const char *what)
 		duckdb_destroy_error_data(&ed);
 	}
 }
-/* Per-column nested descriptors cached at appender creation (CR-003). Mirrors
- * the fetch-side col renderers (pdo_duckdb_nested_render_type): struct field
- * names and child logical types (+ ARRAY size) are resolved once, and
- * build_value reuses them instead of issuing duckdb_struct/list/array/map
- * child queries per row. Scalar columns hold a leaf borrowing col_types[i]
- * (owns_logical_type false). Names come from duckdb_struct_type_child_name()
- * and are duckdb_free'd at destroy, exactly like the fetch side. */
+/* Cache nested metadata once per appender. Scalar leaves borrow col_types[i];
+ * child names use DuckDB's allocator. */
 static void pdo_duckdb_appender_desc_destroy(pdo_duckdb_nested_render_type *t)
 {
 	idx_t i;
@@ -136,12 +131,8 @@ static pdo_duckdb_nested_render_type *pdo_duckdb_appender_desc_build(duckdb_type
 	}
 }
 
-/* SQL spelling of scalar target types for the pre-append CAST probe (CR-007).
- * Exact spellings matter (a wider probe could pass a value the append rejects
- * or vice versa), so DECIMAL carries its width/scale. VARCHAR/BLOB need no
- * probe (their appends don't cast), and types with no stable spelling (ENUM
- * members, UNION, exotic) return false and keep the legacy fail-at-append
- * path. A rejected spelling at prepare time also falls back (see below). */
+/* CAST probes must match the exact target type, including DECIMAL width/scale.
+ * Types without a probe retain native append-time validation. */
 static bool pdo_duckdb_appender_probe_sql(duckdb_type tid, duckdb_logical_type lt, char **out_sql)
 {
 	const char *kw = NULL;
@@ -192,8 +183,7 @@ static duckdb_prepared_statement pdo_duckdb_appender_prepare_probe(duckdb_connec
 		return NULL;
 	}
 	if (duckdb_prepare(conn, sql, &probe) != DuckDBSuccess) {
-		/* Unspellable after all (or a sick connection): fall back to the
-		 * legacy fail-at-append path rather than refusing the appender. */
+		/* Probe failure leaves validation to the native append. */
 		if (probe) {
 			duckdb_destroy_prepare(&probe);
 		}
@@ -521,7 +511,6 @@ ZEND_METHOD(PdoDuckDb_Ext, duckdbAppender)
 
 ZEND_METHOD(Pdo_Duckdb_Appender, __construct)
 {
-	/* Not constructable from userland; created only via PDO::duckdbAppender(). */
 	ZEND_PARSE_PARAMETERS_NONE();
 	zend_throw_error(NULL, "Pdo\\Duckdb\\Appender cannot be constructed directly; use PDO::duckdbAppender()");
 }
@@ -582,15 +571,8 @@ static bool pdo_duckdb_validate_integer_range(zend_long l, duckdb_type tid, uint
 	return false;
 }
 
-/* Build a scalar leaf duckdb_value from a PHP scalar, targeting type `tid`.
- * Integer leaves are built at the column's exact width (range-checked, since
- * unlike the direct scalar append path DuckDB does not validate the cast for a
- * constructed value — an out-of-range narrow/unsigned value would silently wrap)
- * and float leaves match FLOAT vs DOUBLE; BLOB strings are built as a blob so
- * binary data round-trips; everything else (DATE/TIMESTAMP/DECIMAL/UUID via a
- * string) is built as its natural PHP form and cast by DuckDB when the row is
- * appended. Returns NULL on an unsupported zval type or an out-of-range integer
- * (throwing in the latter case); `argpos` is for the error message. */
+/* Constructed integer values bypass DuckDB's cast validation: range-check
+ * before narrowing to avoid silent wraparound. */
 static duckdb_value pdo_duckdb_make_leaf(zval *z, duckdb_type tid, uint32_t argpos)
 {
 	switch (Z_TYPE_P(z)) {
@@ -641,21 +623,9 @@ static duckdb_value pdo_duckdb_make_leaf(zval *z, duckdb_type tid, uint32_t argp
 	}
 }
 
-/* Maximum PHP-array nesting depth accepted below (CR-006). Deeper values
- * throw a PDOException before any native append. */
 #define PDO_DUCKDB_APPENDER_MAX_DEPTH 128
 
-/* Build a duckdb_value matching (or castable to) the cached column descriptor
- * `t` from a PHP value. A PHP array maps to LIST/ARRAY (sequential values) or
- * STRUCT/MAP (per the column type, keyed by field/key name); scalars map to
- * leaves. Child names, child logical types, and the ARRAY size come from the
- * descriptor cached at appender creation (CR-003) — no per-row
- * duckdb_struct/list/array/map child queries. `depth` counts nesting levels
- * from the top-level argument (0); past PDO_DUCKDB_APPENDER_MAX_DEPTH the
- * build throws a PDOException (CR-006). Throws and returns NULL on a
- * structural mismatch (array for a scalar column, scalar for a nested column,
- * missing struct field, or wrong fixed-array length). `argpos` is the 1-based
- * appendRow() argument number, for error messages. */
+/* depth starts at zero; argpos is the 1-based appendRow() argument number. */
 static duckdb_value pdo_duckdb_build_value(zval *z, const pdo_duckdb_nested_render_type *t, uint32_t argpos, int depth)
 {
 	duckdb_type tid = t->type;
@@ -855,15 +825,8 @@ ZEND_METHOD(Pdo_Duckdb_Appender, appendRow)
 		RETURN_THROWS();
 	}
 
-	/* Validate and pre-build the whole row before touching the native appender.
-	 * DuckDB appends value-by-value with no rollback: a failure partway through
-	 * (an unsupported PHP value, the wrong column count at end_row) leaves the
-	 * appender mid-row and poisons it — later appends fail with "too many appends
-	 * for chunk" and flush with "incomplete append to row". So check the column
-	 * count, range-check integers, probe string scalars against their column's
-	 * cached CAST (a bad DATE/DECIMAL/UUID/... fails here, before any append),
-	 * and construct every nested value (PHP array → LIST/STRUCT/MAP/ARRAY),
-	 * up front; only once the whole row is known-good do we append. */
+	/* Validate the whole row first: DuckDB cannot roll back a partial append,
+	 * and a mid-row failure makes the appender unusable. */
 	if (argc != a->ncols) {
 		zend_value_error("Pdo\\Duckdb\\Appender::appendRow(): appender expects %u column(s), but %u value(s) were given",
 			(uint32_t)a->ncols, argc);
@@ -883,11 +846,6 @@ ZEND_METHOD(Pdo_Duckdb_Appender, appendRow)
 			case IS_LONG:
 			case IS_DOUBLE:
 			case IS_STRING: {
-				/* A non-NULL scalar for a nested column would otherwise reach the
-				 * native append fast path and fail there — poisoning the appender
-				 * if an earlier column in the row was already appended. Reject it
-				 * up front, before anything is appended. (NULL is fine: it appends
-				 * as a NULL of any column type.) */
 				duckdb_type ctid = a->col_type_ids[i];
 				if (a->col_flags[i] & PDO_DUCKDB_APPENDER_COL_NESTED) {
 					zend_type_error("Pdo\\Duckdb\\Appender::appendRow(): argument #%u expects an array for a nested column",
@@ -899,13 +857,6 @@ ZEND_METHOD(Pdo_Duckdb_Appender, appendRow)
 					goto build_failed;
 				}
 				if (Z_TYPE_P(v) == IS_STRING && a->col_probes[i]) {
-					/* A string the target type cannot cast (a bad DATE/DECIMAL/
-					 * UUID/...) would fail at the native append — poisoning the
-					 * appender mid-row when an earlier column in the row was
-					 * already appended. Validate it against the column's cached
-					 * CAST probe first, while the appender is still pristine. A
-					 * rejection still closes the appender (poison contract) but
-					 * leaves no partial row behind. */
 					char *perr = NULL;
 					if (!pdo_duckdb_appender_probe_value(a->col_probes[i],
 							Z_STRVAL_P(v), Z_STRLEN_P(v), &perr)) {
@@ -922,9 +873,6 @@ ZEND_METHOD(Pdo_Duckdb_Appender, appendRow)
 			case IS_NULL:
 				break;
 			case IS_ARRAY:
-				/* nested column: build the value now; build_value throws on a
-				 * structural mismatch. Nothing has been appended yet, so the
-				 * appender is still pristine — just free what we built. */
 				if (!built) {
 					built = ecalloc(argc, sizeof(duckdb_value));
 				}
@@ -1001,8 +949,6 @@ ZEND_METHOD(Pdo_Duckdb_Appender, appendRow)
 	RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
 
 build_failed:
-	/* Free any nested values constructed before the failure. An exception is
-	 * already pending (build_value / the unsupported-type / append-failure path). */
 	if (built) {
 		for (i = 0; i < argc; i++) {
 			if (built[i]) {

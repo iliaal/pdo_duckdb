@@ -22,9 +22,7 @@ try {
     var_dump(str_contains($e->getMessage(), 'column'));
 }
 
-// Unsupported value type is rejected before any native append. (A PHP array is
-// no longer "unsupported" — it builds a nested value — so use an object, which
-// has no DuckDB mapping.)
+// Objects have no DuckDB mapping; arrays are valid nested values.
 try {
     $ap->appendRow(1, new stdClass);
     echo "BAD: object value accepted\n";

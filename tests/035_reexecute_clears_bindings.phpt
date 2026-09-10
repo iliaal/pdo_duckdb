@@ -14,7 +14,6 @@ $db->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
 
 $st = $db->prepare('SELECT :a AS a, :b AS b');
 
-// First execute binds both params.
 $st->execute([':a' => 'first', ':b' => 'secret']);
 $row = $st->fetch(PDO::FETCH_ASSOC);
 echo "$row[a],$row[b]\n";
@@ -32,7 +31,6 @@ try {
 // handle stays usable (positive control below re-binds both params).
 var_dump($st->fetch(PDO::FETCH_ASSOC));
 
-// Binding both again still works (latch re-armed for each execute).
 $st->execute([':a' => 'x', ':b' => 'y']);
 $row = $st->fetch(PDO::FETCH_ASSOC);
 echo "$row[a],$row[b]\n";

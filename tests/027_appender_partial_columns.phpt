@@ -36,7 +36,6 @@ try {
     echo "arity: ValueError\n";
 }
 
-// error cases
 foreach (['unknown' => ['nope'], 'empty' => [], 'non-string' => [123]] as $label => $cols) {
     try {
         $db->duckdbAppender('t', null, $cols);
@@ -46,7 +45,6 @@ foreach (['unknown' => ['nope'], 'empty' => [], 'non-string' => [123]] as $label
     }
 }
 
-// no subset -> every column still required (unchanged behavior)
 $db->exec('DELETE FROM t');
 $db->duckdbAppender('t')->appendRow(1, '2020-01-01 00:00:00', 'dave', 'x')->flush();
 echo "full row: ", $db->query('SELECT count(*) FROM t')->fetchColumn(), "\n";

@@ -28,7 +28,6 @@ try {
     var_dump(str_contains($e->getMessage(), 'NUL byte'));
 }
 
-// A clean config still applies.
 $db = connect([PDO::DUCKDB_ATTR_CONFIG => ["threads" => "2"]]);
 var_dump((int) $db->query("SELECT current_setting('threads')")->fetchColumn());
 ?>

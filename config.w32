@@ -3,10 +3,7 @@
 ARG_WITH("pdo-duckdb", "for pdo_duckdb support", "no");
 
 if (PHP_PDO_DUCKDB != "no") {
-	// --with-pdo-duckdb=DIR points at a directory holding duckdb.h and
-	// duckdb.lib (the prebuilt libduckdb Windows bundle: duckdb.h, duckdb.lib,
-	// duckdb.dll). Also search an include/ and lib/ subdir for prefix-style
-	// layouts.
+	// Accept both the flat Windows bundle and include/lib prefix layouts.
 	var header_search = (PHP_PDO_DUCKDB != "yes")
 		? PHP_PDO_DUCKDB + ";" + PHP_PDO_DUCKDB + "\\include"
 		: "";

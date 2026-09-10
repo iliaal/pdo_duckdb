@@ -26,7 +26,6 @@ $app->appendRow(
     [[1, 2], [3]],
     ['2026-01-01', '2026-12-31']
 );
-// empty list + NULL element in a second row
 $app->appendRow([], [0, 0, 0], ['x' => 0, 'y' => null], [], [[]], []);
 $app->flush();
 
@@ -48,7 +47,6 @@ function expect_fail(PDO $db, string $table, callable $fn, string $label): void 
 expect_fail($db, 't', fn($a) => $a->appendRow([1], [1, 2], ['x'=>1,'y'=>'z'], [], [], []), 'wrong fixed-array size');
 expect_fail($db, 't', fn($a) => $a->appendRow([1], [1,2,3], ['x' => 1], [], [], []), 'missing struct field');
 
-// a PHP array given for a scalar column is a TypeError
 $db->exec('CREATE TABLE scalars (n INTEGER)');
 expect_fail($db, 'scalars', fn($a) => $a->appendRow([1, 2]), 'array into scalar column');
 ?>

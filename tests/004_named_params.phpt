@@ -13,13 +13,11 @@ $ins = $db->prepare("INSERT INTO t VALUES (:id, :name)");
 $ins->execute([':id' => 1, ':name' => 'alice']);
 $ins->execute([':id' => 2, ':name' => 'bob']);
 
-// distinct named params
 $q = $db->prepare("SELECT name FROM t WHERE id = :id");
 $q->execute([':id' => 2]);
 var_dump($q->fetchColumn());
 
-// a repeated named placeholder used in two comparison positions: PDO coalesces
-// ":v" to a single $1, bound once, applied in both spots.
+// PDO must coalesce both :v placeholders into one $1 binding.
 $db->exec("CREATE TABLE pair (a INTEGER, b INTEGER)");
 $db->exec("INSERT INTO pair VALUES (3, 9), (9, 7), (1, 2)");
 $r = $db->prepare("SELECT a, b FROM pair WHERE a = :v OR b = :v ORDER BY a");

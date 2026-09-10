@@ -25,7 +25,6 @@ try {
     var_dump(str_contains($e->getMessage(), 'disabled by configuration'));
 }
 
-// Plain queries still work on the (now sandboxed) handle.
 var_dump((int) $b->query('SELECT 42')->fetchColumn());
 ?>
 --EXPECT--
