@@ -136,8 +136,15 @@ jobs:
         run: |
           # Run PHP's shared ext/pdo/tests against the driver (generic PDO
           # contract: fetch modes, bound params, transactions, error modes).
-          # The suite isn't bundled; sparse-checkout it for this PHP version.
-          git clone --depth=1 --branch="PHP-${PHP_VERSION}" --filter=blob:none --sparse \
+          # The suite isn't bundled; sparse-checkout it at the installed
+          # release tag, since branch-head tests can depend on unreleased
+          # ext/pdo fixes. Dev/RC builds fall back to the branch.
+          full="$(php -r 'echo PHP_VERSION;')"
+          case "$full" in
+            *[!0-9.]*) ref="PHP-${PHP_VERSION}" ;;
+            *) ref="php-${full}" ;;
+          esac
+          git clone --depth=1 --branch="$ref" --filter=blob:none --sparse \
             https://github.com/php/php-src.git /tmp/php-src-common
           git -C /tmp/php-src-common sparse-checkout set ext/pdo/tests
           PHP="$(which php)" \
