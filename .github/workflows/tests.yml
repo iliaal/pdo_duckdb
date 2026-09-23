@@ -234,7 +234,9 @@ jobs:
           esac
           git clone --depth=1 --branch="$ref" --filter=blob:none --sparse \
             https://github.com/php/php-src.git /tmp/php-src-common
-          git -C /tmp/php-src-common sparse-checkout set ext/pdo/tests
+          # PHP 8.6's pdo_test.inc requires the top-level tests/probe_cache.inc.
+          git -C /tmp/php-src-common sparse-checkout set --no-cone \
+            /ext/pdo/tests/ /tests/probe_cache.inc
           PHP=/tmp/php-branch/bin/php \
           RUN_TESTS="$PWD/run-tests.php" \
           COMMON_DIR=/tmp/php-src-common/ext/pdo/tests \
