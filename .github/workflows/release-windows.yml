@@ -2,8 +2,8 @@ name: Release Windows binaries
 
 # Called by release.yml when a GitHub Release is published. DuckDB ships no MSVC static
 # Windows lib (only a MinGW one, not MSVC-linkable), so a static self-contained
-# DLL is impossible. Instead we build php_pdo_duckdb.dll against DuckDB's
-# dynamic import lib (duckdb.lib) and SHIP duckdb.dll inside the asset zip. PIE
+# DLL is impossible. We build php_pdo_duckdb.dll against DuckDB's dynamic
+# import lib (duckdb.lib) and ship duckdb.dll inside the asset zip. PIE
 # installs bundled dependency DLLs to the PHP root (next to php.exe, on the
 # loader path) and the extension DLL to ext\, so the dependency resolves at
 # load. Each exact release archive is loaded and queried before it is staged.
@@ -37,7 +37,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Download libduckdb (amd64 dynamic — duckdb.h, duckdb.lib, duckdb.dll)
+      - name: Download libduckdb (amd64 dynamic; duckdb.h, duckdb.lib, duckdb.dll)
         shell: pwsh
         run: |
           $url = "https://github.com/duckdb/duckdb/releases/download/v$env:DUCKDB_VERSION/libduckdb-windows-amd64.zip"

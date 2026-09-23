@@ -29,11 +29,9 @@ namespace Pdo\Duckdb {
 namespace Pdo {
     /**
      * Driver-specific PDO subclass for DuckDB. On PHP 8.4+, PDO::connect()
-     * with a duckdb: DSN returns an instance of this class (registered as the
-     * driver-specific CE); new PDO() continues to return the base PDO class.
-     * Its methods do not trip the 8.5 deprecation of base-PDO driver methods.
-     * On 8.1-8.3 the same method is exposed on the base PDO object via
-     * get_driver_methods instead.
+     * with a duckdb: DSN returns this class; new PDO() still returns base PDO.
+     * Its methods don't trip the 8.5 deprecation of base-PDO driver methods.
+     * On 8.1-8.3 the same methods are exposed on the base PDO object instead.
      */
     class Duckdb extends \PDO
     {
@@ -56,7 +54,7 @@ namespace Pdo {
          * Return the profiling tree of the last executed query as a nested
          * array shaped ['metrics' => array<string, string|null>, 'children' => list],
          * or null if profiling is not enabled. Enable it first with
-         * PRAGMA enable_profiling (the method does not execute any query).
+         * PRAGMA enable_profiling; the method doesn't execute any query.
          * A metric whose DuckDB value is SQL NULL becomes PHP null.
          */
         public function duckdbLastProfile(): ?array {}

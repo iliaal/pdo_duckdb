@@ -20,8 +20,8 @@ $stmt->bindValue(1, new JustString(), PDO::PARAM_STR);
 echo 'bindValue=', $stmt->execute() ? $stmt->fetchColumn() : 'fail', "\n";
 
 // bindParam by reference: the object lands in the variable after the bind, so
-// the driver's EXEC_PRE hook is what converts it -- once per execute, against
-// the current value of the variable.
+// the driver's EXEC_PRE hook converts it once per execute, against the
+// current value of the variable.
 final class Counter
 {
     public int $n = 0;
@@ -55,8 +55,8 @@ fclose($stream);
 var_dump($db->query('SELECT count(*), count(DISTINCT b) FROM t')->fetch(PDO::FETCH_NUM));
 
 // Re-entering execute() from __toString is a PDO core hazard (heap-use-after-free
-// in really_register_bound_param / dispatch_param_event), not a driver one; see
-// beads aph-1nr and aph-30q. Not exercised here.
+// in really_register_bound_param / dispatch_param_event), so it isn't exercised
+// here.
 ?>
 --EXPECT--
 bindValue=ok

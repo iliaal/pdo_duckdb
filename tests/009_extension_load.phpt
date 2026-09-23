@@ -8,7 +8,7 @@ pdo_duckdb
 $db = new PDO('duckdb::memory:');
 $db->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
 
-// Bundled extensions load through standard exec() -- no driver-specific method.
+// Bundled extensions load through standard exec(); no driver-specific method.
 $db->exec('LOAD json');
 
 var_dump((bool) $db->query("SELECT loaded FROM duckdb_extensions() WHERE extension_name = 'json'")->fetchColumn());

@@ -3,12 +3,12 @@ name: Windows Build
 # Verifies the extension compiles and links against libduckdb on MSVC across
 # the supported PHP versions (x64, NTS + TS). The phpt suite SKIPs under
 # php-windows-builder's test phase because the external duckdb.dll isn't on the
-# loader path there — the same build-verification scope the rest of the fleet's
-# external-library extensions (e.g. php_excel/LibXL) run on Windows.
+# loader path there, matching other external-library extensions such as
+# php_excel/LibXL.
 #
-# This lane is build verification only and does not attach assets. The current
-# bundled-duckdb.dll publishing path lives in release-windows.yml and its
-# runtime validation lives in binary-validate-windows.yml.
+# This lane attaches no assets. Publishing with the bundled duckdb.dll lives in
+# release-windows.yml; its runtime validation lives in
+# binary-validate-windows.yml.
 
 on:
   push:
@@ -43,7 +43,7 @@ jobs:
         shell: bash
         run: |
           # DuckDB ships no 32-bit Windows C library (only amd64 / arm64), so
-          # drop x86 from the matrix — those builds can't link libduckdb.
+          # drop x86 from the matrix; those builds can't link libduckdb.
           printf '%s\n' "$STEPS_GEN_OUTPUTS_MATRIX" > matrix.json
           cat matrix.json
           if jq -e 'has("include")' matrix.json >/dev/null 2>&1; then

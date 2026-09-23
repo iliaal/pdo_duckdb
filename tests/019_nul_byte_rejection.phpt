@@ -15,7 +15,7 @@ $db->exec('CREATE TABLE t (i INTEGER)');
 
 $nul = "SELECT 1\0 INVALID";
 
-// query(): a NUL would truncate "SELECT 1\0 INVALID" to "SELECT 1" — reject it.
+// query(): a NUL would truncate "SELECT 1\0 INVALID" to "SELECT 1".
 try { $db->query($nul); echo "BAD: query truncated+ran\n"; }
 catch (\PDOException $e) { var_dump(str_contains($e->getMessage(), 'NUL byte')); }
 

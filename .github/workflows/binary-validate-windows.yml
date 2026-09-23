@@ -2,7 +2,7 @@ name: Binary build validation (Windows)
 
 # Reusable release gate and manual dry run for the Windows prebuilt path. DuckDB
 # ships no MSVC static lib (only a MinGW one, not MSVC-linkable), so a static
-# self-contained DLL is impossible. Instead we build php_pdo_duckdb.dll against
+# self-contained DLL is impossible. We build php_pdo_duckdb.dll against
 # DuckDB's dynamic import lib (duckdb.lib) and ship duckdb.dll alongside. PIE
 # installs bundled dependency DLLs to the PHP root (next to php.exe), which is
 # on the loader path. The release workflow repeats this load-and-query gate on
@@ -37,7 +37,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Download libduckdb (amd64 dynamic — duckdb.h, duckdb.lib, duckdb.dll)
+      - name: Download libduckdb (amd64 dynamic; duckdb.h, duckdb.lib, duckdb.dll)
         shell: pwsh
         run: |
           $url = "https://github.com/duckdb/duckdb/releases/download/v$env:DUCKDB_VERSION/libduckdb-windows-amd64.zip"
@@ -92,9 +92,8 @@ jobs:
           Write-Host "php.exe: $php"
           Copy-Item duckdb-deps\duckdb.dll -Destination $phpdir -Force
 
-          # Negative control: without duckdb.dll on the path the load must fail.
-          # (Run before the copy would have been pointless — instead confirm the
-          # extension reports loaded only after the dependency is resolvable.)
+          # Confirm the extension reports loaded only once duckdb.dll is
+          # resolvable.
           php -d extension="$($extdll.FullName)" -r "echo 'loaded='.(int)extension_loaded('pdo_duckdb').PHP_EOL;"
           if ($LASTEXITCODE -ne 0) { throw "extension failed to load even with duckdb.dll present" }
 

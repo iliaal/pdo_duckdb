@@ -67,9 +67,9 @@ foreach ($rows as $row) {
     $wkt = $rt->fetchColumn();
     echo "id=$id wkt=", ($wkt === $want_wkt[$id] ? $wkt : 'MISMATCH ' . $wkt), "\n";
     // Nested GEOMETRY has no C-API value constructor, so the driver encodes
-    // elements with the same uppercase hex as scalar fetches (engine CAST
-    // renders WKT instead, so an explicit expectation -- not a differential
-    // one -- locks the driver contract here).
+    // elements with the same uppercase hex as scalar fetches. Engine CAST
+    // renders WKT instead, so this uses an explicit expectation rather than a
+    // differential one.
     if ($row['geoms'] === null) {
         echo "id=$id geoms=null\n";
     } elseif ($id === 2) {

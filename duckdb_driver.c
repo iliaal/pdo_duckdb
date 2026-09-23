@@ -234,9 +234,8 @@ static bool duckdb_handle_preparer(pdo_dbh_t *dbh, zend_string *sql, pdo_stmt_t 
 	}
 
 	if (duckdb_prepare(H->conn, ZSTR_VAL(sql), &S->prepared) != DuckDBSuccess) {
-		/* Guard like pdo_duckdb_exec_transaction_multi(): a prepare failure that
-		 * did not populate the out-param would make duckdb_prepare_error(NULL)
-		 * abort the process. */
+		/* duckdb_prepare_error(NULL) aborts the process if prepare failed without
+		 * populating the out-param. */
 		pdo_duckdb_error_code(dbh, PDO_DUCKDB_ERRCODE_SYNTAX, S->prepared ? duckdb_prepare_error(S->prepared)
 			: "Unable to prepare DuckDB statement");
 		if (S->prepared) {
@@ -693,8 +692,7 @@ static zend_long duckdb_handle_doer(pdo_dbh_t *dbh, const zend_string *sql)
 	pdo_duckdb_transaction_effect transaction_effect = PDO_DUCKDB_TRANSACTION_NONE;
 	size_t statement_count;
 
-	/* duckdb_query() takes a NUL-terminated const char*: an embedded NUL would
-	 * silently truncate the statement. Reject it. */
+	/* duckdb_query() would truncate at an embedded NUL. */
 	if (zend_str_has_nul_byte(sql)) {
 		pdo_duckdb_error(dbh, "SQL statement contains a NUL byte");
 		return -1;
@@ -790,7 +788,6 @@ static zend_string *duckdb_handle_quoter(pdo_dbh_t *dbh, const zend_string *unqu
 	return buf.s;
 }
 
-/* Run a control statement (transaction verbs) that returns no rowset. */
 static bool duckdb_simple_exec(pdo_dbh_t *dbh, const char *sql)
 {
 	pdo_duckdb_db_handle *H = (pdo_duckdb_db_handle *)dbh->driver_data;
@@ -1011,15 +1008,12 @@ static bool pdo_duckdb_disable_external_access(pdo_duckdb_db_handle *H)
 		}
 	}
 	H->external_access_disabled = true;
-	/* Record the basedir this sandbox was applied under so a later re-narrow is
-	 * detectable. Reached once per handle, from enforce_sandbox, which has already
-	 * established that open_basedir is non-empty. */
+	/* Only reached from enforce_sandbox, which has checked that open_basedir is
+	 * non-empty. */
 	H->sandbox_basedir = pestrdup(PG(open_basedir), H->persistent);
 	return true;
 }
 
-/* Apply sandbox when open_basedir is set and not yet applied. After apply,
- * fail closed if basedir is re-narrowed (allowlists are frozen in DuckDB). */
 bool pdo_duckdb_enforce_sandbox(pdo_duckdb_db_handle *H)
 {
 	if (!(PG(open_basedir) && *PG(open_basedir))) {
@@ -1115,11 +1109,10 @@ static zend_result pdo_duckdb_check_liveness(pdo_dbh_t *dbh)
 		}
 	}
 
-	/* PRAGMA form still runs after lock_configuration; StartQuery resets
-	 * the retained QUERY_NAME tree. Unlike the RESETs above this is
-	 * transaction-neutral, so it runs on every checkout — including
-	 * refcount > 1 — rather than leaking one request's profiling flag
-	 * into the next holder of a shared handle. */
+	/* The PRAGMA form still runs after lock_configuration. It is
+	 * transaction-neutral, so unlike the RESETs above it runs on every
+	 * checkout, including refcount > 1, so one request's profiling flag can't
+	 * leak into the next holder of a shared handle. */
 	if (!pdo_duckdb_query_ok(H->conn, "PRAGMA disable_profiling")) {
 		dirty = true;
 	}
@@ -1174,12 +1167,9 @@ static const struct pdo_dbh_methods duckdb_methods = {
 	/* in_transaction: NULL -> PDO uses its internal transaction tracking. */
 };
 
-/* Resolve the DSN to a path DuckDB can open, enforcing open_basedir for plain
- * filesystem paths. Returns an emalloc'd string the caller must efree, or NULL
- * for in-memory (the empty / ":memory:" data source). On failure returns NULL
- * and sets *deny_reason to a message describing why (otherwise *deny_reason is
- * NULL); the two failure modes — unresolvable path vs open_basedir denial — get
- * distinct messages so the error isn't misattributed. */
+/* Returns an emalloc'd path, or NULL for in-memory ("" / ":memory:"). On
+ * failure returns NULL with *deny_reason set; an unresolvable path and an
+ * open_basedir denial get distinct messages. */
 static char *duckdb_make_path_safe(const char *data_source, const char **deny_reason)
 {
 	*deny_reason = NULL;
@@ -1203,8 +1193,7 @@ static char *duckdb_make_path_safe(const char *data_source, const char **deny_re
 	return fullpath;
 }
 
-/* Set one DuckDB config option, recording a CONNECT-coded error (and destroying
- * the config) on an invalid name/value so the caller can fail the open. */
+/* On an invalid name/value, records a CONNECT error and destroys the config. */
 static bool pdo_duckdb_set_one_config(pdo_dbh_t *dbh, duckdb_config *config, const char *key, const char *value)
 {
 	size_t key_len = strlen(key);
@@ -1226,7 +1215,7 @@ static bool pdo_duckdb_set_one_config(pdo_dbh_t *dbh, duckdb_config *config, con
 		duckdb_destroy_config(config);
 		*config = NULL;
 		/* Name the key but never the value: DSN option tails and array values
-		 * can carry secrets (tests/033). */
+		 * can carry secrets. */
 		char *msg;
 		spprintf(&msg, 0, "Invalid DuckDB configuration option \"%s\"", key);
 		pdo_duckdb_error_code(dbh, PDO_DUCKDB_ERRCODE_CONNECT, msg);
@@ -1366,16 +1355,12 @@ static zend_string *pdo_duckdb_config_scalar_to_string(pdo_dbh_t *dbh, zval *val
 	}
 }
 
-/* Build the DuckDB open-time config from user options and the open_basedir
- * sandbox. Sources, applied in this order so the sandbox always wins:
- *   1. DSN "key=value;..." pairs (everything after the first ';' in the DSN)
- *   2. the PDO::DUCKDB_ATTR_CONFIG array from driver_options (overrides DSN)
- *   3. if open_basedir is set: reject security/path-sensitive user options, then
- *      apply open-time sandbox flags (empty temp, no extension autoload, …).
- *      enable_external_access/lock run post-connect via pdo_duckdb_enforce_sandbox
- *      so file-DB temp allowlists can still be cleared.
- * *out_config is NULL when nothing needs setting. Returns false (with an
- * exception thrown) on a bad option, so the caller refuses to open. */
+/* Applied in order so the sandbox wins: DSN "key=value;..." tail, then
+ * PDO::DUCKDB_ATTR_CONFIG, then (under open_basedir) rejection of
+ * path-sensitive options plus the open-time sandbox flags. External access and
+ * the lock are applied post-connect so file-DB temp allowlists can still be
+ * cleared. *out_config is NULL when nothing needs setting. Returns false with an
+ * exception thrown on a bad option. */
 static bool pdo_duckdb_build_config(pdo_dbh_t *dbh, const char *dsn_opts,
 		zval *driver_options, duckdb_config *out_config)
 {
@@ -1413,9 +1398,7 @@ static bool pdo_duckdb_build_config(pdo_dbh_t *dbh, const char *dsn_opts,
 					return false;
 				}
 			} else if (*pair) {
-				/* a non-empty segment without '=' is malformed; a valid option may
-				 * already have allocated config, so destroy it before bailing.
-				 * Do not echo the raw segment: DSN option tails can contain secrets. */
+				/* Don't echo the raw segment: DSN option tails can contain secrets. */
 				if (config) {
 					duckdb_destroy_config(&config);
 				}
@@ -1456,9 +1439,8 @@ static bool pdo_duckdb_build_config(pdo_dbh_t *dbh, const char *dsn_opts,
 						"PDO::DUCKDB_ATTR_CONFIG keys must be option-name strings");
 					return false;
 				}
-				/* duckdb_set_config() takes NUL-terminated strings; an embedded NUL
-				 * in the option name or value would be silently truncated, applying
-				 * a different (possibly security-relevant) option than requested. */
+				/* duckdb_set_config() would truncate at an embedded NUL and apply a
+				 * different option than requested. */
 				if (zend_str_has_nul_byte(key)) {
 					if (config) {
 						duckdb_destroy_config(&config);
@@ -1497,10 +1479,8 @@ static bool pdo_duckdb_build_config(pdo_dbh_t *dbh, const char *dsn_opts,
 		}
 	}
 
-	/* 3. open_basedir sandbox profile — applied last so it overrides any user
-	 * setting that is safe to override. Security/path-sensitive settings were
-	 * rejected above. This is a security boundary: fail closed if it can't be
-	 * applied. */
+	/* Applied last so it overrides user settings; path-sensitive settings were
+	 * rejected above. Fails closed. */
 	if (sandbox) {
 		DUCKDB_ENSURE_CONFIG();
 		if (!pdo_duckdb_apply_sandbox_config(dbh, &config)) {
@@ -1558,9 +1538,6 @@ static int pdo_duckdb_handle_factory(pdo_dbh_t *dbh, zval *driver_options) /* {{
 	}
 	/* path_dsn stays alive for the open_error taint check below; freed at cleanup. */
 
-	/* Open-time config: user DSN/attr options plus open_basedir open-time flags.
-	 * Fail closed — refuse to open if the config cannot be built. Full SQL
-	 * sandbox (external access off + lock) runs post-connect below. */
 	if (!pdo_duckdb_build_config(dbh, dsn_opts, driver_options, &config)) {
 		if (path) {
 			efree(path);
@@ -1580,11 +1557,9 @@ static int pdo_duckdb_handle_factory(pdo_dbh_t *dbh, zval *driver_options) /* {{
 	}
 	if (open_state != DuckDBSuccess) {
 		const char *base = pdo_duckdb_open_error_message(open_error);
-		/* Forward DuckDB's detail appended to the existing message — unless it
-		 * echoes the database path/DSN (open errors name the file, and
-		 * tests/033 requires the path hidden). NULL/empty/":memory:" needles
-		 * are never sensitive; the DSN option tail never reaches open_error
-		 * (DuckDB never sees the DSN), so path needles suffice here. */
+		/* Append DuckDB's detail unless it echoes the database path, which must
+		 * stay hidden. DuckDB never sees the DSN option tail, so checking for
+		 * the path is enough. */
 		bool tainted = false;
 		if (open_error && base != open_error) {
 			if (path && *path && strstr(open_error, path)) {
@@ -1646,17 +1621,12 @@ cleanup:
 }
 /* }}} */
 
-/* {{{ Driver-specific helper methods.
- * Shared by the Pdo\Duckdb subclass (8.4+) and the base-PDO get_driver_methods
- * vehicle (8.1-8.3); the ZEND_METHOD wrappers for both classes delegate here.
- * The method tables live in the regenerated arginfo (included by
- * duckdb_appender.c). */
+/* {{{ Driver-specific methods, shared by the Pdo\Duckdb subclass (8.4+) and the
+ * base-PDO get_driver_methods path (8.1-8.3). */
 
-/* DuckDB's qualified table names append the query alias as " AS <alias>"
- * (e.g. "s.orders AS o"); the unaliased form is "s.orders". An unquoted
- * identifier cannot contain a space, so any top-level " AS " is unambiguously
- * the alias separator (a quoted identifier that contained it would be inside
- * double quotes). Strip it so the result is a usable schema.table name. */
+/* DuckDB's qualified names append the alias ("s.orders AS o"). An unquoted
+ * identifier can't contain a space, so a top-level " AS " is always the alias
+ * separator. */
 static zend_string *pdo_duckdb_strip_table_alias(const char *s, size_t len)
 {
 	bool in_quote = false;
@@ -1691,14 +1661,13 @@ static void pdo_duckdb_table_names_impl(INTERNAL_FUNCTION_PARAMETERS)
 	PDO_CONSTRUCT_CHECK;
 	H = (pdo_duckdb_db_handle *)dbh->driver_data;
 
-	/* duckdb_get_table_names() takes a NUL-terminated const char*; an embedded
-	 * NUL would silently truncate the query. Reject it. */
+	/* duckdb_get_table_names() would truncate at an embedded NUL. */
 	if (zend_str_has_nul_byte(query)) {
 		zend_value_error("PDO::duckdbTableNames(): query must not contain a NUL byte");
 		RETURN_THROWS();
 	}
 
-	/* Sandbox catalog binding too; absence of execution does not guarantee no file access. */
+	/* Catalog binding can touch files even without execution. */
 	if (!pdo_duckdb_enforce_sandbox(H)) {
 		zend_throw_exception_ex(php_pdo_get_exception(), PDO_DUCKDB_ERRCODE_SANDBOX,
 			"PDO::duckdbTableNames(): unable to apply the open_basedir sandbox");
@@ -1730,9 +1699,7 @@ static void pdo_duckdb_table_names_impl(INTERNAL_FUNCTION_PARAMETERS)
 	duckdb_destroy_value(&list);
 }
 
-/* Render a duckdb_profiling_info node (and its subtree) into a PHP array shaped
- * ['metrics' => array<string, string|null>, 'children' => list]. Metrics arrive
- * as MAP keys/values; SQL NULL metric values become PHP null. */
+/* Shape: ['metrics' => array<string, string|null>, 'children' => list]. */
 static void pdo_duckdb_build_profile_node(duckdb_profiling_info info, zval *out)
 {
 	zval metrics, children;
@@ -1748,9 +1715,7 @@ static void pdo_duckdb_build_profile_node(duckdb_profiling_info info, zval *out)
 		for (i = 0; i < ms; i++) {
 			duckdb_value k = duckdb_get_map_key(m, i);
 			duckdb_value v = duckdb_get_map_value(m, i);
-			/* duckdb_get_varchar() aborts the process on a NULL value (it throws
-			 * a C++ InternalException), so guard with is_null first — like
-			 * pdo_duckdb_col_to_string. A NULL-valued metric becomes PHP null. */
+			/* duckdb_get_varchar() aborts the process on a NULL value. */
 			if (!duckdb_is_null_value(k)) {
 				char *ks = duckdb_get_varchar(k);
 				if (ks) {
@@ -1795,8 +1760,7 @@ static void pdo_duckdb_last_profile_impl(INTERNAL_FUNCTION_PARAMETERS)
 	PDO_CONSTRUCT_CHECK;
 	H = (pdo_duckdb_db_handle *)dbh->driver_data;
 
-	/* Reads the profile of the last query already run on this connection; it
-	 * executes nothing. NULL when profiling was never enabled. */
+	/* NULL when profiling was never enabled. */
 	info = duckdb_get_profiling_info(H->conn);
 	if (!info) {
 		RETURN_NULL();

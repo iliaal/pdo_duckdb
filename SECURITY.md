@@ -11,7 +11,7 @@ driver.
 
 | Version | Supported          |
 |---------|--------------------|
-| 0.4.x   | :white_check_mark: |
+| 0.7.x   | :white_check_mark: |
 
 Pre-1.0: the current minor gets security fixes, and the API may still
 move between minors until 1.0.
@@ -54,16 +54,15 @@ In scope:
 - `open_basedir` bypasses. On the database file, the driver runs the
   `duckdb:` DSN path through `php_check_open_basedir()` before opening
   it. When `open_basedir` is set, it applies a locked DuckDB sandbox
-  profile. The driver sets `enable_external_access=false`, rejects or clears
-  path allowlists (and leaves `temp_directory` empty so DuckDB cannot seed a
-  permanent allowlist from it), disables extension auto-install/load, and locks
-  runtime configuration. The sandbox blocks `read_csv`, `COPY`, `ATTACH`,
-  downloaded extensions, and extension files — including for paths inside
-  `open_basedir` after a correct escalate. If `open_basedir` is re-narrowed
-  after the sandbox was applied, the driver fails closed (allowlists are frozen
-  in DuckDB). You can still use `LOAD` for an extension compiled into DuckDB,
-  such as `json`, because it does not cross a filesystem boundary. A bypass of
-  either filesystem gate is in scope.
+  profile: it sets `enable_external_access=false`, rejects or clears path
+  allowlists (leaving `temp_directory` empty so DuckDB can't seed a permanent
+  allowlist from it), disables extension auto-install/load, and locks runtime
+  configuration. The sandbox blocks `read_csv`, `COPY`, `ATTACH`, downloaded
+  extensions, and extension files, including paths inside `open_basedir`. If
+  `open_basedir` is re-narrowed after the sandbox is applied, the driver fails
+  closed, because DuckDB freezes the allowlists. `LOAD` still works for an
+  extension compiled into DuckDB, such as `json`, because it doesn't cross a
+  filesystem boundary. A bypass of either filesystem gate is in scope.
 - Parameter-binding flaws that break the prepared-statement boundary (a
   bound value altering statement structure).
 - Arginfo / ZPP mismatches that cause undefined behavior reachable from

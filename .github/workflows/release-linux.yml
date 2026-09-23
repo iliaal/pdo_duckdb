@@ -2,23 +2,20 @@ name: Release Linux & macOS binaries
 
 # Called by release.yml when a GitHub Release is published. Builds self-contained .so
 # binaries for Linux glibc (x86_64 + arm64) and macOS arm64 at the PHP
-# versions in the matrix (NTS only -- ZTS lives in the Windows lane) and
+# versions in the matrix (NTS only; ZTS lives in the Windows lane) and
 # stages each for release.yml using PIE's pre-packaged-binary naming
 # convention.
 #
-# pdo_duckdb links an external libduckdb, so the prebuilt must STATICALLY
-# link DuckDB to be self-contained (a dynamically-linked .so wouldn't load
-# without libduckdb on the user's loader path, and PIE prefers the prebuilt).
-# Each runner downloads DuckDB's static-libs bundle for its os/arch and the
-# build links it via config.m4's --with-pdo-duckdb-static mode. The exact
-# The release build repeats the self-contained and load-and-query gates from
-# binary-validate.yml against each exact archive before staging it.
+# The prebuilt statically links DuckDB so it loads without libduckdb on the
+# user's loader path. Each runner downloads DuckDB's static-libs bundle for its
+# os/arch and builds with config.m4's --with-pdo-duckdb-static mode. The
+# self-contained and load-and-query gates from binary-validate.yml run against
+# each exact archive before staging it.
 #
-# macOS Intel (macos-13) and Linux musl are intentionally absent -- those
-# users source-build via PIE's composer-default fallback. composer.json
-# declares "download-url-method": ["pre-packaged-binary", "composer-default"]
-# so PIE prefers the prebuilt and falls back to a source build when no asset
-# matches (older PHP, other arches/libc).
+# macOS Intel (macos-13) and Linux musl have no prebuilt. composer.json
+# declares "download-url-method": ["pre-packaged-binary", "composer-default"],
+# so PIE falls back to a source build when no asset matches (older PHP, other
+# arches/libc).
 
 on:
   workflow_call:

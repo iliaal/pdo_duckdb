@@ -307,30 +307,25 @@ static int pdo_duckdb_stmt_execute(pdo_stmt_t *stmt)
 	/* Zero before any failure return so re-execute errors do not leave a stale rowCount. */
 	stmt->row_count = 0;
 
-	/* open_basedir may have been tightened after this statement was prepared;
-	 * apply the sandbox to the connection before re-executing. EXEC_PRE may
-	 * already have set binds_cleared; reset the latch on failure so the next
-	 * execute does not skip duckdb_clear_bindings. */
+	/* open_basedir may have tightened since prepare. EXEC_PRE may already have
+	 * set binds_cleared, so reset it on failure or the next execute skips
+	 * duckdb_clear_bindings. */
 	if (!pdo_duckdb_enforce_sandbox(S->H)) {
 		S->binds_cleared = false;
 		pdo_duckdb_error_stmt_code(stmt, PDO_DUCKDB_ERRCODE_SANDBOX, "Unable to apply the open_basedir sandbox profile to DuckDB");
 		return 0;
 	}
 
-	/* If no parameter was bound this round (execute([]) or a params-less
-	 * re-execute), the first-EXEC_PRE clear never ran, so drop any bindings left
-	 * from a prior execute here. Then arm the latch for the next round. */
+	/* No parameter was bound this round (execute([]) or a params-less
+	 * re-execute), so EXEC_PRE never cleared the previous bindings. */
 	if (!S->binds_cleared) {
 		duckdb_clear_bindings(S->prepared);
 	}
 	S->binds_cleared = false;
 
 	if (S->H->unbuffered) {
-		/* Opt-in streaming (PDO::DUCKDB_ATTR_UNBUFFERED): the pending-result API
-		 * yields a streaming result that produces chunks lazily as fetch_chunk()
-		 * pulls them, so a huge SELECT isn't buffered whole. The driver does not
-		 * impose a single-active-stream guard; interleaved unbuffered statements
-		 * are allowed (tests/043). closeCursor() releases a stream early. */
+		/* The pending-result API produces chunks lazily as fetch_chunk() pulls
+		 * them. Interleaved unbuffered statements are allowed. */
 		duckdb_pending_result pending = NULL;
 
 		if (duckdb_pending_prepared_streaming(S->prepared, &pending) != DuckDBSuccess) {
@@ -346,10 +341,8 @@ static int pdo_duckdb_stmt_execute(pdo_stmt_t *stmt)
 		}
 		duckdb_destroy_pending(&pending);
 	} else {
-		/* duckdb_execute_prepared returns a *materialized* result: DuckDB buffers
-		 * the whole result set here, and duckdb_fetch_chunk() below streams chunks
-		 * out of that buffer. So fetching is chunked but memory is bounded by the
-		 * full result, not row-streamed. */
+		/* Materialized: DuckDB buffers the whole result set here, and
+		 * duckdb_fetch_chunk() reads chunks out of that buffer. */
 		if (duckdb_execute_prepared(S->prepared, &S->result) != DuckDBSuccess) {
 			pdo_duckdb_error_stmt(stmt, duckdb_result_error(&S->result));
 			duckdb_destroy_result(&S->result);
@@ -363,9 +356,8 @@ static int pdo_duckdb_stmt_execute(pdo_stmt_t *stmt)
 	}
 	pdo_duckdb_stmt_cache_columns(S);
 	php_pdo_stmt_set_column_count(stmt, (int)S->col_count);
-	/* reset_result_full freed columns via set_column_count(0). PDO only
-	 * auto-describes when !stmt->executed; clear the latch so re-execute
-	 * rebuilds columns (getColumnMeta otherwise SEGVs). */
+	/* reset_result_full freed the columns, and PDO only auto-describes when
+	 * !stmt->executed; without this, getColumnMeta() SEGVs after re-execute. */
 	if (S->col_count > 0) {
 		stmt->executed = 0;
 	}
@@ -377,14 +369,10 @@ static int pdo_duckdb_stmt_execute(pdo_stmt_t *stmt)
 
 /* {{{ value reconstruction
  *
- * The legacy duckdb_value_* row API cannot materialize newer/nested types
- * (UUID, TIMESTAMPTZ, ENUM, BIT, LIST, STRUCT, MAP, ...): it returns NULL.
- * The data-chunk API has no per-cell stringifier either, but it does let us
- * rebuild a duckdb_value from the vector and hand that to duckdb_get_varchar(),
- * which renders any type — including nested ones — to its canonical text.
- * Native scalar types are taken directly into a zval in get_col; the
- * reconstruction path below is only used for the "render as string" types and
- * for recursing into nested children. */
+ * The legacy duckdb_value_* row API returns NULL for newer and nested types,
+ * and the data-chunk API has no per-cell stringifier. Rebuilding a duckdb_value
+ * from the vector and passing it to duckdb_get_varchar() renders any type,
+ * nested ones included, to canonical text. Native scalars skip this path. */
 
 static duckdb_value pdo_duckdb_cell_to_value_typed(duckdb_vector vec, idx_t row,
 	duckdb_logical_type lt, bool destroy_lt, bool *unsupported_variant);
@@ -510,9 +498,7 @@ static void pdo_duckdb_stmt_cache_col_aux(pdo_duckdb_stmt *S)
 	pdo_duckdb_col_aux_cache *a = &pdo_duckdb_tls_col_aux;
 	idx_t c;
 
-	/* An entry owned by another statement is evicted here; that statement
-	 * keeps working via the generic logical-type path (its own
-	 * col_logical_types stay alive until its own reset). */
+	/* The evicted statement falls back to the generic logical-type path. */
 	pdo_duckdb_col_aux_free_content();
 	a->owner = NULL;
 	a->ncols = 0;
@@ -638,9 +624,8 @@ static bool pdo_duckdb_decimal_from_vector(duckdb_logical_type lt, void *data, i
 			d->value = ((duckdb_hugeint *)data)[row];
 			return true;
 		default:
-			/* Unknown internal width — only reachable from a corrupt storage file.
-			 * Don't fall through to a 16-byte HUGEINT read against a possibly
-			 * narrower vector. */
+			/* Unknown internal width, only reachable from a corrupt storage
+			 * file. A 16-byte HUGEINT read could overrun a narrower vector. */
 			return false;
 	}
 }
@@ -1108,7 +1093,7 @@ static void pdo_duckdb_smart_append_i64(smart_str *out, int64_t value)
 	}
 }
 
-/* Nested VARCHAR quoting (CR-002): mirrors DuckDB's
+/* Nested VARCHAR quoting mirrors DuckDB's
  * VectorCastHelpers::Calculate/WriteEscapedString<false> (the list/struct/map
  * scalar positions in function/cast/vector_cast_helpers.hpp) and
  * NestedToVarcharCast::LOOKUP_TABLE (nested_to_varchar_cast.cpp). A value is
@@ -1153,10 +1138,9 @@ static bool pdo_duckdb_nested_varchar_needs_quotes(const char *p, size_t len)
 	return false;
 }
 
-/* Append a nested VARCHAR leaf. needs_quotes is decided on the full value
- * (like the engine); emission stops at the first NUL so the result matches
- * the legacy duckdb_get_varchar C-string truncation byte-for-byte (notably,
- * no closing quote is emitted after a truncation). */
+/* needs_quotes is decided on the full value, as in the engine, but emission
+ * stops at the first NUL to match duckdb_get_varchar's C-string truncation
+ * byte-for-byte (no closing quote after a truncation). */
 static void pdo_duckdb_smart_append_escaped_varchar(smart_str *out, const char *p, size_t len)
 {
 	size_t i;
@@ -1623,17 +1607,12 @@ static bool pdo_duckdb_fast_nested_col_to_string(duckdb_vector vec, idx_t row,
 	return true;
 }
 
-/* Nested GEOMETRY substitution. The DUCKDB_TYPE_GEOMETRY case below encodes an
- * element as a VARCHAR hex value (the C API has no geometry value
- * constructor), but duckdb_create_*_value rejects values whose type differs
- * from the declared child type, so a container declared with a GEOMETRY child
- * would come back NULL. Rebuild a container logical type with VARCHAR in
- * place of GEOMETRY anywhere in its tree; element recursion still runs
- * against the original GEOMETRY logical types (which hit the hex encoder),
- * while the declared container type matches the produced VARCHAR values.
- * Borrows lt; on true *out owns a fresh logical type, otherwise *out is
- * untouched. Type constructors borrow their inputs, so rebuilt children are
- * destroyed after use like every other owned logical type here. */
+/* GEOMETRY elements are encoded as VARCHAR hex (the C API has no geometry
+ * value constructor), and duckdb_create_*_value rejects values whose type
+ * differs from the declared child type, so a container with a GEOMETRY child
+ * would come back NULL. This rebuilds the container type with VARCHAR in place
+ * of GEOMETRY; element recursion still uses the original types. Borrows lt; on
+ * true *out owns a fresh logical type, otherwise *out is untouched. */
 static bool pdo_duckdb_substitute_geometry(duckdb_logical_type lt, duckdb_logical_type *out)
 {
 	duckdb_type tid = duckdb_get_type_id(lt);
@@ -1842,7 +1821,7 @@ static duckdb_value pdo_duckdb_cell_to_value_typed(duckdb_vector vec, idx_t row,
 			b.size = duckdb_string_t_length(s);
 			/* The first byte is a pad-bit-count header; a zero-length BIT (only
 			 * from a corrupt file) would make create_bit read data[0] out of
-			 * bounds. Guard, like the VARINT len < 3 check. */
+			 * bounds. */
 			if (b.size == 0) {
 				ret = duckdb_create_null_value();
 				break;
@@ -1886,10 +1865,8 @@ static duckdb_value pdo_duckdb_cell_to_value_typed(duckdb_vector vec, idx_t row,
 			break;
 		}
 		case DUCKDB_TYPE_GEOMETRY: {
-			/* GEOMETRY is stored as a flat WKB blob (duckdb_string_t in the
-			 * vector). The C API has no WKB->WKT renderer, so expose the bytes
-			 * as an uppercase hex string: lossless and round-trippable via
-			 * ST_GeomFromHEXWKB(). Use ST_AsText() in SQL for WKT. */
+			/* The C API has no WKB->WKT renderer, so expose the WKB bytes as
+			 * uppercase hex, which round-trips via ST_GeomFromHEXWKB(). */
 			static const char hexd[] = "0123456789ABCDEF";
 			duckdb_string_t s = ((duckdb_string_t *)data)[row];
 			const uint8_t *raw = (const uint8_t *)duckdb_string_t_data(&s);
@@ -1917,9 +1894,7 @@ static duckdb_value pdo_duckdb_cell_to_value_typed(duckdb_vector vec, idx_t row,
 		duckdb_logical_type ct = duckdb_list_type_child_type(lt);
 		duckdb_value *vals;
 			idx_t i;
-			/* {offset,length} is an engine invariant for any chunk DuckDB
-			 * produces; a corrupt storage file could violate it. Clamp before
-			 * indexing the child vector (overflow-safe form). */
+			/* A corrupt storage file can break the {offset,length} invariant. */
 			if (e.offset > child_size || e.length > child_size - e.offset) {
 				duckdb_destroy_logical_type(&ct);
 				ret = duckdb_create_null_value();
@@ -1928,8 +1903,6 @@ static duckdb_value pdo_duckdb_cell_to_value_typed(duckdb_vector vec, idx_t row,
 		/* always non-NULL: create_list_value() segfaults on a NULL values
 		 * pointer, so an empty list must still pass a valid buffer. */
 		duckdb_logical_type decl = ct;
-		/* GEOMETRY elements are encoded as VARCHAR hex values, so declare
-		 * the child with a substituted type (no-op otherwise). */
 		bool geo_sub = pdo_duckdb_substitute_geometry(ct, &decl);
 		vals = emalloc(sizeof(duckdb_value) * (e.length ? e.length : 1));
 			for (i = 0; i < e.length; i++) {
@@ -2053,17 +2026,14 @@ static duckdb_value pdo_duckdb_cell_to_value_typed(duckdb_vector vec, idx_t row,
 		}
 
 		case DUCKDB_TYPE_UNION: {
-			/* UNION is physically a STRUCT whose child 0 is the UTINYINT tag and
-			 * children 1..n are the members. Read the tag, then reconstruct the
-			 * active member (child tag+1) and wrap it. */
+			/* UNION is physically a STRUCT: child 0 is the UTINYINT tag, children
+			 * 1..n are the members. */
 			duckdb_vector tag_vec = duckdb_struct_vector_get_child(vec, 0);
 			void *tag_data = duckdb_vector_get_data(tag_vec);
 			idx_t tag = (idx_t)((uint8_t *)tag_data)[row];
 			duckdb_vector member_vec;
-			/* The tag byte is the one place a raw data byte becomes a structural
-			 * index. duckdb_struct_vector_get_child does no bounds check, so a
-			 * corrupt-file tag past the member count would index out of bounds.
-			 * Validate before indexing (members are children 1..n). */
+			/* duckdb_struct_vector_get_child does no bounds check, and a corrupt
+			 * file can carry a tag past the member count. */
 			if (tag >= duckdb_union_type_member_count(lt)) {
 				ret = duckdb_create_null_value();
 				break;
@@ -2124,10 +2094,9 @@ static int pdo_duckdb_stmt_fetch(pdo_stmt_t *stmt,
 		return 1;
 	}
 
-	/* Unbuffered scans can open files during chunk pull; re-latch the sandbox if
-	 * open_basedir was tightened after execute. Pulling a chunk is the only part
-	 * of fetch that reaches DuckDB — rows served out of the chunk above touch no
-	 * filesystem — so the check belongs here rather than on every row. */
+	/* Unbuffered scans can open files during a chunk pull, and open_basedir may
+	 * have tightened since execute. Rows served from a loaded chunk touch no
+	 * filesystem, so checking per chunk is enough. */
 	if (!pdo_duckdb_enforce_sandbox(S->H)) {
 		pdo_duckdb_error_stmt_code(stmt, PDO_DUCKDB_ERRCODE_SANDBOX, "Unable to apply the open_basedir sandbox profile to DuckDB");
 		pdo_duckdb_stmt_reset_result_full(stmt);
@@ -2188,9 +2157,8 @@ static int pdo_duckdb_stmt_describe(pdo_stmt_t *stmt, int colno)
 	return 1;
 }
 
-/* Reconstruct the cell as a duckdb_value and render its canonical string into
- * `result`. Used for types without a native PHP mapping, and for integers that
- * overflow zend_long on 32-bit builds. */
+/* For types without a native PHP mapping, and integers that overflow
+ * zend_long on 32-bit builds. */
 static bool pdo_duckdb_col_to_string(duckdb_vector vec, idx_t row,
 		duckdb_logical_type lt, zval *result)
 {
@@ -2203,9 +2171,8 @@ static bool pdo_duckdb_col_to_string(duckdb_vector vec, idx_t row,
 		ZVAL_NULL(result);
 		return false;
 	}
-	/* duckdb_get_varchar() on a NULL value throws a C++ InternalException that
-	 * aborts the process; guard with is_null (also covers any unhandled type
-	 * cell_to_value falls back to a NULL value for). */
+	/* duckdb_get_varchar() aborts the process on a NULL value, which is also
+	 * what cell_to_value returns for unhandled types. */
 	if (!v || duckdb_is_null_value(v)) {
 		ZVAL_NULL(result);
 	} else {
@@ -2235,16 +2202,13 @@ static int pdo_duckdb_stmt_get_col(
 	if (!S->chunk || S->cur >= S->chunk_size) {
 		return 0;
 	}
-	/* col_types/col_logical_types are sized by the cached result column count;
-	 * the chunk's own count equals it for anything DuckDB produces, but bound
-	 * the index by the cache too rather than trusting that invariant. */
+	/* The chunk's column count matches the cache for anything DuckDB produces;
+	 * bound by the cache anyway. */
 	if ((idx_t)colno >= S->col_count) {
 		return 0;
 	}
-	/* CR-001: index the per-chunk column cache loaded in fetch() instead of
-	 * re-querying the vector/validity/data pointers per cell. On a miss
-	 * (another statement pulled a chunk since) refresh it best-effort; only
-	 * when the cache itself is unavailable fall back to direct reads. */
+	/* A miss means another statement pulled a chunk since fetch(); refresh, and
+	 * fall back to direct reads only if the cache is unavailable. */
 	if (cc->chunk != S->chunk) {
 		pdo_duckdb_chunk_cache_load(S);
 	}
@@ -2354,10 +2318,7 @@ static int pdo_duckdb_stmt_get_col(
 	}
 }
 
-/* Canonical DuckDB type name for getColumnMeta()'s native_type. Distinct from
- * the coarse buckets get_col uses to pick a zval kind: here every type reports
- * its real name (a DECIMAL is "DECIMAL", not "DOUBLE") so callers can tell, e.g.,
- * a TIMESTAMP from a UUID. */
+/* getColumnMeta() native_type: the real DuckDB type name. */
 static const char *pdo_duckdb_type_name(duckdb_type t)
 {
 	switch (t) {
@@ -2421,7 +2382,7 @@ static int pdo_duckdb_stmt_col_meta(pdo_stmt_t *stmt, zend_long colno, zval *ret
 	add_assoc_string(return_value, "native_type", (char *)pdo_duckdb_type_name(tid));
 
 	switch (tid) {
-		/* BOOLEAN is PHP int 0/1 in get_col — same pdo_type as integer widths. */
+		/* get_col returns BOOLEAN as PHP int 0/1. */
 		case DUCKDB_TYPE_BOOLEAN:
 		/* Mirror get_col: the widths it returns as a PHP int. UBIGINT/HUGEINT and
 		 * wider come back as strings, so they stay PDO_PARAM_STR via the default. */
@@ -2443,9 +2404,8 @@ static int pdo_duckdb_stmt_col_meta(pdo_stmt_t *stmt, zend_long colno, zval *ret
 	}
 	add_assoc_long(return_value, "pdo_type", pdo_type);
 
-	/* DECIMAL scale (digits after the point). The total-digit width is reported
-	 * as "precision" via describe(), since PDO core overwrites any "precision"
-	 * set here from the column struct. */
+	/* describe() reports width as "precision" because PDO core overwrites any
+	 * "precision" set here. */
 	if (tid == DUCKDB_TYPE_DECIMAL) {
 		add_assoc_long(return_value, "scale", duckdb_decimal_scale(lt));
 	}
@@ -2497,8 +2457,8 @@ static int pdo_duckdb_stmt_param_hook(pdo_stmt_t *stmt, struct pdo_bound_param_d
 		return pdo_duckdb_stmt_bind_failure(S);
 	}
 
-	/* First bind of this execute round: clear the bindings DuckDB kept from the
-	 * previous execute so a param omitted this time isn't reused stale. */
+	/* DuckDB keeps bindings across executes; an omitted param would reuse a
+	 * stale value. */
 	if (!S->binds_cleared) {
 		duckdb_clear_bindings(S->prepared);
 		S->binds_cleared = true;
@@ -2512,9 +2472,9 @@ static int pdo_duckdb_stmt_param_hook(pdo_stmt_t *stmt, struct pdo_bound_param_d
 		parameter = &param->parameter;
 	}
 
-	/* Convert a local copy. try_convert_to_string / stream_read / convert_to_long
-	 * can re-enter PDOStatement::execute(), which frees stmt->bound_params
-	 * (including `param`) under this frame. Never write back through `parameter`. */
+	/* try_convert_to_string / stream_read / convert_to_long can re-enter
+	 * PDOStatement::execute(), which frees stmt->bound_params (including
+	 * `param`) under this frame. Never write back through `parameter`. */
 	{
 		HashTable *bound_at_start = stmt->bound_params;
 		zval tmp;
@@ -2569,11 +2529,8 @@ static int pdo_duckdb_stmt_param_hook(pdo_stmt_t *stmt, struct pdo_bound_param_d
 						pdo_raise_impl_error(stmt->dbh, stmt, "HY105", "Expected a stream resource");
 						break;
 					}
-					/* CR-005: cheap size probe first (seekable streams report
-					 * their size without reading); otherwise the bounded copy
-					 * below stops just past the cap, so a huge stream is never
-					 * read whole nor kept. Either way the bind fails with the
-					 * cap message through the normal bind-failure path. */
+					/* Seekable streams report their size without reading;
+					 * otherwise the bounded copy below stops just past the cap. */
 					{
 						php_stream_statbuf ssb;
 
@@ -2608,12 +2565,10 @@ static int pdo_duckdb_stmt_param_hook(pdo_stmt_t *stmt, struct pdo_bound_param_d
 						pdo_duckdb_error_stmt(stmt, "LOB stream exceeds maximum size of 64MB");
 						break;
 					}
-				/* Rewind for the next re-execute; non-seekable streams have no
-				 * rewind, so later executes bind from the current position.
-				 * Best-effort and result-ignored: user-space wrappers without
-				 * stream_seek warn from inside their seek handler, so mute
-				 * warnings across the call (PHP 8.4 exports no silence API;
-				 * save/restore EG(error_reporting) around this one call). */
+				/* Best-effort rewind for the next re-execute. User-space
+				 * wrappers without stream_seek warn from their seek handler,
+				 * and PHP 8.4 exports no silence API, so mute via
+				 * EG(error_reporting). */
 				if (!(stm->flags & PHP_STREAM_FLAG_NO_SEEK) && stm->ops->seek) {
 					zend_long orig_reporting = EG(error_reporting);
 					EG(error_reporting) = 0;

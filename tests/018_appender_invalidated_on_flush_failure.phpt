@@ -15,7 +15,7 @@ $db->exec('CREATE TABLE t (id INTEGER PRIMARY KEY, v VARCHAR)');
 
 $ap = $db->duckdbAppender('t');
 $ap->appendRow(1, 'a');
-$ap->appendRow(1, 'dup'); // duplicate primary key — the error surfaces at flush
+$ap->appendRow(1, 'dup'); // duplicate primary key; the error surfaces at flush
 
 try {
     $ap->flush();

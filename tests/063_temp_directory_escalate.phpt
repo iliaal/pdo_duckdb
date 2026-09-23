@@ -7,7 +7,7 @@ pdo_duckdb
 <?php
 // DuckDB EnableExternalAccessSetting::OnSet re-adds temporary_directory to
 // allowed_directories when external access is turned off. The driver must
-// clear temp_directory (empty) before that flip — not seed basedir root.
+// clear temp_directory (to empty, not the basedir root) before that flip.
 $outside = sys_get_temp_dir() . '/pdo_duckdb_oob_temp_' . getmypid();
 @mkdir($outside, 0700, true);
 file_put_contents("$outside/leak.csv", "col\nsecret\n");

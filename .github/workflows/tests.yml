@@ -125,11 +125,11 @@ jobs:
           php run-tests.php --show-diff -g FAIL,BORK,LEAK,XLEAK tests/
 
       - name: PDO common tests
-        # Only on 8.4/8.5: the suite runs clean there (the 2 DuckDB SQL-dialect
-        # fails in the allowlist). On 8.1-8.3 the older ext/pdo/tests files have
-        # poor isolation (generic table names, no --CLEAN--, unmarked XFAIL) that
-        # adds test-artifact noise against a shared DSN — not driver bugs, so not
-        # worth gating on. The PDO contract is version-stable; 8.4+8.5 cover it.
+        # Only on 8.4/8.5, where the suite runs clean apart from the 2
+        # allowlisted DuckDB SQL-dialect fails. On 8.1-8.3 the older
+        # ext/pdo/tests files have poor isolation (generic table names, no
+        # --CLEAN--, unmarked XFAIL) and fail against a shared DSN for reasons
+        # unrelated to the driver.
         if: matrix.php == '8.4' || matrix.php == '8.5'
         env:
           PHP_VERSION: ${{ matrix.php }}

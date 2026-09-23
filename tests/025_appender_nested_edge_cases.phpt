@@ -1,5 +1,5 @@
 --TEST--
-pdo_duckdb: Appender nested leaves — integer range, BLOB binary, scalar-into-nested
+pdo_duckdb: Appender nested leaves: integer range, BLOB binary, scalar-into-nested
 --EXTENSIONS--
 pdo
 pdo_duckdb

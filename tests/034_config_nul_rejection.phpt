@@ -12,7 +12,7 @@ function connect(array $opts) {
 }
 
 // A NUL in the option name would truncate "threads\0x" to "threads" and apply an
-// unintended option — reject it.
+// unintended option.
 try {
     connect([PDO::DUCKDB_ATTR_CONFIG => ["threads\0not_a_real_option" => "2"]]);
     echo "BAD: NUL key truncated+applied\n";

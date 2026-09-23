@@ -194,9 +194,7 @@ static duckdb_prepared_statement pdo_duckdb_appender_prepare_probe(duckdb_connec
 	return probe;
 }
 
-/* Validate one string scalar against its column's CAST probe before the native
- * appender row is touched. Returns true when the cast succeeds; on failure
- * stores an emalloc'd detail in *errp for the throw. */
+/* On failure stores an emalloc'd detail in *errp. */
 static bool pdo_duckdb_appender_probe_value(duckdb_prepared_statement probe, const char *s, size_t len, char **errp)
 {
 	duckdb_result res;
@@ -265,9 +263,8 @@ static void pdo_duckdb_appender_free(zend_object *obj)
 		}
 		a->appender = NULL;
 	}
-	/* Descriptors borrow col_types[i] for scalar leaves: destroy them first.
-	 * Probes are prepared statements on the same connection; destroy them
-	 * while it is still reachable. */
+	/* Descriptors borrow col_types[i], so destroy them first. Probes need the
+	 * connection to still be reachable. */
 	if (a->col_desc) {
 		idx_t c;
 		for (c = 0; c < a->ncols; c++) {
@@ -338,14 +335,11 @@ zend_result pdo_duckdb_appender_minit(void)
 	pdo_duckdb_appender_handlers.get_gc = pdo_duckdb_appender_get_gc;
 
 #if PHP_VERSION_ID >= 80400
-	/* Modern PDO subclass model: a duckdb: DSN yields a Pdo\Duckdb instance, so
-	 * its methods don't trip PHP 8.5's deprecation of base-PDO driver methods. */
 	pdo_duckdb_ce = register_class_Pdo_Duckdb(php_pdo_get_dbh_ce());
 	pdo_duckdb_ce->create_object = pdo_dbh_new;
 	return php_pdo_register_driver_specific_ce(&pdo_duckdb_driver, pdo_duckdb_ce);
 #else
-	/* On 8.1-8.3 the method is exposed on the base PDO object via get_driver_methods
-	 * (see below); the generated subclass registrar is unused there. */
+	/* 8.1-8.3 use get_driver_methods instead of the generated subclass. */
 	(void) register_class_Pdo_Duckdb;
 	(void) pdo_duckdb_ce;
 	return SUCCESS;
@@ -354,10 +348,8 @@ zend_result pdo_duckdb_appender_minit(void)
 
 const zend_function_entry *pdo_duckdb_get_driver_methods(pdo_dbh_t *dbh, int kind)
 {
-	/* Always expose the method on base-PDO instances (`new PDO('duckdb:')`),
-	 * for BC and for the 8.1-8.3 supported versions. On 8.4+ `PDO::connect()`
-	 * additionally yields a Pdo\Duckdb instance whose own method does not trip the
-	 * 8.5 deprecation of base-PDO driver methods. Same mechanism pdo_sqlite uses. */
+	/* Base-PDO instances (`new PDO('duckdb:')`) always get the methods, for BC
+	 * and for 8.1-8.3, as in pdo_sqlite. */
 	switch (kind) {
 		case PDO_DBH_DRIVER_METHOD_KIND_DBH:
 			return class_PdoDuckDb_Ext_methods;
@@ -366,9 +358,7 @@ const zend_function_entry *pdo_duckdb_get_driver_methods(pdo_dbh_t *dbh, int kin
 	}
 }
 
-/* {{{ duckdbAppender(string $table, ?string $schema = null): Pdo\Duckdb\Appender
- * Shared by the Pdo\Duckdb subclass method (8.4+) and the base-PDO
- * get_driver_methods vehicle (8.1-8.3). */
+/* {{{ duckdbAppender(string $table, ?string $schema = null, ?array $columns = null): Pdo\Duckdb\Appender */
 static void pdo_duckdb_appender_create_impl(INTERNAL_FUNCTION_PARAMETERS)
 {
 	zend_string *table;
@@ -396,17 +386,12 @@ static void pdo_duckdb_appender_create_impl(INTERNAL_FUNCTION_PARAMETERS)
 		RETURN_THROWS();
 	}
 
-	/* duckdb_appender_create() takes NUL-terminated const char* identifiers, so
-	 * an embedded NUL would silently truncate the table/schema name (e.g.
-	 * "safe\0bad" would append to "safe"). Reject it. */
+	/* duckdb_appender_create() would truncate "safe\0bad" to "safe". */
 	if (zend_str_has_nul_byte(table) || (schema && zend_str_has_nul_byte(schema))) {
 		zend_value_error("Pdo\\Duckdb\\Appender table and schema names must not contain a NUL byte");
 		RETURN_THROWS();
 	}
 
-	/* Validate the optional column subset up front (before creating the appender):
-	 * a non-empty list of NUL-free strings. Each name is added to the appender's
-	 * active column list below; omitted columns then take their DEFAULT/NULL. */
 	if (columns) {
 		zval *col;
 
@@ -435,9 +420,6 @@ static void pdo_duckdb_appender_create_impl(INTERNAL_FUNCTION_PARAMETERS)
 		RETURN_THROWS();
 	}
 
-	/* Restrict the appender to the requested columns, in order. add_column
-	 * switches the appender from all-columns to the named active set; a bad
-	 * column name fails here (DuckDB reports it). */
 	if (columns) {
 		zval *col;
 
@@ -458,9 +440,7 @@ static void pdo_duckdb_appender_create_impl(INTERNAL_FUNCTION_PARAMETERS)
 	a->pdo = Z_OBJ_P(ZEND_THIS);
 	GC_ADDREF(a->pdo);
 
-	/* Cache the target column logical types once, so appendRow() doesn't allocate
-	 * one per cell on the bulk-load hot path. Used to route BLOB strings (binary
-	 * vs UTF-8 varchar) and to build nested values from PHP arrays. */
+	/* Cached so appendRow() doesn't allocate a logical type per cell. */
 	a->ncols = duckdb_appender_column_count(ap);
 	if (a->ncols) {
 		idx_t c;
@@ -480,11 +460,8 @@ static void pdo_duckdb_appender_create_impl(INTERNAL_FUNCTION_PARAMETERS)
 				a->col_flags[c] |= PDO_DUCKDB_APPENDER_COL_BLOB;
 			}
 		}
-		/* Nested descriptors (CR-003): child names + child logical types (+
-		 * ARRAY size) resolved once per column; scalar leaves borrow
-		 * col_types[c]. String-cast probes (CR-007): one cached
-		 * "SELECT CAST(? AS <T>)" per spellable scalar column (NULL where
-		 * unneeded); a rejected spelling falls back to fail-at-append. */
+		/* One cached "SELECT CAST(? AS <T>)" probe per spellable scalar
+		 * column; a type the probe can't spell fails at append instead. */
 		a->col_desc = ecalloc(a->ncols, sizeof(pdo_duckdb_nested_render_type *));
 		a->col_probes = ecalloc(a->ncols, sizeof(duckdb_prepared_statement));
 		for (c = 0; c < a->ncols; c++) {
@@ -515,8 +492,8 @@ ZEND_METHOD(Pdo_Duckdb_Appender, __construct)
 	zend_throw_error(NULL, "Pdo\\Duckdb\\Appender cannot be constructed directly; use PDO::duckdbAppender()");
 }
 
-/* Live gate for appendRow/flush/close: closed appender → Error; also re-apply
- * open_basedir sandbox if basedir tightened after create. */
+/* Throws Error when closed; re-applies the sandbox if open_basedir tightened
+ * after create. */
 static pdo_duckdb_appender *pdo_duckdb_appender_live(zval *zthis)
 {
 	pdo_duckdb_appender *a = pdo_duckdb_appender_from_obj(Z_OBJ_P(zthis));
@@ -674,8 +651,8 @@ static duckdb_value pdo_duckdb_build_value(zval *z, const pdo_duckdb_nested_rend
 					argpos);
 				return NULL;
 			}
-			/* always non-NULL (even for an empty list) — create_list_value rejects
-			 * a NULL values pointer. */
+			/* create_list_value rejects a NULL values pointer, even for an empty
+			 * list. */
 			duckdb_value *vals = emalloc(sizeof(duckdb_value) * (n ? n : 1));
 			idx_t built = 0;
 			duckdb_value ret = NULL;
@@ -911,9 +888,8 @@ ZEND_METHOD(Pdo_Duckdb_Appender, appendRow)
 					st = duckdb_append_double(a->appender, Z_DVAL_P(v));
 					break;
 				default: {
-					/* IS_STRING. A PHP string maps to varchar by default, but
-					 * DuckDB rejects non-UTF-8 there. If the target column is BLOB,
-					 * append raw bytes so binary data round-trips. */
+					/* DuckDB rejects non-UTF-8 VARCHAR, so BLOB columns get raw
+					 * bytes. */
 					st = (a->col_flags[i] & PDO_DUCKDB_APPENDER_COL_BLOB)
 						? duckdb_append_blob(a->appender, Z_STRVAL_P(v), (idx_t)Z_STRLEN_P(v))
 						: duckdb_append_varchar_length(a->appender, Z_STRVAL_P(v), (idx_t)Z_STRLEN_P(v));
@@ -922,9 +898,7 @@ ZEND_METHOD(Pdo_Duckdb_Appender, appendRow)
 			}
 		}
 		if (st != DuckDBSuccess) {
-			/* A failed append invalidates the appender (DuckDB contract); mark it
-			 * unusable so the free path destroys it instead of issuing more
-			 * appends against a poisoned row. */
+			/* DuckDB invalidates the appender after a failed append. */
 			a->closed = true;
 			pdo_duckdb_appender_throw(a->appender, "Failed to append value");
 			goto build_failed;
@@ -971,8 +945,7 @@ ZEND_METHOD(Pdo_Duckdb_Appender, flush)
 		RETURN_THROWS();
 	}
 	if (duckdb_appender_flush(a->appender) != DuckDBSuccess) {
-		/* A failed flush invalidates the appender (DuckDB contract): no further
-		 * appends are possible. Mark it unusable so the free path destroys it. */
+		/* DuckDB invalidates the appender after a failed flush. */
 		a->closed = true;
 		pdo_duckdb_appender_throw(a->appender, "Failed to flush appender");
 		RETURN_THROWS();
@@ -990,8 +963,6 @@ ZEND_METHOD(Pdo_Duckdb_Appender, close)
 		RETURN_THROWS();
 	}
 	if (duckdb_appender_close(a->appender) != DuckDBSuccess) {
-		/* A failed close invalidates the appender (DuckDB contract); it's
-		 * unusable either way, so mark it closed before surfacing the error. */
 		a->closed = true;
 		pdo_duckdb_appender_throw(a->appender, "Failed to close appender");
 		RETURN_THROWS();

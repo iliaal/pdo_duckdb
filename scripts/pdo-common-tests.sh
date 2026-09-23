@@ -75,7 +75,7 @@ sed -E 's/\x1b\[[0-9;]*m//g' "$out" | tr '\r' '\n' > "$clean"
 
 # Failed-test basenames come from the FAILED TEST SUMMARY block: it is stable
 # across run-tests versions and -g flags, and it already excludes XFAIL (an
-# upstream-marked expected fail). Drop common.phpt — that's the REDIRECT parent.
+# upstream-marked expected fail). Drop common.phpt, the REDIRECT parent.
 actual="$(sed -n '/FAILED TEST SUMMARY/,/^=====/p' "$clean" \
     | grep -oE '[A-Za-z0-9_]+\.phpt' | grep -v '^common\.phpt$' | sort -u)"
 expected="$(printf '%s\n' "$EXPECTED_FAILS" | tr ', ' '\n' | grep -E '\.phpt$' | sort -u)"

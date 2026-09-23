@@ -34,9 +34,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.6.0] - 2026-08-30
 
 ### Security
-- Reject `force_mbedtls_unsafe` at connect time. Falsy values SIGSEGV inside
+- Reject `force_mbedtls_unsafe` at connect time; a falsy value SIGSEGVs
   libduckdb 1.5.3–1.5.5 (`ForceMbedtlsUnsafeSetting::SetGlobal` on a NULL
-  `DatabaseInstance`). `SET` after open is unchanged.
+  `DatabaseInstance`). `SET` after open still works.
 - Reject DECIMAL types whose width/scale fall outside DuckDB's
   `1 <= width <= 38 && scale <= width` before the fixed-buffer fast renderer.
   Crafted catalog/Parquet metadata can present any `uint8` scale; the renderer
@@ -48,13 +48,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   httpfs through another request's proxy. httpfs-only TLS settings are reset
   only if httpfs is already loaded; `RESET` of those options otherwise autoloads
   the extension.
-- Parameter EXEC_PRE conversions run on a local zval copy and never write back
-  through `param->parameter`, so a `__toString` / stream callback that
-  re-enters `execute()` cannot make the driver write through a freed
-  bound-param struct. This does not make re-entrant `execute()` safe: PDO core
-  itself caches the `bound_params` `HashTable` across the conversion
-  (`really_register_bound_param`, `dispatch_param_event`) and crashes first.
-  Do not call `execute()` from `__toString()` on the same statement.
+- Convert parameters in EXEC_PRE on a local zval copy, so a `__toString` or
+  stream callback that re-enters `execute()` can't make the driver write through
+  a freed bound-param struct. Re-entrant `execute()` still crashes inside PDO
+  core, which caches `bound_params` across the conversion; don't call
+  `execute()` from `__toString()` on the same statement.
 
 ### Changed
 - A `PDO::PARAM_LOB` stream is rewound after the driver drains it, so
@@ -73,7 +71,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - Render `DECIMAL` values whose type has no integer digits (`width == scale`,
-  e.g. `DECIMAL(2,2)`) as DuckDB does — `.05`, not `0.05`. Affected scalar cells
+  e.g. `DECIMAL(2,2)`) as DuckDB does: `.05`, not `0.05`. Affected scalar cells
   since 0.4.1 and nested `LIST`/`ARRAY`/`STRUCT`/`MAP` cells since the direct
   nested renderer was added.
 - Rebuild `PDOStatement` column metadata after re-execute when columns were
@@ -142,7 +140,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 - On open-time and runtime/`check_liveness` open_basedir sandbox, clear
-  `temp_directory` (empty — never seed basedir root), clear sticky
+  `temp_directory` (to empty, never the basedir root), clear sticky
   `log_query_path` / `profiling_output` writers, clear `allowed_configs` and
   path allowlists, and `DETACH` out-of-basedir attachments before
   `enable_external_access=false` (DuckDB's OnSet re-allowlists non-empty temp
@@ -153,7 +151,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   extension-loading config keys, applying the full escalate sequence after
   connect for file-backed DBs, and locking further DuckDB configuration changes.
   The lock blocks every later `SET`, including security-irrelevant ones
-  (`threads`, `memory_limit`, …) — pass those as connect-time DSN or
+  (`threads`, `memory_limit`, …); pass those as connect-time DSN or
   `PDO::DUCKDB_ATTR_CONFIG` options instead. `TimeZone` has no connect-time
   equivalent and is therefore not settable under `open_basedir`.
 - Redact raw `duckdb_open_ext()` failure details from connection exceptions, so
@@ -263,14 +261,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.2.1] - 2026-06-18
 
 ### Fixed
-- Linux prebuilt binaries are now genuinely self-contained. The 0.2.0 Linux
-  `.so` failed to load on a clean host (`undefined symbol:
-  _ZTVN10__cxxabiv120__function_type_infoE`) because the bundled DuckDB C++
-  runtime was never statically linked — the gcc C-driver link ignored the
-  g++-only `-static-libstdc++` flag. The build now links the static
-  `libstdc++`/`libgcc_eh` explicitly. macOS and Windows binaries were
-  unaffected. 0.2.0's broken Linux assets were removed, so installs pinned to
-  0.2.0 fall back to a source build on Linux.
+- Linux prebuilt binaries are now self-contained. The 0.2.0 Linux `.so` failed
+  to load on a clean host (`undefined symbol:
+  _ZTVN10__cxxabiv120__function_type_infoE`) because the gcc C-driver link
+  ignored the g++-only `-static-libstdc++` flag; the build now links static
+  `libstdc++`/`libgcc_eh` explicitly. macOS and Windows were unaffected. The
+  broken 0.2.0 Linux assets were removed, so 0.2.0 pins fall back to a source
+  build on Linux.
 
 ## [0.2.0] - 2026-06-18
 
@@ -310,8 +307,8 @@ Initial release. A PDO driver for DuckDB.
 - When `open_basedir` is set, the connection disables DuckDB's external SQL file
   access (`read_csv`/`COPY`/`ATTACH`/httpfs) via `enable_external_access=false`,
   fails closed if it cannot be applied, and re-enforces the sandbox on the live
-  connection at every SQL entry point — covering persistent-connection reuse and
-  `open_basedir` tightened mid-request after a connection opened.
+  connection at every SQL entry point, which covers persistent-connection reuse
+  and `open_basedir` tightened mid-request after a connection opened.
 - Embedded NUL bytes in SQL (`query`/`prepare`/`exec`) and in `duckdbAppender()`
   table/schema names are rejected, rather than silently truncating the statement
   or identifier at the NUL.

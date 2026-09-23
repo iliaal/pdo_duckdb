@@ -38,22 +38,14 @@ static zend_always_inline zend_class_entry *zend_register_internal_class_with_fl
 }
 #endif
 
-/* Driver-specific PDO attributes (values must be >= PDO_ATTR_DRIVER_SPECIFIC so
- * PDO core routes them to the driver and surfaces them in driver_options).
- * Registered as PDO::DUCKDB_* class constants in MINIT. */
+/* Values must be >= PDO_ATTR_DRIVER_SPECIFIC so PDO core routes them to the
+ * driver. */
 #define PDO_DUCKDB_ATTR_CONFIG     (PDO_ATTR_DRIVER_SPECIFIC)      /* array, connect-time */
 #define PDO_DUCKDB_ATTR_UNBUFFERED (PDO_ATTR_DRIVER_SPECIFIC + 1)  /* bool, default false */
 
-/* Driver error taxonomy (driver codes surfaced as PDO errorInfo[1]; the
- * SQLSTATE in errorInfo[0] follows the code: CONNECT maps to 08000, SYNTAX
- * to 42000, everything else to HY000):
- *   GENERAL   (1) default for runtime failures (also exec-time SQL errors
- *                 such as a missing table, which surface at execution, not
- *                 at parse time);
- *   CONNECT   (2) open/connect failures (handle factory, incl. refused config);
- *   SYNTAX    (3) prepare/parse failures (duckdb_prepare, statement extract);
- *   SANDBOX   (4) open_basedir sandbox denials (message text unchanged);
- *   STREAMING (5) mid-fetch / pending-stream errors (unbuffered results). */
+/* errorInfo[1] codes. SQLSTATE follows the code: CONNECT is 08000, SYNTAX is
+ * 42000, the rest HY000. Exec-time SQL errors such as a missing table are
+ * GENERAL, not SYNTAX, because DuckDB reports them at execution. */
 #define PDO_DUCKDB_ERRCODE_GENERAL   1
 #define PDO_DUCKDB_ERRCODE_CONNECT   2
 #define PDO_DUCKDB_ERRCODE_SYNTAX    3
@@ -71,21 +63,19 @@ typedef struct {
 	duckdb_database db;
 	duckdb_connection conn;
 	pdo_duckdb_error_info einfo;
-	/* Whether the open_basedir SQL sandbox has already been applied to this
-	 * handle. Persistent handles are escalated in place on reuse; they are not
-	 * discarded when the request policy tightens. */
+	/* Persistent handles are escalated in place on reuse, not discarded when
+	 * the request policy tightens. */
 	bool external_access_disabled;
-	/* Copy of PG(open_basedir) taken when the sandbox was applied (NULL when
-	 * unset). After escalate, DuckDB allowlists are frozen; if basedir is
-	 * re-narrowed this no longer matches and enforce_sandbox fails closed.
-	 * A copy rather than a hash: the compare sits on the appender's per-row
-	 * gate, and strcmp is both cheaper than hashing and collision-free. */
+	/* PG(open_basedir) as of sandbox apply (NULL when unset). DuckDB allowlists
+	 * are frozen after escalate, so a re-narrowed basedir no longer matches and
+	 * enforce_sandbox fails closed. Stored as a string, not a hash, because the
+	 * compare sits on the appender's per-row gate and strcmp is cheaper and
+	 * collision-free. */
 	char *sandbox_basedir;
-	/* Allocation flavour for sandbox_basedir (mirrors dbh->is_persistent, which
-	 * the sandbox helpers do not otherwise have access to). */
+	/* Mirrors dbh->is_persistent for sandbox_basedir allocation; the sandbox
+	 * helpers only see H. */
 	bool persistent;
-	/* Opt-in unbuffered (streaming) result mode for statements on this handle
-	 * (PDO::DUCKDB_ATTR_UNBUFFERED). Default false = the materialized path. */
+	/* PDO::DUCKDB_ATTR_UNBUFFERED */
 	bool unbuffered;
 	/* PDO core re-applies constructor driver_options through set_attribute()
 	 * after handle_factory. Accept DUCKDB_ATTR_CONFIG exactly for that reapply;
@@ -100,8 +90,8 @@ typedef struct _pdo_duckdb_nested_render_type {
 	idx_t child_count;
 	struct _pdo_duckdb_nested_render_type **children;
 	char **child_names;
-	/* ARRAY fixed element count, cached alongside the child type so the
-	 * appender need not query it per row (0 when not an ARRAY). */
+	/* ARRAY element count, cached for the appender's per-row path (0 when not
+	 * an ARRAY). */
 	idx_t array_size;
 } pdo_duckdb_nested_render_type;
 
@@ -118,8 +108,7 @@ typedef struct {
 	pdo_duckdb_error_info einfo;
 	/* result holds a materialized rowset that must be destroyed */
 	bool has_result;
-	/* Result is read forward-only via the data-chunk API. We stream one chunk
-	 * at a time; get_col reads column `cur` of the current chunk. */
+	/* Forward-only, one data chunk at a time; get_col reads row `cur`. */
 	duckdb_data_chunk chunk;	/* current chunk, NULL when none is loaded */
 	idx_t chunk_size;			/* rows in the current chunk */
 	idx_t cur;					/* current row within the chunk (valid after a fetch) */
@@ -146,12 +135,9 @@ typedef struct {
 	duckdb_appender appender;
 	bool closed;
 	idx_t ncols;					/* appender target column count */
-	duckdb_logical_type *col_types;	/* per-column target logical type, owned
-										 * (NULL if ncols == 0). Used to route BLOB
-										 * strings and to build nested values from
-										 * PHP arrays. */
-	duckdb_type *col_type_ids;		/* per-column duckdb_get_type_id(col_types[i]) */
-	unsigned char *col_flags;		/* per-column fast-path flags */
+	duckdb_logical_type *col_types;	/* owned; NULL if ncols == 0 */
+	duckdb_type *col_type_ids;
+	unsigned char *col_flags;		/* fast-path flags */
 	/* Cached nested metadata; scalar leaves borrow col_types[i]. NULL if ncols == 0. */
 	pdo_duckdb_nested_render_type **col_desc;
 	/* CAST probes validate strings before any append. NULL entries skip probing;
@@ -171,16 +157,13 @@ static inline pdo_duckdb_appender *pdo_duckdb_appender_from_obj(zend_object *o)
 zend_result pdo_duckdb_appender_minit(void);
 const zend_function_entry *pdo_duckdb_get_driver_methods(pdo_dbh_t *dbh, int kind);
 
-/* Release the statement-layer thread-local caches (chunk vector cache, column
- * aux cache). Safe any time; entries regrow on next use. Called at request
- * shutdown and module shutdown so grow-only malloc'd buffers are not reported
- * as leaks. */
+/* Frees the grow-only thread-local statement caches so they aren't reported as
+ * leaks at shutdown. Safe any time; entries regrow on next use. */
 void pdo_duckdb_tls_caches_shutdown(void);
 
-/* Ensure the open_basedir SQL sandbox is applied to this handle before running
- * SQL. Covers handles opened before open_basedir was tightened (their open-time
- * config didn't include the sandbox). One-time per handle. Returns false if the
- * sandbox is required but could not be applied. */
+/* Applies the open_basedir SQL sandbox before running SQL, covering handles
+ * opened before open_basedir was tightened. Returns false if the sandbox is
+ * required but could not be applied. */
 bool pdo_duckdb_enforce_sandbox(pdo_duckdb_db_handle *H);
 
 /* Keep PDO's transaction flag aligned when SQL executes transaction control
@@ -188,20 +171,13 @@ bool pdo_duckdb_enforce_sandbox(pdo_duckdb_db_handle *H);
 void pdo_duckdb_apply_transaction_effect(pdo_dbh_t *dbh,
 	pdo_duckdb_transaction_effect effect);
 
-/* Drop a sticky driver error payload (errmsg + errcode). persistent matches
- * how the message was allocated (dbh vs stmt). */
+/* persistent must match how errmsg was allocated (dbh vs stmt). */
 void pdo_duckdb_clear_einfo(pdo_duckdb_error_info *einfo, bool persistent);
 
-/* Records an error against the dbh (or stmt) with an explicit taxonomy code
- * (PDO_DUCKDB_ERRCODE_*); the SQLSTATE follows the code (08000 for CONNECT,
- * 42000 for SYNTAX, HY000 otherwise). msg is copied; pass the message
- * obtained from duckdb_result_error()/duckdb_prepare_error() or a literal. */
+/* Records an error against the dbh, or stmt when non-NULL. msg is copied. */
 extern int _pdo_duckdb_error_with_code(pdo_dbh_t *dbh, pdo_stmt_t *stmt, unsigned int code, const char *msg, const char *file, int line);
 #define pdo_duckdb_error_code(dbh, code, msg) _pdo_duckdb_error_with_code(dbh, NULL, code, msg, __FILE__, __LINE__)
 #define pdo_duckdb_error_stmt_code(stmt, code, msg) _pdo_duckdb_error_with_code((stmt)->dbh, stmt, code, msg, __FILE__, __LINE__)
-/* Records an error against the dbh (or stmt) with the default GENERAL code.
- * msg is copied; pass the message obtained from
- * duckdb_result_error()/duckdb_prepare_error() or a literal. */
 extern int _pdo_duckdb_error(pdo_dbh_t *dbh, pdo_stmt_t *stmt, const char *msg, const char *file, int line);
 #define pdo_duckdb_error(dbh, msg) _pdo_duckdb_error(dbh, NULL, msg, __FILE__, __LINE__)
 #define pdo_duckdb_error_stmt(stmt, msg) _pdo_duckdb_error((stmt)->dbh, stmt, msg, __FILE__, __LINE__)

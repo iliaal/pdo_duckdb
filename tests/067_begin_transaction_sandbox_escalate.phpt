@@ -16,7 +16,7 @@ $db->exec("SELECT 'before_sandbox' AS x");
 
 ini_set('open_basedir', __DIR__);
 
-// Escalate via beginTransaction — must clear sticky writer before BEGIN.
+// Escalate via beginTransaction, which must clear the sticky writer before BEGIN.
 $db->beginTransaction();
 $db->exec("SELECT 'after_sandbox' AS y");
 $db->commit();

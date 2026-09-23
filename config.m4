@@ -49,8 +49,8 @@ if test "$PHP_PDO_DUCKDB_STATIC" != "no"; then
     Darwin)
       dnl macOS: ld64 is multi-pass (no --start-group). libtool links the bundle
       dnl with `cc -undefined suppress`, so the DuckDB C++ runtime symbols are
-      dnl NOT auto-resolved — link libc++ explicitly (a system dylib; dynamic is
-      dnl fine, no GLIBCXX-style portability concern on macOS). Exclude bundled
+      dnl not auto-resolved; link libc++ explicitly (a system dylib, so dynamic
+      dnl linking has no GLIBCXX-style portability concern). Exclude bundled
       dnl jemalloc: DuckDB uses the system allocator on macOS, and jemalloc's
       dnl malloc-zone registration abort()s inside a dlopened bundle (SIGABRT at
       dnl the first query, no exception text).
@@ -67,17 +67,12 @@ if test "$PHP_PDO_DUCKDB_STATIC" != "no"; then
       ;;
     *)
       dnl GNU ld: --start-group resolves the circular references between the
-      dnl DuckDB archives. libduckdb is C++, but this extension is all-.c so the
-      dnl link driver is the C compiler (gcc), which does NOT link libstdc++ and
-      dnl silently IGNORES `-static-libstdc++` -- leaving the whole C++ runtime
-      dnl unresolved (hundreds of undefined std::/__cxxabi symbols, no libstdc++
-      dnl DT_NEEDED). Such a module still loads where libstdc++ already sits in
-      dnl the process (the build/CI host) but fails `dlopen` on a clean glibc box
-      dnl with `undefined symbol: _ZTVN10__cxxabiv120__function_type_infoE`. Link
-      dnl the static libstdc++ + libgcc_eh archives explicitly, inside the group,
-      dnl so the C++ runtime (incl. the C++ ABI typeinfo/vtables and the EH
-      dnl unwinder) is pulled in and the module is genuinely self-contained and
-      dnl independent of the host GLIBCXX/libgcc ABI.
+      dnl DuckDB archives. This extension is all-.c, so gcc drives the link; it
+      dnl doesn't link libstdc++ and ignores `-static-libstdc++`. The module then
+      dnl loads where libstdc++ is already in the process (the build host) but
+      dnl fails `dlopen` on a clean glibc box with `undefined symbol:
+      dnl _ZTVN10__cxxabiv120__function_type_infoE`. Link the static libstdc++ and
+      dnl libgcc_eh archives explicitly, inside the group.
       LIBSTDCXX_A=`${CXX:-g++} -print-file-name=libstdc++.a 2>/dev/null`
       LIBGCC_EH_A=`${CC:-gcc} -print-file-name=libgcc_eh.a 2>/dev/null`
       if test ! -f "$LIBSTDCXX_A"; then

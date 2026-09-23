@@ -15,12 +15,12 @@ class PdoDuckDb_Ext
      * are filled with their DEFAULT, or NULL.
      *
      * Throws ValueError for a NUL byte in $table/$schema/column names and for
-     * an empty $columns list, TypeError for non-string column names.
-     * Error("Pdo\Duckdb\Appender is closed"); close() is not idempotent. A
-     * failed native append/flush/close poisons the appender: flushed rows
-     * survive, buffered-but-unflushed rows are lost. Probe rejections
-     * ("Failed to append value: ...") and soft validation failures do not
-     * poison: the appender stays usable.
+     * an empty $columns list, TypeError for non-string column names. Using a
+     * closed or poisoned appender throws Error("Pdo\Duckdb\Appender is
+     * closed"); close() is not idempotent. A failed native append/flush/close
+     * poisons the appender: flushed rows survive, unflushed rows are lost.
+     * Probe rejections ("Failed to append value: ...") and soft validation
+     * failures leave the appender usable.
      */
     public function duckdbAppender(string $table, ?string $schema = null, ?array $columns = null): \Pdo\Duckdb\Appender {}
 
