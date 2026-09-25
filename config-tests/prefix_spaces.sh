@@ -8,6 +8,7 @@ duckdb_prefix=${DUCKDB_PREFIX:-$HOME/duckdb}
 work=$(mktemp -d)
 cp "$repo/run-tests.php" "$work/run-tests.php"
 relative_prefix="build/Duck DB $$"
+prefix_saved=0
 static_prefix="$repo/build/Duck Static $$"
 mkdir -p "$repo/build"
 rm -rf "$repo"/build/.duckdb-config-include-* "$repo"/build/.duckdb-config-libdir-* "$repo"/build/.duckdb-config-static-*
@@ -20,6 +21,12 @@ cleanup() {
     rm -f "$repo/$relative_prefix"
     if test -f "$work/configure.shared"; then
         cp "$work/configure.shared" "$repo/configure"
+    fi
+    if test "$prefix_saved" = 1; then
+        if test ! -e "$duckdb_prefix"; then
+            mv "$work/duckdb-prefix" "$duckdb_prefix"
+            prefix_saved=0
+        fi
     fi
     rm -rf "$work" "$static_prefix"
     rm -rf "$repo/build/duckdb-config-static"
@@ -49,6 +56,8 @@ if test ! -r "$duckdb_prefix/include/duckdb.h" || test ! -r "$duckdb_prefix/lib/
     exit 77
 fi
 duckdb_prefix=$(CDPATH= cd -- "$duckdb_prefix" && pwd -P)
+prefix_sha=$(sha256sum "$duckdb_prefix/lib/libduckdb.so")
+prefix_sha=${prefix_sha%% *}
 
 rm -rf "$static_prefix"
 mkdir -p "$static_prefix"
@@ -115,8 +124,27 @@ case "$(uname -s)" in
     ;;
 esac
 test -r "$duckdb_prefix/lib/libduckdb.so"
+# phpize's clean rule deletes every *.so below the build root. When the
+# configured prefix lives in the checkout, move it aside so clean cannot remove
+# the user's libduckdb.so; an interrupted run restores it from cleanup.
+case "$duckdb_prefix" in
+  "$repo"/*)
+    if ! mv "$duckdb_prefix" "$work/duckdb-prefix"; then
+        echo "cannot move in-tree DuckDB prefix aside; skipping make clean" >&2
+        exit 1
+    fi
+    prefix_saved=1
+    ;;
+esac
+test -r "$duckdb_prefix/lib/libduckdb.so" 2>/dev/null || test "$prefix_saved" = 1
 make clean >/dev/null 2>&1
-test -r "$duckdb_prefix/lib/libduckdb.so"
+if test "$prefix_saved" = 1; then
+    mv "$work/duckdb-prefix" "$duckdb_prefix"
+    prefix_saved=0
+fi
+current_sha=$(sha256sum "$duckdb_prefix/lib/libduckdb.so")
+current_sha=${current_sha%% *}
+test "$current_sha" = "$prefix_sha"
 if ! ./configure --with-pdo-duckdb="$relative_prefix" --with-php-config="$php_config" >"$work/after-clean-configure.log" 2>&1; then
     cat "$work/after-clean-configure.log" >&2
     exit 1
