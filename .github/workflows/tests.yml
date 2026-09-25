@@ -102,6 +102,26 @@ jobs:
           cp raw/duckdb.h duckdb/include/
           cp raw/libduckdb.so duckdb/lib/
 
+
+      - name: Configure prefix regression probe
+        if: matrix.php == '8.4'
+        env:
+          DUCKDB_PREFIX: ${{ github.workspace }}/duckdb
+        run: config-tests/prefix_spaces.sh
+
+      - name: Configure prefix regression probe (symlink)
+        # Cheap guard-only pass: exercises the physical-repo/symlink-prefix
+        # comparison without repeating the full configure/build probe.
+        if: matrix.php == '8.4'
+        env:
+          DUCKDB_PREFIX: ${{ github.workspace }}/duckdb
+        run: |
+          link="$RUNNER_TEMP/pdo-duckdb-wt"
+          rm -f "$link"
+          ln -s "$PWD" "$link"
+          PDO_DUCKDB_PROBE_GUARD_ONLY=1 \
+            DUCKDB_PREFIX="$PWD/duckdb" \
+            "$link/config-tests/prefix_spaces.sh"
       - name: Build extension
         run: |
           phpize
