@@ -10,7 +10,7 @@ cp "$repo/run-tests.php" "$work/run-tests.php"
 relative_prefix="build/Duck DB $$"
 static_prefix="$repo/build/Duck Static $$"
 mkdir -p "$repo/build"
-rm -f "$repo"/build/.duckdb-config-include-* "$repo"/build/.duckdb-config-libdir-*
+rm -rf "$repo"/build/.duckdb-config-include-* "$repo"/build/.duckdb-config-libdir-* "$repo"/build/.duckdb-config-static-*
 rm -f "$repo/confdefs.h"
 cleanup() {
     status=$?
@@ -22,18 +22,12 @@ cleanup() {
         cp "$work/configure.shared" "$repo/configure"
     fi
     rm -rf "$work" "$static_prefix"
-    rm -f "$repo/confdefs.h"
-    rm -f "$repo/build/duckdb-config-static"
-    rm -f "$repo"/build/.duckdb-config-include-* "$repo"/build/.duckdb-config-libdir-*
+    rm -rf "$repo/build/duckdb-config-static"
+    rm -rf "$repo"/build/.duckdb-config-include-* "$repo"/build/.duckdb-config-libdir-* "$repo"/build/.duckdb-config-static-*
     if test "$status" -ne 0 && test -x "$repo/configure"; then
         (cd "$repo" && ./configure --with-pdo-duckdb="$duckdb_prefix" --with-php-config="$php_config" >/dev/null 2>&1)
     fi
     rm -f "$repo/modules/pdo_duckdb.so" "$repo/modules/pdo_duckdb.la"
-    if test -d "$repo/build/duckdb-config-include" || test -L "$repo/build/duckdb-config-include"; then
-        rm -f "$repo/build/duckdb-config-include" "$repo/build/duckdb-config-libdir"
-        ln -s "$duckdb_prefix/include" "$repo/build/duckdb-config-include"
-        ln -s "$duckdb_prefix/lib" "$repo/build/duckdb-config-libdir"
-    fi
     if test "$status" -eq 0; then
         if ! (cd "$repo" && make -n >/dev/null 2>&1); then
             status=1
@@ -54,6 +48,7 @@ if test ! -r "$duckdb_prefix/include/duckdb.h" || test ! -r "$duckdb_prefix/lib/
     echo "DUCKDB_PREFIX must contain include/duckdb.h and lib/libduckdb.so" >&2
     exit 77
 fi
+duckdb_prefix=$(CDPATH= cd -- "$duckdb_prefix" && pwd -P)
 
 rm -rf "$static_prefix"
 mkdir -p "$static_prefix"
@@ -119,10 +114,13 @@ case "$(uname -s)" in
     grep -E 'PDO_DUCKDB_SHARED_LIBADD = "?\-Wl,-rpath,' Makefile >/dev/null
     ;;
 esac
-rm -f "$repo/build/duckdb-config-include" "$repo/build/duckdb-config-libdir"
-ln -s "$duckdb_prefix/include" "$repo/build/duckdb-config-include"
-ln -s "$duckdb_prefix/lib" "$repo/build/duckdb-config-libdir"
+test -r "$duckdb_prefix/lib/libduckdb.so"
 make clean >/dev/null 2>&1
+test -r "$duckdb_prefix/lib/libduckdb.so"
+if ! ./configure --with-pdo-duckdb="$relative_prefix" --with-php-config="$php_config" >"$work/after-clean-configure.log" 2>&1; then
+    cat "$work/after-clean-configure.log" >&2
+    exit 1
+fi
 make -n >"$work/dynamic-make.log" 2>&1
 make -j2 >"$work/dynamic-build.log" 2>&1
 make install INSTALL_ROOT="$work/install" >"$work/install.log" 2>&1
@@ -165,4 +163,5 @@ if ! ./configure --with-pdo-duckdb="$duckdb_prefix" --with-php-config="$php_conf
     exit 1
 fi
 grep -F 'build/duckdb-config-libdir' Makefile >/dev/null
+test -r "$duckdb_prefix/lib/libduckdb.so"
 echo 'configure prefix whitespace probe: ok'

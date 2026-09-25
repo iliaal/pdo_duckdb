@@ -21,7 +21,7 @@ PHP_ARG_ENABLE([pdo-duckdb-dev],
   [no])
 
 pdo_duckdb_cleanup_staged_aliases() {
-  rm -f "$DUCKDB_CONFIG_STATIC_STAGE" "$DUCKDB_CONFIG_INCLUDE_STAGE" "$DUCKDB_CONFIG_LIBDIR_STAGE"
+  rm -rf "$DUCKDB_CONFIG_STATIC_STAGE" "$DUCKDB_CONFIG_INCLUDE_STAGE" "$DUCKDB_CONFIG_LIBDIR_STAGE"
 }
 
 pdo_duckdb_promote_alias() {
@@ -41,7 +41,7 @@ pdo_duckdb_promote_alias() {
     fi
     return 1
   fi
-  if test "$pdo_had_final" = 1 && ! rm -f "$pdo_backup"; then
+  if test "$pdo_had_final" = 1 && ! rm -rf "$pdo_backup"; then
     return 1
   fi
   return 0
@@ -73,13 +73,13 @@ pdo_duckdb_promote_aliases() {
     return 1
   fi
   if ! mv -f "$pdo_stage_libdir" "$pdo_final_libdir"; then
-    rm -f "$pdo_final_include"
+    rm -rf "$pdo_final_include"
     test "$pdo_had_include" = 1 && mv -f "$pdo_backup_include" "$pdo_final_include"
     test "$pdo_had_libdir" = 1 && mv -f "$pdo_backup_libdir" "$pdo_final_libdir"
     return 1
   fi
-  test "$pdo_had_include" = 0 || rm -f "$pdo_backup_include" || return 1
-  test "$pdo_had_libdir" = 0 || rm -f "$pdo_backup_libdir" || return 1
+  test "$pdo_had_include" = 0 || rm -rf "$pdo_backup_include" || return 1
+  test "$pdo_had_libdir" = 0 || rm -rf "$pdo_backup_libdir" || return 1
   return 0
 }
 if test "$PHP_PDO_DUCKDB_STATIC" != "no"; then
@@ -111,11 +111,20 @@ if test "$PHP_PDO_DUCKDB_STATIC" != "no"; then
   DUCKDB_CONFIG_STATIC_FINAL="build/duckdb-config-static"
   DUCKDB_CONFIG_STATIC_STAGE="build/.duckdb-config-static-$$"
   DUCKDB_CONFIG_STATIC_DIR="$DUCKDB_CONFIG_STATIC_STAGE"
-  if ! rm -f "$DUCKDB_CONFIG_STATIC_STAGE" ||
-      ! ln -s "$DUCKDB_STATIC_DIR" "$DUCKDB_CONFIG_STATIC_STAGE"; then
+  if ! mkdir -p "$DUCKDB_CONFIG_STATIC_STAGE" ||
+      ! cp -p "$DUCKDB_STATIC_DIR/duckdb.h" "$DUCKDB_CONFIG_STATIC_STAGE/duckdb.h"; then
     pdo_duckdb_cleanup_staged_aliases
-    AC_MSG_ERROR([Unable to create a whitespace-free path for the DuckDB static bundle.])
+    AC_MSG_ERROR([Unable to stage the DuckDB static bundle.])
   fi
+  for DUCKDB_ARCHIVE in "$DUCKDB_STATIC_DIR"/*.a; do
+    DUCKDB_ARCHIVE_NAME=${DUCKDB_ARCHIVE##*/}
+    if ! ln "$DUCKDB_ARCHIVE" "$DUCKDB_CONFIG_STATIC_STAGE/$DUCKDB_ARCHIVE_NAME" 2>/dev/null; then
+      cp -p "$DUCKDB_ARCHIVE" "$DUCKDB_CONFIG_STATIC_STAGE/$DUCKDB_ARCHIVE_NAME" || {
+        pdo_duckdb_cleanup_staged_aliases
+        AC_MSG_ERROR([Unable to stage a DuckDB static archive.])
+      }
+    fi
+  done
   DUCKDB_CONFIG_INCLUDE="$DUCKDB_CONFIG_STATIC_STAGE"
 
   dnl Pass the whole archive set as a single comma-joined -Wl, token. libtool
@@ -228,11 +237,16 @@ elif test "$PHP_PDO_DUCKDB" != "no"; then
   DUCKDB_CONFIG_INCLUDE="$DUCKDB_CONFIG_INCLUDE_STAGE"
   DUCKDB_CONFIG_LIBDIR="$DUCKDB_CONFIG_LIBDIR_STAGE"
   DUCKDB_RUNTIME_LIBDIR="$DUCKDB_DIR/$PHP_LIBDIR"
-  if ! rm -f "$DUCKDB_CONFIG_INCLUDE_STAGE" "$DUCKDB_CONFIG_LIBDIR_STAGE" ||
-      ! ln -s "$DUCKDB_INCDIR" "$DUCKDB_CONFIG_INCLUDE_STAGE" ||
-      ! ln -s "$DUCKDB_DIR/$PHP_LIBDIR" "$DUCKDB_CONFIG_LIBDIR_STAGE"; then
+  if ! rm -rf "$DUCKDB_CONFIG_INCLUDE_STAGE" "$DUCKDB_CONFIG_LIBDIR_STAGE" ||
+      ! mkdir -p "$DUCKDB_CONFIG_INCLUDE_STAGE" "$DUCKDB_CONFIG_LIBDIR_STAGE" ||
+      ! cp -p "$DUCKDB_INCDIR/duckdb.h" "$DUCKDB_CONFIG_INCLUDE_STAGE/duckdb.h"; then
     pdo_duckdb_cleanup_staged_aliases
-    AC_MSG_ERROR([Unable to create whitespace-free DuckDB build paths.])
+    AC_MSG_ERROR([Unable to stage the DuckDB headers.])
+  fi
+  if ! ln "$DUCKDB_DIR/$PHP_LIBDIR/libduckdb.so" "$DUCKDB_CONFIG_LIBDIR_STAGE/libduckdb.so" 2>/dev/null &&
+      ! cp -p "$DUCKDB_DIR/$PHP_LIBDIR/libduckdb.so" "$DUCKDB_CONFIG_LIBDIR_STAGE/libduckdb.so"; then
+    pdo_duckdb_cleanup_staged_aliases
+    AC_MSG_ERROR([Unable to stage the DuckDB shared library.])
   fi
 
   save_CHECK_LDFLAGS="$LDFLAGS"
