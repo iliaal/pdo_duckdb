@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-repo=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
 phpize=${PHPIZE:-phpize}
 php_config=${PHP_CONFIG:-php-config}
 duckdb_prefix=${DUCKDB_PREFIX:-$HOME/duckdb}
