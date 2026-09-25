@@ -20,6 +20,68 @@ PHP_ARG_ENABLE([pdo-duckdb-dev],
   [no],
   [no])
 
+pdo_duckdb_cleanup_staged_aliases() {
+  rm -f "$DUCKDB_CONFIG_STATIC_STAGE" "$DUCKDB_CONFIG_INCLUDE_STAGE" "$DUCKDB_CONFIG_LIBDIR_STAGE"
+}
+
+pdo_duckdb_promote_alias() {
+  pdo_stage=$1
+  pdo_final=$2
+  pdo_backup="$2.backup-$$"
+  pdo_had_final=0
+  if test -e "$pdo_final" || test -L "$pdo_final"; then
+    pdo_had_final=1
+    if ! mv -f "$pdo_final" "$pdo_backup"; then
+      return 1
+    fi
+  fi
+  if ! mv -f "$pdo_stage" "$pdo_final"; then
+    if test "$pdo_had_final" = 1; then
+      mv -f "$pdo_backup" "$pdo_final" || return 1
+    fi
+    return 1
+  fi
+  if test "$pdo_had_final" = 1 && ! rm -f "$pdo_backup"; then
+    return 1
+  fi
+  return 0
+}
+
+pdo_duckdb_promote_aliases() {
+  pdo_stage_include=$1
+  pdo_final_include=$2
+  pdo_stage_libdir=$3
+  pdo_final_libdir=$4
+  pdo_backup_include="$2.backup-$$"
+  pdo_backup_libdir="$4.backup-$$"
+  pdo_had_include=0
+  pdo_had_libdir=0
+  if test -e "$pdo_final_include" || test -L "$pdo_final_include"; then
+    pdo_had_include=1
+    mv -f "$pdo_final_include" "$pdo_backup_include" || return 1
+  fi
+  if test -e "$pdo_final_libdir" || test -L "$pdo_final_libdir"; then
+    pdo_had_libdir=1
+    mv -f "$pdo_final_libdir" "$pdo_backup_libdir" || {
+      test "$pdo_had_include" = 1 && mv -f "$pdo_backup_include" "$pdo_final_include"
+      return 1
+    }
+  fi
+  if ! mv -f "$pdo_stage_include" "$pdo_final_include"; then
+    test "$pdo_had_include" = 1 && mv -f "$pdo_backup_include" "$pdo_final_include"
+    test "$pdo_had_libdir" = 1 && mv -f "$pdo_backup_libdir" "$pdo_final_libdir"
+    return 1
+  fi
+  if ! mv -f "$pdo_stage_libdir" "$pdo_final_libdir"; then
+    rm -f "$pdo_final_include"
+    test "$pdo_had_include" = 1 && mv -f "$pdo_backup_include" "$pdo_final_include"
+    test "$pdo_had_libdir" = 1 && mv -f "$pdo_backup_libdir" "$pdo_final_libdir"
+    return 1
+  fi
+  test "$pdo_had_include" = 0 || rm -f "$pdo_backup_include" || return 1
+  test "$pdo_had_libdir" = 0 || rm -f "$pdo_backup_libdir" || return 1
+  return 0
+}
 if test "$PHP_PDO_DUCKDB_STATIC" != "no"; then
   dnl --- Self-contained build: statically link the whole DuckDB archive set.
   dnl libduckdb is C++, so link via the C++ driver and pull libstdc++/libgcc in
@@ -28,23 +90,46 @@ if test "$PHP_PDO_DUCKDB_STATIC" != "no"; then
   PHP_PDO_DUCKDB="yes"
   PHP_CHECK_PDO_INCLUDES
   DUCKDB_STATIC_DIR="$PHP_PDO_DUCKDB_STATIC"
-  DUCKDB_HEADER_DIR="$DUCKDB_STATIC_DIR"
 
   AC_MSG_CHECKING([for the DuckDB static-libs bundle])
   if test ! -r "$DUCKDB_STATIC_DIR/duckdb.h" || test ! -r "$DUCKDB_STATIC_DIR/libduckdb_static.a"; then
     AC_MSG_RESULT([not found])
     AC_MSG_ERROR([Need duckdb.h and libduckdb_static.a in $DUCKDB_STATIC_DIR (the DuckDB static-libs bundle).])
   fi
+  case "$DUCKDB_STATIC_DIR" in
+    /*) ;;
+    *) DUCKDB_STATIC_DIR=`cd "$DUCKDB_STATIC_DIR" && pwd -P` ;;
+  esac
+  DUCKDB_HEADER_DIR="$DUCKDB_STATIC_DIR"
   AC_MSG_RESULT([found in $DUCKDB_STATIC_DIR])
 
   PHP_REQUIRE_CXX()
-  PHP_ADD_INCLUDE([$DUCKDB_STATIC_DIR])
+  if ! mkdir -p build; then
+    pdo_duckdb_cleanup_staged_aliases
+    AC_MSG_ERROR([Unable to create the DuckDB build directory.])
+  fi
+  DUCKDB_CONFIG_STATIC_FINAL="build/duckdb-config-static"
+  DUCKDB_CONFIG_STATIC_STAGE="build/.duckdb-config-static-$$"
+  DUCKDB_CONFIG_STATIC_DIR="$DUCKDB_CONFIG_STATIC_STAGE"
+  if ! rm -f "$DUCKDB_CONFIG_STATIC_STAGE" ||
+      ! ln -s "$DUCKDB_STATIC_DIR" "$DUCKDB_CONFIG_STATIC_STAGE"; then
+    pdo_duckdb_cleanup_staged_aliases
+    AC_MSG_ERROR([Unable to create a whitespace-free path for the DuckDB static bundle.])
+  fi
+  DUCKDB_CONFIG_INCLUDE="$DUCKDB_CONFIG_STATIC_STAGE"
 
   dnl Pass the whole archive set as a single comma-joined -Wl, token. libtool
   dnl otherwise reorders/de-duplicates loose .a arguments and drops archives
   dnl (symptom: a smaller module and an undefined duckdb::… symbol at load); one
   dnl -Wl, token is forwarded to the compiler verbatim.
-  DUCKDB_STATIC_ARCHIVES=`echo $DUCKDB_STATIC_DIR/*.a | tr ' ' ','`
+  DUCKDB_STATIC_ARCHIVES=""
+  for DUCKDB_ARCHIVE in "$DUCKDB_CONFIG_STATIC_DIR"/*.a; do
+    if test -z "$DUCKDB_STATIC_ARCHIVES"; then
+      DUCKDB_STATIC_ARCHIVES="$DUCKDB_ARCHIVE"
+    else
+      DUCKDB_STATIC_ARCHIVES="$DUCKDB_STATIC_ARCHIVES,$DUCKDB_ARCHIVE"
+    fi
+  done
   case `uname -s 2>/dev/null` in
     Darwin)
       dnl macOS: ld64 is multi-pass (no --start-group). libtool links the bundle
@@ -54,7 +139,17 @@ if test "$PHP_PDO_DUCKDB_STATIC" != "no"; then
       dnl jemalloc: DuckDB uses the system allocator on macOS, and jemalloc's
       dnl malloc-zone registration abort()s inside a dlopened bundle (SIGABRT at
       dnl the first query, no exception text).
-      DUCKDB_MAC_ARCHIVES=`echo $DUCKDB_STATIC_DIR/*.a | tr ' ' '\n' | grep -v jemalloc | tr '\n' ',' | sed 's/,$//'`
+      DUCKDB_MAC_ARCHIVES=""
+      for DUCKDB_ARCHIVE in "$DUCKDB_CONFIG_STATIC_DIR"/*.a; do
+        case "$DUCKDB_ARCHIVE" in
+          *jemalloc*) continue ;;
+        esac
+        if test -z "$DUCKDB_MAC_ARCHIVES"; then
+          DUCKDB_MAC_ARCHIVES="$DUCKDB_ARCHIVE"
+        else
+          DUCKDB_MAC_ARCHIVES="$DUCKDB_MAC_ARCHIVES,$DUCKDB_ARCHIVE"
+        fi
+      done
       dnl -twolevel_namespace overrides libtool's hardcoded, deprecated
       dnl `-flat_namespace`. Under flat namespace DuckDB's statically-linked ICU
       dnl binds malloc/free across library boundaries, so memory it allocates is
@@ -76,6 +171,7 @@ if test "$PHP_PDO_DUCKDB_STATIC" != "no"; then
       LIBSTDCXX_A=`${CXX:-g++} -print-file-name=libstdc++.a 2>/dev/null`
       LIBGCC_EH_A=`${CC:-gcc} -print-file-name=libgcc_eh.a 2>/dev/null`
       if test ! -f "$LIBSTDCXX_A"; then
+        pdo_duckdb_cleanup_staged_aliases
         AC_MSG_ERROR([static libstdc++.a not found via '${CXX:-g++} -print-file-name=libstdc++.a'. This self-contained static Linux build requires a GNU toolchain with the static libstdc++ archive. On GNU/gcc, install the static libstdc++ (the libstdc++-*-dev / libstdc++-static package). If CXX is a non-GNU compiler such as clang++ (which uses libc++, not libstdc++), this link mode is unsupported -- set CXX=g++. Refusing to build a module that would not load on a clean host.])
       fi
       PDO_DUCKDB_SHARED_LIBADD="-Wl,--start-group,$DUCKDB_STATIC_ARCHIVES,$LIBSTDCXX_A,$LIBGCC_EH_A,--end-group -static-libgcc"
@@ -85,50 +181,108 @@ if test "$PHP_PDO_DUCKDB_STATIC" != "no"; then
 elif test "$PHP_PDO_DUCKDB" != "no"; then
   PHP_CHECK_PDO_INCLUDES
 
-  if test "$PHP_PDO_DUCKDB" = "yes"; then
-    SEARCH_PATH="/usr/local /usr /opt/duckdb /opt/homebrew /usr/local/opt/duckdb"
-  else
-    SEARCH_PATH="$PHP_PDO_DUCKDB"
-  fi
-
   AC_MSG_CHECKING([for duckdb.h])
   DUCKDB_DIR=""
   DUCKDB_INCDIR=""
-  for i in $SEARCH_PATH; do
-    if test -r "$i/include/duckdb.h"; then
-      DUCKDB_DIR=$i
-      DUCKDB_INCDIR=$i/include
-      break
-    elif test -r "$i/duckdb.h"; then
-      DUCKDB_DIR=$i
-      DUCKDB_INCDIR=$i
-      break
-    fi
-  done
+  if test "$PHP_PDO_DUCKDB" = "yes"; then
+    for i in /usr/local /usr /opt/duckdb /opt/homebrew /usr/local/opt/duckdb; do
+      if test -r "$i/include/duckdb.h"; then
+        DUCKDB_DIR="$i"
+        DUCKDB_INCDIR="$i/include"
+        break
+      elif test -r "$i/duckdb.h"; then
+        DUCKDB_DIR="$i"
+        DUCKDB_INCDIR="$i"
+        break
+      fi
+    done
+  elif test -r "$PHP_PDO_DUCKDB/include/duckdb.h"; then
+    DUCKDB_DIR="$PHP_PDO_DUCKDB"
+    DUCKDB_INCDIR="$PHP_PDO_DUCKDB/include"
+  elif test -r "$PHP_PDO_DUCKDB/duckdb.h"; then
+    DUCKDB_DIR="$PHP_PDO_DUCKDB"
+    DUCKDB_INCDIR="$PHP_PDO_DUCKDB"
+  fi
 
   if test -z "$DUCKDB_DIR"; then
     AC_MSG_RESULT([not found])
     AC_MSG_ERROR([Cannot find duckdb.h. Install the DuckDB C library, or point at it with --with-pdo-duckdb=DIR])
   fi
   AC_MSG_RESULT([found in $DUCKDB_INCDIR])
-  DUCKDB_HEADER_DIR="$DUCKDB_INCDIR"
+  case "$DUCKDB_DIR" in
+    /*) ;;
+    *) DUCKDB_DIR=`cd "$DUCKDB_DIR" && pwd -P` ;;
+  esac
+  case "$DUCKDB_INCDIR" in
+    /*) ;;
+    *) DUCKDB_INCDIR=`cd "$DUCKDB_INCDIR" && pwd -P` ;;
+  esac
+  if ! mkdir -p build; then
+    pdo_duckdb_cleanup_staged_aliases
+    AC_MSG_ERROR([Unable to create the DuckDB build directory.])
+  fi
+  DUCKDB_CONFIG_INCLUDE_FINAL="build/duckdb-config-include"
+  DUCKDB_CONFIG_LIBDIR_FINAL="build/duckdb-config-libdir"
+  DUCKDB_CONFIG_INCLUDE_STAGE="build/.duckdb-config-include-$$"
+  DUCKDB_CONFIG_LIBDIR_STAGE="build/.duckdb-config-libdir-$$"
+  DUCKDB_CONFIG_INCLUDE="$DUCKDB_CONFIG_INCLUDE_STAGE"
+  DUCKDB_CONFIG_LIBDIR="$DUCKDB_CONFIG_LIBDIR_STAGE"
+  DUCKDB_RUNTIME_LIBDIR="$DUCKDB_DIR/$PHP_LIBDIR"
+  if ! rm -f "$DUCKDB_CONFIG_INCLUDE_STAGE" "$DUCKDB_CONFIG_LIBDIR_STAGE" ||
+      ! ln -s "$DUCKDB_INCDIR" "$DUCKDB_CONFIG_INCLUDE_STAGE" ||
+      ! ln -s "$DUCKDB_DIR/$PHP_LIBDIR" "$DUCKDB_CONFIG_LIBDIR_STAGE"; then
+    pdo_duckdb_cleanup_staged_aliases
+    AC_MSG_ERROR([Unable to create whitespace-free DuckDB build paths.])
+  fi
 
-  PHP_ADD_INCLUDE([$DUCKDB_INCDIR])
-  PHP_ADD_LIBRARY_WITH_PATH([duckdb], [$DUCKDB_DIR/$PHP_LIBDIR], [PDO_DUCKDB_SHARED_LIBADD])
-
+  save_CHECK_LDFLAGS="$LDFLAGS"
+  LDFLAGS="$LDFLAGS -L$DUCKDB_CONFIG_LIBDIR_STAGE"
   PHP_CHECK_LIBRARY([duckdb], [duckdb_appender_error_data],
     [],
-    [AC_MSG_ERROR([Could not find a DuckDB 1.5.3-compatible libduckdb. Check config.log for details.])],
-    [-L$DUCKDB_DIR/$PHP_LIBDIR])
+    [pdo_duckdb_cleanup_staged_aliases; AC_MSG_ERROR([Could not find a DuckDB 1.5.3-compatible libduckdb. Check config.log for details.])],
+    [])
+  LDFLAGS="$save_CHECK_LDFLAGS"
+
 fi
 
 if test "$PHP_PDO_DUCKDB" != "no"; then
   save_CPPFLAGS="$CPPFLAGS"
-  CPPFLAGS="$CPPFLAGS -I$DUCKDB_HEADER_DIR"
+  dnl AC_CHECK_DECLS expands CPPFLAGS as shell words; use the stable,
+  dnl whitespace-free symlink created for the compiler build flags.
+  CPPFLAGS="$CPPFLAGS -I$DUCKDB_CONFIG_INCLUDE"
   AC_CHECK_DECLS([DUCKDB_TYPE_VARIANT], [],
-    [AC_MSG_ERROR([DuckDB 1.5.3 or newer headers are required (DUCKDB_TYPE_VARIANT is missing).])],
+    [pdo_duckdb_cleanup_staged_aliases; AC_MSG_ERROR([DuckDB 1.5.3 or newer headers are required (DUCKDB_TYPE_VARIANT is missing).])],
     [[#include <duckdb.h>]])
   CPPFLAGS="$save_CPPFLAGS"
+  if test -n "$DUCKDB_CONFIG_STATIC_FINAL"; then
+    if ! pdo_duckdb_promote_alias "$DUCKDB_CONFIG_STATIC_STAGE" "$DUCKDB_CONFIG_STATIC_FINAL"; then
+      pdo_duckdb_cleanup_staged_aliases
+      AC_MSG_ERROR([Unable to promote the DuckDB static build alias.])
+    fi
+    DUCKDB_CONFIG_STATIC_DIR="$DUCKDB_CONFIG_STATIC_FINAL"
+    DUCKDB_CONFIG_INCLUDE="$DUCKDB_CONFIG_STATIC_FINAL"
+    PDO_DUCKDB_SHARED_LIBADD=`printf '%s\n' "$PDO_DUCKDB_SHARED_LIBADD" | sed "s|$DUCKDB_CONFIG_STATIC_STAGE|$DUCKDB_CONFIG_STATIC_FINAL|g"`
+    PHP_ADD_INCLUDE([$DUCKDB_CONFIG_INCLUDE])
+  else
+    if ! pdo_duckdb_promote_aliases "$DUCKDB_CONFIG_INCLUDE_STAGE" "$DUCKDB_CONFIG_INCLUDE_FINAL" "$DUCKDB_CONFIG_LIBDIR_STAGE" "$DUCKDB_CONFIG_LIBDIR_FINAL"; then
+      pdo_duckdb_cleanup_staged_aliases
+      AC_MSG_ERROR([Unable to promote DuckDB build aliases.])
+    fi
+    DUCKDB_CONFIG_INCLUDE="$DUCKDB_CONFIG_INCLUDE_FINAL"
+    DUCKDB_CONFIG_LIBDIR="$DUCKDB_CONFIG_LIBDIR_FINAL"
+    PHP_ADD_INCLUDE([$DUCKDB_CONFIG_INCLUDE])
+    save_PHP_RPATHS="$PHP_RPATHS"
+    PHP_ADD_LIBRARY_WITH_PATH([duckdb], [$DUCKDB_CONFIG_LIBDIR], [PDO_DUCKDB_SHARED_LIBADD])
+    if test "$ext_shared" = "yes"; then
+      if test -n "$ld_runpath_switch"; then
+        PDO_DUCKDB_SHARED_LIBADD="\"$ld_runpath_switch$DUCKDB_RUNTIME_LIBDIR\" -L$DUCKDB_CONFIG_LIBDIR -lduckdb"
+      else
+        PDO_DUCKDB_SHARED_LIBADD="-L$DUCKDB_CONFIG_LIBDIR -lduckdb"
+      fi
+    else
+      PHP_RPATHS="$save_PHP_RPATHS $DUCKDB_RUNTIME_LIBDIR"
+    fi
+  fi
 
   if test "$PHP_PDO_DUCKDB_DEV" != "no"; then
     dnl -Wno-unused-parameter: PDO's handler ABI passes context args many

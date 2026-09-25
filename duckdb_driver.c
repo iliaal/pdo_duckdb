@@ -330,8 +330,14 @@ static bool pdo_duckdb_sql_skip_dollar_quote(pdo_duckdb_sql_scanner *scanner)
 
 	while (tag_end < scanner->len) {
 		unsigned char c = (unsigned char)scanner->sql[tag_end];
+
+		/* Match DuckDB's libpg_query dolq_start/dolq_cont classes. The
+		 * scanner works on bytes, so every UTF-8 continuation/lead byte in
+		 * a valid non-ASCII tag is accepted just as DuckDB accepts it. Digits
+		 * are valid after the first tag character (but not as its first). */
 		if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
-				(c >= '0' && c <= '9') || c == '_')) {
+				c == '_' || c >= 0x80 ||
+				(tag_end > start + 1 && c >= '0' && c <= '9'))) {
 			break;
 		}
 		tag_end++;
