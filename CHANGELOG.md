@@ -9,14 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Clear stale statement results across bind normalization and later execute-array
-  conversion failures, and harden DuckDB dollar-quote scanning and whitespace-safe
-  out-of-tree configuration.
+- Clear stale statement results across driver-dispatched bind normalization
+  failures, and harden DuckDB dollar-quote scanning plus whitespace-safe
+  out-of-tree configuration and CI probe coverage.
 
 ### Known limitation
 
-- PHP PDO converts the first execute-array string before invoking driver hooks;
-  immediate metadata/row-count reset for that upstream-only path remains an
+- PHP PDO converts execute-array strings before invoking driver hooks; immediate
+  metadata/row-count reset for first and later conversion failures remains an
   explicit XFAIL until php-src exposes a conversion-failure hook.
 
 ## [0.7.1] - 2026-09-04

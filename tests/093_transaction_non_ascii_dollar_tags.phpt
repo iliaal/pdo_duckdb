@@ -21,6 +21,12 @@ foreach ([
 $rawTag = "\x24\x80\x24";
 echo 'raw=', $db->exec("BEGIN;SELECT {$rawTag};{$rawTag};ROLLBACK"), "\n";
 echo 'raw state=', $db->inTransaction() ? 'active' : 'idle', "\n";
+try {
+    $db->exec('BEGIN;SELECT $1$;ROLLBACK');
+    echo "digit_first=accepted\n";
+} catch (PDOException $e) {
+    echo 'digit_first=', str_contains($e->getMessage(), 'Parser Error') ? 'parser' : 'other', "\n";
+}
 echo 'single=', $db->query("SELECT {$tag}value;body{$tag}")->fetchColumn(), "\n";
 ?>
 --EXPECT--
@@ -32,4 +38,5 @@ numeric=0
 numeric state=idle
 raw=0
 raw state=idle
+digit_first=parser
 single=value;body

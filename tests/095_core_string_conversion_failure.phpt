@@ -3,6 +3,7 @@ pdo_duckdb: throwing PDO string conversion clears stale SELECT and INSERT state
 --EXTENSIONS--
 pdo
 pdo_duckdb
+--XFAIL--
 --FILE--
 <?php
 $db = new PDO('duckdb::memory:');

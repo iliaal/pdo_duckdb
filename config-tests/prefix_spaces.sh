@@ -15,6 +15,7 @@ rm -f "$repo/confdefs.h"
 cleanup() {
     status=$?
     set +e
+    trap - EXIT HUP INT TERM
     cp "$work/run-tests.php" "$repo/run-tests.php"
     rm -f "$repo/$relative_prefix"
     if test -f "$work/configure.shared"; then
@@ -38,9 +39,16 @@ cleanup() {
             status=1
         fi
     fi
-    return "$status"
+    exit "$status"
 }
-trap cleanup EXIT HUP INT TERM
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+if test "${PDO_DUCKDB_PROBE_FORCE_FAILURE:-}" = 1; then
+    exit 42
+fi
 
 if test ! -r "$duckdb_prefix/include/duckdb.h" || test ! -r "$duckdb_prefix/lib/libduckdb.so"; then
     echo "DUCKDB_PREFIX must contain include/duckdb.h and lib/libduckdb.so" >&2

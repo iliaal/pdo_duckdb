@@ -2080,14 +2080,6 @@ static int pdo_duckdb_stmt_fetch(pdo_stmt_t *stmt,
 	enum pdo_fetch_orientation ori, zend_long offset)
 {
 	pdo_duckdb_stmt *S = (pdo_duckdb_stmt *)stmt->driver_data;
-	/* PDO core converts execute-array strings before dispatching EXEC_PRE.
-	 * A throwing __toString leaves an empty bound_params hash and never calls
-	 * the driver hook, so invalidate the previous result on the next fetch. */
-	if (stmt->bound_params && zend_hash_num_elements(stmt->bound_params) == 0) {
-		pdo_duckdb_stmt_bind_failure(stmt);
-		S->done = true;
-		return 0;
-	}
 
 	if (!S->has_result || S->done) {
 		return 0;
@@ -2145,11 +2137,6 @@ static int pdo_duckdb_stmt_fetch(pdo_stmt_t *stmt,
 static int pdo_duckdb_stmt_describe(pdo_stmt_t *stmt, int colno)
 {
 	pdo_duckdb_stmt *S = (pdo_duckdb_stmt *)stmt->driver_data;
-	if (stmt->bound_params && zend_hash_num_elements(stmt->bound_params) == 0) {
-		pdo_duckdb_stmt_bind_failure(stmt);
-		S->done = true;
-		return 0;
-	}
 	const char *name;
 
 	if (!S->has_result || (idx_t)colno >= S->col_count) {
@@ -2460,6 +2447,7 @@ static int pdo_duckdb_stmt_param_hook(pdo_stmt_t *stmt, struct pdo_bound_param_d
 			} else if (stmt->bound_param_map) {
 				zend_string *nv = zend_hash_find_ptr(stmt->bound_param_map, param->name);
 				if (nv == NULL) {
+					pdo_duckdb_error_stmt(stmt, "parameter was not defined");
 					return pdo_duckdb_stmt_bind_failure(stmt);
 				}
 				param->paramno = ZEND_ATOL(ZSTR_VAL(nv) + 1) - 1;

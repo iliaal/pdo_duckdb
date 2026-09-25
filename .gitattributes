@@ -19,3 +19,4 @@ tests/*.phpt -text
 /.release-config  export-ignore
 /.gitignore       export-ignore
 /.gitattributes   export-ignore
+/config-tests/  export-ignore
