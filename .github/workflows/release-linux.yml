@@ -40,7 +40,7 @@ jobs:
         os:
           - ubuntu-24.04
           - ubuntu-24.04-arm
-          - macos-14
+          - macos-15
         php:
           - version: '8.4'
             baseline-image: php:8.4-cli-bookworm@sha256:138a210978c7767ef2a26f499c413fe6de1c13233c9a5068139565c81191b1ac
@@ -53,10 +53,11 @@ jobs:
 
       - name: Setup PHP
         if: runner.os == 'macOS'
-        uses: shivammathur/setup-php@0c6410c6709d6e7cfd54e89079beef1c650039b8 # Upstream Homebrew timeout fix (unreleased)
+        uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # 2.37.2
         timeout-minutes: 20
         env:
-          verbose: 'true'
+          # The released watchdog mistakes partial-line output for inactivity.
+          SETUP_PHP_BREW_WATCHDOG: 'false'
         with:
           php-version: ${{ matrix.php.version }}
           coverage: none
@@ -69,7 +70,7 @@ jobs:
           case "$MATRIX_OS" in
             ubuntu-24.04)     asset=static-libs-linux-amd64.zip ;;
             ubuntu-24.04-arm) asset=static-libs-linux-arm64.zip ;;
-            macos-14)         asset=static-libs-osx-arm64.zip ;;
+            macos-15)         asset=static-libs-osx-arm64.zip ;;
             *) echo "unmapped runner $MATRIX_OS"; exit 1 ;;
           esac
           curl -fsSL "https://github.com/duckdb/duckdb/releases/download/v${DUCKDB_VERSION}/${asset}" -o "$asset"
