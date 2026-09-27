@@ -174,7 +174,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # v2
+      - uses: shivammathur/setup-php@0c6410c6709d6e7cfd54e89079beef1c650039b8 # Upstream Homebrew timeout fix (unreleased)
+        timeout-minutes: 20
+        env:
+          verbose: 'true'
         with:
           php-version: '8.4'
           tools: phpize, php-config
