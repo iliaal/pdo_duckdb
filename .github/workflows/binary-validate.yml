@@ -32,8 +32,8 @@ jobs:
           - { os: ubuntu-24.04,     duckdb: static-libs-linux-amd64.zip, php: '8.5', baseline-image: 'php:8.5-cli-bookworm@sha256:fb740987f3e7aefd7f52d1f961fa91602874f2b6a5b0bf0105725f8987b54bee' }
           - { os: ubuntu-24.04-arm, duckdb: static-libs-linux-arm64.zip, php: '8.4', baseline-image: 'php:8.4-cli-bookworm@sha256:138a210978c7767ef2a26f499c413fe6de1c13233c9a5068139565c81191b1ac' }
           - { os: ubuntu-24.04-arm, duckdb: static-libs-linux-arm64.zip, php: '8.5', baseline-image: 'php:8.5-cli-bookworm@sha256:fb740987f3e7aefd7f52d1f961fa91602874f2b6a5b0bf0105725f8987b54bee' }
-          - { os: macos-14,         duckdb: static-libs-osx-arm64.zip,   php: '8.4', baseline-image: '' }
-          - { os: macos-14,         duckdb: static-libs-osx-arm64.zip,   php: '8.5', baseline-image: '' }
+          - { os: macos-15,         duckdb: static-libs-osx-arm64.zip,   php: '8.4', baseline-image: '' }
+          - { os: macos-15,         duckdb: static-libs-osx-arm64.zip,   php: '8.5', baseline-image: '' }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -41,7 +41,11 @@ jobs:
 
       - name: Setup PHP
         if: runner.os == 'macOS'
-        uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # v2
+        uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # 2.37.2
+        timeout-minutes: 20
+        env:
+          # The released watchdog mistakes partial-line output for inactivity.
+          SETUP_PHP_BREW_WATCHDOG: 'false'
         with:
           php-version: ${{ matrix.php }}
           coverage: none
@@ -54,8 +58,8 @@ jobs:
           asset="$DUCKDB_ASSET"
           curl -fsSL "https://github.com/duckdb/duckdb/releases/download/v${DUCKDB_VERSION}/$asset" -o "$asset"
           grep "  $asset$" .github/duckdb-sha256.txt | shasum -a 256 --check --strict
-          mkdir -p duckdb-static
-          unzip -o -q "$asset" -d duckdb-static
+          mkdir -p "$RUNNER_TEMP/DuckDB Static"
+          unzip -o -q "$asset" -d "$RUNNER_TEMP/DuckDB Static"
 
       - name: Build (static, self-contained)
         shell: bash
@@ -66,19 +70,24 @@ jobs:
           if [ "$RUNNER_OS" = Linux ]; then
             docker run --rm \
               -v "$GITHUB_WORKSPACE:/work" \
+              -v "$RUNNER_TEMP/DuckDB Static:/DuckDB Static:ro" \
               -w /work \
               "$PHP_BASELINE_IMAGE" \
               bash -euo pipefail -c '
                 apt-get update -qq
                 apt-get install -y --no-install-recommends autoconf g++ make pkg-config
                 phpize
-                ./configure --with-pdo-duckdb-static=/work/duckdb-static --enable-pdo-duckdb-dev
+                ./configure --with-pdo-duckdb-static="/DuckDB Static" --enable-pdo-duckdb-dev
+                make -j"$(getconf _NPROCESSORS_ONLN)"
+                make clean
                 make -j"$(getconf _NPROCESSORS_ONLN)"
               '
           else
             export MACOSX_DEPLOYMENT_TARGET=11.0
             phpize
-            ./configure --with-pdo-duckdb-static="$GITHUB_WORKSPACE/duckdb-static" --enable-pdo-duckdb-dev
+            ./configure --with-pdo-duckdb-static="$RUNNER_TEMP/DuckDB Static" --enable-pdo-duckdb-dev
+            make -j"$(getconf _NPROCESSORS_ONLN)"
+            make clean
             make -j"$(getconf _NPROCESSORS_ONLN)"
           fi
           ls -lh modules/pdo_duckdb.so

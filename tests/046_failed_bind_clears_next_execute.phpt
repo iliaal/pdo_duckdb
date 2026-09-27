@@ -13,6 +13,8 @@ $st->execute([123]);
 echo 'first value: ', $st->fetchColumn(), "\n";
 
 echo 'extra bind failed: ', $st->execute([456, 999]) ? 'no' : 'yes', "\n";
+echo 'stale fetch: ', var_export($st->fetchColumn(), true), "\n";
+echo 'column count: ', $st->columnCount(), "\n";
 
 echo 'empty execute after failed bind failed: ', $st->execute([]) ? 'no' : 'yes', "\n";
 
@@ -22,5 +24,7 @@ echo 'rebound value: ', $st->fetchColumn(), "\n";
 --EXPECT--
 first value: 123
 extra bind failed: yes
+stale fetch: false
+column count: 0
 empty execute after failed bind failed: yes
 rebound value: 789

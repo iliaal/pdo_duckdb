@@ -102,13 +102,26 @@ jobs:
           cp raw/duckdb.h duckdb/include/
           cp raw/libduckdb.so duckdb/lib/
 
+
+      - name: Configure prefix regression probe (symlink and in-tree TMPDIR)
+        if: matrix.php == '8.4'
+        env:
+          DUCKDB_PREFIX: ${{ github.workspace }}/duckdb
+        run: |
+          link="$RUNNER_TEMP/pdo-duckdb-wt"
+          ln -s "$PWD" "$link"
+          mkdir -p "$PWD/build/probe-tmp"
+          sha256sum duckdb/lib/libduckdb.so run-tests.php > "$RUNNER_TEMP/probe-input.sha256"
+          TMPDIR="$PWD/build/probe-tmp" "$link/config-tests/prefix_spaces.sh"
+          sha256sum --check "$RUNNER_TEMP/probe-input.sha256"
       - name: Build extension
+        shell: bash
         run: |
           phpize
           ./configure --with-pdo-duckdb="$PWD/duckdb" --enable-pdo-duckdb-dev
-          WARNINGS=$(make -j"$(nproc)" 2>&1 | tee /dev/stderr | grep -c 'warning:' || true)
-          if [ "$WARNINGS" -gt 0 ]; then
-            echo "::error::Build produced $WARNINGS warning(s)"
+          make -j"$(nproc)" 2>&1 | tee "$RUNNER_TEMP/build.log"
+          if grep -q 'warning:' "$RUNNER_TEMP/build.log"; then
+            echo "::error::Build produced warnings"
             exit 1
           fi
 
@@ -153,6 +166,57 @@ jobs:
           DUCKDB_PREFIX="$PWD/duckdb" \
           EXT="$PWD/modules/pdo_duckdb.so" \
           bash scripts/pdo-common-tests.sh
+
+  macos-shared:
+    name: PHP 8.4 - macOS shared library
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # 2.37.2
+        timeout-minutes: 20
+        env:
+          # The released watchdog mistakes partial-line output for inactivity.
+          SETUP_PHP_BREW_WATCHDOG: 'false'
+        with:
+          php-version: '8.4'
+          tools: phpize, php-config
+          coverage: none
+      - name: Download libduckdb
+        run: |
+          asset=libduckdb-osx-universal.zip
+          curl -fsSL -o "$asset" \
+            "https://github.com/duckdb/duckdb/releases/download/v${DUCKDB_VERSION}/${asset}"
+          grep "  $asset$" .github/duckdb-sha256.txt | shasum -a 256 --check --strict
+          mkdir -p "$RUNNER_TEMP/Duck DB/include" "$RUNNER_TEMP/Duck DB/lib" raw
+          unzip -o "$asset" -d raw
+          cp raw/duckdb.h "$RUNNER_TEMP/Duck DB/include/"
+          cp raw/libduckdb.dylib "$RUNNER_TEMP/Duck DB/lib/"
+      - name: Build and rebuild after clean
+        run: |
+          phpize
+          ./configure --with-pdo-duckdb="$RUNNER_TEMP/Duck DB" --enable-pdo-duckdb-dev
+          make -j"$(getconf _NPROCESSORS_ONLN)"
+          make clean
+          make -j"$(getconf _NPROCESSORS_ONLN)"
+      - name: Run tests
+        run: |
+          TEST_PHP_EXECUTABLE="$(command -v php)"
+          export TEST_PHP_EXECUTABLE
+          export TEST_PHP_ARGS="-d extension=$PWD/modules/pdo_duckdb.so"
+          export NO_INTERACTION=1
+          # shellcheck disable=SC2016
+          php -d "extension=$PWD/modules/pdo_duckdb.so" -r '
+            if (!extension_loaded("pdo_duckdb")) { exit(1); }
+            $db = new PDO("duckdb::memory:");
+            exit($db->query("SELECT 42")->fetchColumn() === 42 ? 0 : 1);
+          '
+          php run-tests.php --show-diff -g FAIL,BORK,LEAK,XLEAK tests/
+
+  static-build:
+    name: Static release build
+    uses: ./.github/workflows/binary-validate.yml
 
   linux-php-branch:
     # setup-php's '8.6' is a php-src master snapshot, not the PHP-8.6 branch,
@@ -207,13 +271,14 @@ jobs:
           echo "/tmp/php-branch/bin" >> "$GITHUB_PATH"
 
       - name: Build extension
+        shell: bash
         run: |
           phpize
           ./configure --with-pdo-duckdb="$PWD/duckdb" --enable-pdo-duckdb-dev \
             --with-php-config=/tmp/php-branch/bin/php-config
-          WARNINGS=$(make -j"$(nproc)" 2>&1 | tee /dev/stderr | grep -c 'warning:' || true)
-          if [ "$WARNINGS" -gt 0 ]; then
-            echo "::error::Build produced $WARNINGS warning(s)"
+          make -j"$(nproc)" 2>&1 | tee "$RUNNER_TEMP/build.log"
+          if grep -q 'warning:' "$RUNNER_TEMP/build.log"; then
+            echo "::error::Build produced warnings"
             exit 1
           fi
 

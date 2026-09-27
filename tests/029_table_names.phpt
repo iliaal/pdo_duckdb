@@ -11,9 +11,14 @@ $db = PHP_VERSION_ID >= 80400 ? PDO::connect('duckdb::memory:') : new PDO('duckd
 $db->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
 $db->exec("CREATE SCHEMA s; CREATE TABLE s.orders(id INT); CREATE TABLE users(id INT);");
 
-var_dump($db->duckdbTableNames("SELECT * FROM users u JOIN s.orders o ON u.id = o.id"));
+$names = $db->duckdbTableNames("SELECT * FROM users u JOIN s.orders o ON u.id = o.id");
+// DuckDB returns names in unordered_set iteration order.
+sort($names);
+var_dump($names);
 
-var_dump($db->duckdbTableNames("SELECT * FROM users u JOIN s.orders o ON u.id = o.id", true));
+$names = $db->duckdbTableNames("SELECT * FROM users u JOIN s.orders o ON u.id = o.id", true);
+sort($names);
+var_dump($names);
 
 // CTE name is not a table
 var_dump($db->duckdbTableNames("WITH c AS (SELECT 1) SELECT * FROM c, users"));
