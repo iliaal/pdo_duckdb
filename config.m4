@@ -111,20 +111,12 @@ if test "$PHP_PDO_DUCKDB_STATIC" != "no"; then
   DUCKDB_CONFIG_STATIC_FINAL="build/duckdb-config-static"
   DUCKDB_CONFIG_STATIC_STAGE="build/.duckdb-config-static-$$"
   DUCKDB_CONFIG_STATIC_DIR="$DUCKDB_CONFIG_STATIC_STAGE"
-  if ! mkdir -p "$DUCKDB_CONFIG_STATIC_STAGE" ||
-      ! cp -p "$DUCKDB_STATIC_DIR/duckdb.h" "$DUCKDB_CONFIG_STATIC_STAGE/duckdb.h"; then
+  dnl Directory aliases survive PHP's recursive `make clean` and preserve
+  dnl relative symlinks between the original bundle's files.
+  if ! ln -s "$DUCKDB_STATIC_DIR" "$DUCKDB_CONFIG_STATIC_STAGE"; then
     pdo_duckdb_cleanup_staged_aliases
     AC_MSG_ERROR([Unable to stage the DuckDB static bundle.])
   fi
-  for DUCKDB_ARCHIVE in "$DUCKDB_STATIC_DIR"/*.a; do
-    DUCKDB_ARCHIVE_NAME=${DUCKDB_ARCHIVE##*/}
-    if ! ln "$DUCKDB_ARCHIVE" "$DUCKDB_CONFIG_STATIC_STAGE/$DUCKDB_ARCHIVE_NAME" 2>/dev/null; then
-      cp -p "$DUCKDB_ARCHIVE" "$DUCKDB_CONFIG_STATIC_STAGE/$DUCKDB_ARCHIVE_NAME" || {
-        pdo_duckdb_cleanup_staged_aliases
-        AC_MSG_ERROR([Unable to stage a DuckDB static archive.])
-      }
-    fi
-  done
   DUCKDB_CONFIG_INCLUDE="$DUCKDB_CONFIG_STATIC_STAGE"
 
   dnl Pass the whole archive set as a single comma-joined -Wl, token. libtool
@@ -238,13 +230,13 @@ elif test "$PHP_PDO_DUCKDB" != "no"; then
   DUCKDB_CONFIG_LIBDIR="$DUCKDB_CONFIG_LIBDIR_STAGE"
   DUCKDB_RUNTIME_LIBDIR="$DUCKDB_DIR/$PHP_LIBDIR"
   if ! rm -rf "$DUCKDB_CONFIG_INCLUDE_STAGE" "$DUCKDB_CONFIG_LIBDIR_STAGE" ||
-      ! mkdir -p "$DUCKDB_CONFIG_INCLUDE_STAGE" "$DUCKDB_CONFIG_LIBDIR_STAGE" ||
-      ! cp -p "$DUCKDB_INCDIR/duckdb.h" "$DUCKDB_CONFIG_INCLUDE_STAGE/duckdb.h"; then
+      ! ln -s "$DUCKDB_INCDIR" "$DUCKDB_CONFIG_INCLUDE_STAGE"; then
     pdo_duckdb_cleanup_staged_aliases
     AC_MSG_ERROR([Unable to stage the DuckDB headers.])
   fi
-  if ! ln "$DUCKDB_DIR/$PHP_LIBDIR/libduckdb.so" "$DUCKDB_CONFIG_LIBDIR_STAGE/libduckdb.so" 2>/dev/null &&
-      ! cp -p "$DUCKDB_DIR/$PHP_LIBDIR/libduckdb.so" "$DUCKDB_CONFIG_LIBDIR_STAGE/libduckdb.so"; then
+  dnl Let the native linker select .so, .dylib, or its platform equivalent.
+  if test ! -d "$DUCKDB_RUNTIME_LIBDIR" ||
+      ! ln -s "$DUCKDB_RUNTIME_LIBDIR" "$DUCKDB_CONFIG_LIBDIR_STAGE"; then
     pdo_duckdb_cleanup_staged_aliases
     AC_MSG_ERROR([Unable to stage the DuckDB shared library.])
   fi
@@ -285,6 +277,7 @@ if test "$PHP_PDO_DUCKDB" != "no"; then
     DUCKDB_CONFIG_INCLUDE="$DUCKDB_CONFIG_INCLUDE_FINAL"
     DUCKDB_CONFIG_LIBDIR="$DUCKDB_CONFIG_LIBDIR_FINAL"
     PHP_ADD_INCLUDE([$DUCKDB_CONFIG_INCLUDE])
+    save_DUCKDB_LDFLAGS="$LDFLAGS"
     save_PHP_RPATHS="$PHP_RPATHS"
     PHP_ADD_LIBRARY_WITH_PATH([duckdb], [$DUCKDB_CONFIG_LIBDIR], [PDO_DUCKDB_SHARED_LIBADD])
     if test "$ext_shared" = "yes"; then
@@ -294,7 +287,14 @@ if test "$PHP_PDO_DUCKDB" != "no"; then
         PDO_DUCKDB_SHARED_LIBADD="-L$DUCKDB_CONFIG_LIBDIR -lduckdb"
       fi
     else
-      PHP_RPATHS="$save_PHP_RPATHS $DUCKDB_RUNTIME_LIBDIR"
+      LDFLAGS="$save_DUCKDB_LDFLAGS -L$DUCKDB_CONFIG_LIBDIR"
+      PHP_RPATHS="$save_PHP_RPATHS"
+      dnl PHP_UTILIZE_RPATHS splits paths on whitespace. Quote the runtime
+      dnl path only in final-link flags, outside configure's compiler probes.
+      if test -n "$ld_runpath_switch"; then
+        EXTRA_LDFLAGS="$EXTRA_LDFLAGS \"$ld_runpath_switch$DUCKDB_RUNTIME_LIBDIR\""
+        EXTRA_LDFLAGS_PROGRAM="$EXTRA_LDFLAGS_PROGRAM \"$ld_runpath_switch$DUCKDB_RUNTIME_LIBDIR\""
+      fi
     fi
   fi
 

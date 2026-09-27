@@ -2427,6 +2427,21 @@ static int pdo_duckdb_stmt_bind_failure(pdo_stmt_t *stmt)
 	return 0;
 }
 
+static bool pdo_duckdb_stmt_is_executing(pdo_stmt_t *stmt)
+{
+	zend_execute_data *execute_data = EG(current_execute_data);
+
+	/* NORMALIZE also runs inside standalone binds. Only the active internal
+	 * execute() frame means a normalization failure invalidates the result. */
+	return execute_data && execute_data->func
+		&& execute_data->func->type == ZEND_INTERNAL_FUNCTION
+		&& execute_data->func->common.scope
+		&& zend_string_equals_literal(execute_data->func->common.scope->name, "PDOStatement")
+		&& zend_string_equals_literal(execute_data->func->common.function_name, "execute")
+		&& Z_TYPE(execute_data->This) == IS_OBJECT
+		&& Z_OBJ(execute_data->This) == &stmt->std;
+}
+
 static int pdo_duckdb_stmt_param_hook(pdo_stmt_t *stmt, struct pdo_bound_param_data *param,
 		enum pdo_param_event event_type)
 {
@@ -2448,7 +2463,8 @@ static int pdo_duckdb_stmt_param_hook(pdo_stmt_t *stmt, struct pdo_bound_param_d
 				zend_string *nv = zend_hash_find_ptr(stmt->bound_param_map, param->name);
 				if (nv == NULL) {
 					pdo_duckdb_error_stmt(stmt, "parameter was not defined");
-					return pdo_duckdb_stmt_bind_failure(stmt);
+					return pdo_duckdb_stmt_is_executing(stmt)
+						? pdo_duckdb_stmt_bind_failure(stmt) : 0;
 				}
 				param->paramno = ZEND_ATOL(ZSTR_VAL(nv) + 1) - 1;
 			}

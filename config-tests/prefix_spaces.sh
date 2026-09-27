@@ -1,200 +1,216 @@
 #!/bin/sh
 set -eu
 
-repo=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
+source_repo=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd -P)
 phpize=${PHPIZE:-phpize}
 php_config=${PHP_CONFIG:-php-config}
-duckdb_prefix=${DUCKDB_PREFIX:-$HOME/duckdb}
-work=$(CDPATH= cd -- "$(mktemp -d)" && pwd -P)
-cp "$repo/run-tests.php" "$work/run-tests.php"
-relative_prefix="build/Duck DB $$"
-prefix_saved=0
-static_prefix="$repo/build/Duck Static $$"
-mkdir -p "$repo/build"
-rm -rf "$repo"/build/.duckdb-config-include-* "$repo"/build/.duckdb-config-libdir-* "$repo"/build/.duckdb-config-static-*
-rm -f "$repo/confdefs.h"
+duckdb_prefix=${DUCKDB_PREFIX:-${HOME}/duckdb}
+work=$(mktemp -d /tmp/pdo-duckdb-prefix.XXXXXXXX)
 cleanup() {
     status=$?
     set +e
     trap - EXIT HUP INT TERM
-    cp "$work/run-tests.php" "$repo/run-tests.php"
-    rm -f "$repo/$relative_prefix"
-    if test -f "$work/configure.shared"; then
-        cp "$work/configure.shared" "$repo/configure"
+    if test "${status}" -ne 0 && test "${status}" -ne 42; then
+        for log in "${work}"/*build.log; do
+            test ! -f "${log}" || tail -n 30 "${log}" >&2
+        done
     fi
-    if test "$prefix_saved" = 1; then
-        if test ! -e "$duckdb_prefix"; then
-            mv "$work/duckdb-prefix" "$duckdb_prefix"
-            prefix_saved=0
-        fi
-    fi
-    rm -rf "$work" "$static_prefix"
-    rm -rf "$repo/build/duckdb-config-static"
-    rm -rf "$repo"/build/.duckdb-config-include-* "$repo"/build/.duckdb-config-libdir-* "$repo"/build/.duckdb-config-static-*
-    if test "$status" -ne 0 && test -x "$repo/configure"; then
-        (cd "$repo" && ./configure --with-pdo-duckdb="$duckdb_prefix" --with-php-config="$php_config" >/dev/null 2>&1)
-    fi
-    rm -f "$repo/modules/pdo_duckdb.so" "$repo/modules/pdo_duckdb.la"
-    if test "$status" -eq 0; then
-        if ! (cd "$repo" && make -n >/dev/null 2>&1); then
-            status=1
-        fi
-    fi
-    exit "$status"
+    rm -rf "${work}"
+    exit "${status}"
 }
 trap cleanup EXIT
 trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
+work=$(CDPATH='' cd -- "${work}" && pwd -P)
+case "${work}/" in
+    "${source_repo}/"*)
+        echo 'probe scratch directory must be outside the checkout' >&2
+        exit 1
+        ;;
+    *) ;;
+esac
+
 if test "${PDO_DUCKDB_PROBE_FORCE_FAILURE:-}" = 1; then
     exit 42
 fi
 
-if test ! -r "$duckdb_prefix/include/duckdb.h" || test ! -r "$duckdb_prefix/lib/libduckdb.so"; then
+if test ! -r "${duckdb_prefix}/include/duckdb.h" || test ! -r "${duckdb_prefix}/lib/libduckdb.so"; then
     echo "DUCKDB_PREFIX must contain include/duckdb.h and lib/libduckdb.so" >&2
     exit 77
 fi
-duckdb_prefix=$(CDPATH= cd -- "$duckdb_prefix" && pwd -P)
-prefix_sha=$(sha256sum "$duckdb_prefix/lib/libduckdb.so")
+duckdb_prefix=$(CDPATH='' cd -- "${duckdb_prefix}" && pwd -P)
+prefix_sha=$(sha256sum "${duckdb_prefix}/lib/libduckdb.so")
 prefix_sha=${prefix_sha%% *}
 
-pdo_duckdb_probe_clean_guard() {
-    test -r "$duckdb_prefix/lib/libduckdb.so"
-    case "$duckdb_prefix" in
-      "$repo"/*)
-        if ! mv "$duckdb_prefix" "$work/duckdb-prefix"; then
-            echo "cannot move in-tree DuckDB prefix aside; skipping make clean" >&2
-            return 1
-        fi
-        prefix_saved=1
-        ;;
-    esac
-    make clean >/dev/null 2>&1
-    if test "$prefix_saved" = 1; then
-        mv "$work/duckdb-prefix" "$duckdb_prefix"
-        prefix_saved=0
-    fi
-    current_sha=$(sha256sum "$duckdb_prefix/lib/libduckdb.so")
-    current_sha=${current_sha%% *}
-    test "$current_sha" = "$prefix_sha"
-}
+repo="${work}/source"
+out_source="${work}/out-source"
+mkdir "${repo}" "${out_source}"
+cp "${source_repo}"/*.c "${source_repo}"/*.h "${source_repo}/config.m4" "${repo}/"
+cp "${repo}"/* "${out_source}/"
+relative_prefix='build/Duck DB'
+static_prefix="${work}/Duck Static"
+mkdir -p "${static_prefix}"
+ln -s "${duckdb_prefix}/include/duckdb.h" "${static_prefix}/duckdb.h"
+ar rcs "${static_prefix}/libduckdb_static.a"
+ar rcs "${static_prefix}/libduckdb_math.a"
 
-if test "${PDO_DUCKDB_PROBE_GUARD_ONLY:-}" = 1; then
-    pdo_duckdb_probe_clean_guard
-    exit 0
-fi
+mkdir -p "${work}/Duck DB/include" "${work}/Duck DB/lib"
+mkdir -p "${repo}/build"
+ln -s "${work}/Duck DB" "${repo}/${relative_prefix}"
+ln -s "${duckdb_prefix}/include/duckdb.h" "${work}/Duck DB/include/duckdb.h"
+ln -s "${duckdb_prefix}/lib/libduckdb.so" "${work}/Duck DB/lib/libduckdb.so.1"
+ln -s libduckdb.so.1 "${work}/Duck DB/lib/libduckdb.so"
 
-rm -rf "$static_prefix"
-mkdir -p "$static_prefix"
-ln -s "$duckdb_prefix/include/duckdb.h" "$static_prefix/duckdb.h"
-ar rcs "$static_prefix/libduckdb_static.a"
-ar rcs "$static_prefix/libduckdb_math.a"
-
-mkdir -p "$work/Duck DB/include" "$work/Duck DB/lib"
-ln -s "$work/Duck DB" "$repo/$relative_prefix"
-ln -s "$duckdb_prefix/include/duckdb.h" "$work/Duck DB/include/duckdb.h"
-ln -s "$duckdb_prefix/lib/libduckdb.so" "$work/Duck DB/lib/libduckdb.so"
-
-cd "$repo"
-"$phpize" >"$work/phpize.log" 2>&1
-out_source="$work/source"
-mkdir "$out_source"
-cp -R "$repo/." "$out_source/"
-rm -rf "$out_source/build" "$out_source/modules" "$out_source/.libs" "$out_source/config.log" "$out_source/confdefs.h" "$out_source/config.status" "$out_source/config.cache" "$out_source/Makefile" "$out_source/libtool" "$out_source/config.h" "$out_source/config.h.in"
-(cd "$out_source" && "$phpize" >"$work/out-of-tree-phpize.log" 2>&1)
-out_tree="$work/out-of-tree"
-mkdir "$out_tree"
-if ! (cd "$out_tree" && "$out_source/configure" --with-pdo-duckdb="$duckdb_prefix" --with-php-config="$php_config") >"$work/out-of-tree.log" 2>&1; then
-    cat "$work/out-of-tree.log" >&2
+cd "${repo}"
+"${phpize}" >"${work}/phpize.log" 2>&1
+(cd "${out_source}" && "${phpize}" >"${work}/out-of-tree-phpize.log" 2>&1)
+out_tree="${work}/out-of-tree"
+mkdir "${out_tree}"
+if ! (cd "${out_tree}" && "${out_source}/configure" --with-pdo-duckdb="${duckdb_prefix}" --with-php-config="${php_config}") >"${work}/out-of-tree.log" 2>&1; then
+    cat "${work}/out-of-tree.log" >&2
     exit 1
 fi
-make -C "$out_tree" -n >"$work/out-of-tree-make.log" 2>&1
-cp "$repo/configure" "$work/configure.shared"
-failed_prefix="$work/Failed Prefix"
-mkdir -p "$failed_prefix/include"
-ln -s "$duckdb_prefix/include/duckdb.h" "$failed_prefix/include/duckdb.h"
-if ! ./configure --with-pdo-duckdb="$duckdb_prefix" --with-php-config="$php_config" >"$work/baseline.log" 2>&1; then
-    cat "$work/baseline.log" >&2
+make -C "${out_tree}" -n >"${work}/out-of-tree-make.log" 2>&1
+make -C "${out_tree}" -j2 >"${work}/out-of-tree-build.log" 2>&1
+cp "${repo}/configure" "${work}/configure.shared"
+failed_prefix="${work}/Failed Prefix"
+mkdir -p "${failed_prefix}/include"
+ln -s "${duckdb_prefix}/include/duckdb.h" "${failed_prefix}/include/duckdb.h"
+if ! ./configure --with-pdo-duckdb="${duckdb_prefix}" --with-php-config="${php_config}" >"${work}/baseline.log" 2>&1; then
+    cat "${work}/baseline.log" >&2
     exit 1
 fi
-make -n >"$work/baseline-make.log" 2>&1
-if ./configure --with-pdo-duckdb="$failed_prefix" --with-php-config="$php_config" >"$work/failed-reconfigure.log" 2>&1; then
+make -n >"${work}/baseline-make.log" 2>&1
+make -j2 >"${work}/baseline-build.log" 2>&1
+if ./configure --with-pdo-duckdb="${failed_prefix}" --with-php-config="${php_config}" >"${work}/failed-reconfigure.log" 2>&1; then
     echo 'invalid DuckDB prefix unexpectedly configured' >&2
     exit 1
 fi
-staged=$(find "$repo/build" -maxdepth 1 -name '.duckdb-config-*' -print -quit)
-test -z "$staged"
-make -n >"$work/after-failed-make.log" 2>&1
-failed_static_prefix="$work/Failed Static"
-if ./configure --with-pdo-duckdb-static="$failed_static_prefix" --with-php-config="$php_config" >"$work/failed-static.log" 2>&1; then
+staged=$(find "${repo}/build" -maxdepth 1 -name '.duckdb-config-*' -print -quit)
+test -z "${staged}"
+make -n >"${work}/after-failed-make.log" 2>&1
+make clean >"${work}/after-failed-clean.log" 2>&1
+make -j2 >"${work}/after-failed-build.log" 2>&1
+failed_static_prefix="${work}/Failed Static"
+if ./configure --with-pdo-duckdb-static="${failed_static_prefix}" --with-php-config="${php_config}" >"${work}/failed-static.log" 2>&1; then
     echo 'invalid static DuckDB prefix unexpectedly configured' >&2
     exit 1
 fi
-grep -F "$failed_static_prefix" "$work/failed-static.log" >/dev/null
-make -n >"$work/after-failed-static-make.log" 2>&1
-if ! ./configure --with-pdo-duckdb="$relative_prefix" --with-php-config="$php_config" >"$work/dynamic.log" 2>&1; then
-    cat "$work/dynamic.log" >&2
+grep -F "${failed_static_prefix}" "${work}/failed-static.log" >/dev/null
+make -n >"${work}/after-failed-static-make.log" 2>&1
+if ! ./configure --with-pdo-duckdb="${relative_prefix}" --with-php-config="${php_config}" >"${work}/dynamic.log" 2>&1; then
+    cat "${work}/dynamic.log" >&2
     exit 1
 fi
 grep -F 'build/duckdb-config-include' Makefile >/dev/null
 case "$(uname -s)" in
-  Windows_NT|MINGW*|MSYS*|CYGWIN*)
-    if grep -F -- '-Wl,-rpath,' Makefile >/dev/null; then
-      echo 'Windows configure emitted an invalid GNU RUNPATH token' >&2
-      exit 1
-    fi
-    ;;
-  *)
-    grep -E 'PDO_DUCKDB_SHARED_LIBADD = "?\-Wl,-rpath,' Makefile >/dev/null
-    ;;
+    Windows_NT | MINGW* | MSYS* | CYGWIN*)
+        if grep -F -- '-Wl,-rpath,' Makefile >/dev/null; then
+            echo 'Windows configure emitted an invalid GNU RUNPATH token' >&2
+            exit 1
+        fi
+        ;;
+    *)
+        grep -E 'PDO_DUCKDB_SHARED_LIBADD = "?\-Wl,-rpath,' Makefile >/dev/null
+        ;;
 esac
-pdo_duckdb_probe_clean_guard
-if ! ./configure --with-pdo-duckdb="$relative_prefix" --with-php-config="$php_config" >"$work/after-clean-configure.log" 2>&1; then
-    cat "$work/after-clean-configure.log" >&2
-    exit 1
-fi
-make -n >"$work/dynamic-make.log" 2>&1
-make -j2 >"$work/dynamic-build.log" 2>&1
-make install INSTALL_ROOT="$work/install" >"$work/install.log" 2>&1
-module=$(find "$work/install" -name pdo_duckdb.so -type f -print -quit)
-rewrite_count=$(awk 'BEGIN { seen = 0; count = 0 } { if (NR > 4700 && NR < 4900 && $0 ~ /^[[:space:]]*ext_shared=yes$/) { if (seen++ > 0) { sub(/yes$/, "no"); count++ } } } END { print count + 0 }' configure)
-test "$rewrite_count" -eq 1
-
-awk 'BEGIN { seen = 0 } { if (NR > 4700 && NR < 4900 && $0 ~ /^[[:space:]]*ext_shared=yes$/) { if (seen++ > 0) sub(/yes$/, "no") } print }' configure > configure.nonshared
+make -n >"${work}/dynamic-make.log" 2>&1
+make -j2 >"${work}/dynamic-build.log" 2>&1
+make clean >"${work}/dynamic-clean.log" 2>&1
+make -j2 >"${work}/after-clean-build.log" 2>&1
+make install INSTALL_ROOT="${work}/install" >"${work}/install.log" 2>&1
+module=$(find "${work}/install" -name pdo_duckdb.so -type f -print -quit)
+awk '
+    /^  ext_output="yes, shared"$/ { force_shared = 1 }
+    force_shared && /^  ext_shared=yes$/ {
+        sub(/yes$/, "no")
+        count++
+        force_shared = 0
+    }
+    { print }
+    END { if (count != 1) exit 1 }
+' configure >configure.nonshared
 chmod +x configure.nonshared
 mv configure.nonshared configure
-if ! ./configure --with-pdo-duckdb="$relative_prefix" --with-php-config="$php_config" >"$work/nonshared.log" 2>&1; then
-    cat "$work/nonshared.log" >&2
+if ! ./configure --with-pdo-duckdb="${relative_prefix}" --with-php-config="${php_config}" >"${work}/nonshared.log" 2>&1; then
+    cat "${work}/nonshared.log" >&2
     exit 1
 fi
 grep -F 'build/duckdb-config-libdir' Makefile >/dev/null
-grep -F 'LIBS="-lduckdb $LIBS' configure >/dev/null
-cp "$work/configure.shared" configure
-
-test -n "$module"
-runpath=$(readelf -d "$module" | sed -n 's/.*RUNPATH.*\[\([^]]*\)\].*/\1/p')
-test -n "$runpath"
-case "$runpath" in
-  *"$repo/build/duckdb-config-libdir"*) echo "RUNPATH points at build alias" >&2; exit 1 ;;
+grep -F "LIBS=\"-lduckdb \$LIBS" configure >/dev/null
+for variable in EXTRA_LDFLAGS EXTRA_LDFLAGS_PROGRAM; do
+    if test "${variable}" = EXTRA_LDFLAGS_PROGRAM && ! grep -q "^${variable} =" Makefile; then
+        continue
+    fi
+    flags=$(sed -n "s/^${variable} = //p" Makefile)
+    case "${flags}" in
+        *"\"-Wl,-rpath,${work}/Duck DB/lib\""*) ;;
+        *)
+            echo "${variable} lost the quoted DuckDB runtime path: ${flags}" >&2
+            exit 1
+            ;;
+    esac
+done
+nonshared_ldflags=$(sed -n 's/^LDFLAGS = //p' Makefile)
+case "${nonshared_ldflags}" in
+    *-rpath*duckdb-config-libdir*)
+        echo "nonshared LDFLAGS uses the build alias as a runtime path" >&2
+        exit 1
+        ;;
+    *) ;;
 esac
-case "$runpath" in
-  *"$work/Duck DB/lib"*) ;;
-  *) echo "RUNPATH does not contain the configured DuckDB libdir: $runpath" >&2; exit 1 ;;
+cp "${work}/configure.shared" configure
+
+test -n "${module}"
+runpath=$(readelf -d "${module}" | sed -n 's/.*RUNPATH.*\[\([^]]*\)\].*/\1/p')
+test -n "${runpath}"
+case "${runpath}" in
+    *"${repo}/build/duckdb-config-libdir"*)
+        echo "RUNPATH points at build alias" >&2
+        exit 1
+        ;;
+    *) ;;
+esac
+case "${runpath}" in
+    *"${work}/Duck DB/lib"*) ;;
+    *)
+        echo "RUNPATH does not contain the configured DuckDB libdir: ${runpath}" >&2
+        exit 1
+        ;;
 esac
 
-if ! ./configure --with-pdo-duckdb-static="$static_prefix" --with-php-config="$php_config" >"$work/static.log" 2>&1; then
-    cat "$work/static.log" >&2
+php=$("${php_config}" --php-binary)
+set -- -n
+if ! "${php}" -n -r 'exit(extension_loaded("PDO") ? 0 : 1);'; then
+    extension_dir=$("${php_config}" --extension-dir)
+    set -- "$@" -d "extension=${extension_dir}/pdo.so"
+fi
+env -u LD_LIBRARY_PATH "${php}" "$@" -d "extension=${module}" <<'PHP'
+<?php
+$pdo = new PDO("duckdb::memory:");
+exit($pdo->query("SELECT 42")->fetchColumn() === 42 ? 0 : 1);
+PHP
+
+if ! ./configure --with-pdo-duckdb-static="${static_prefix}" --with-php-config="${php_config}" >"${work}/static.log" 2>&1; then
+    cat "${work}/static.log" >&2
     exit 1
 fi
 grep -F 'build/duckdb-config-static' Makefile >/dev/null
-make -n >"$work/static-make.log" 2>&1
-test -e "$repo/build/duckdb-config-static/duckdb.h"
+make -n >"${work}/static-make.log" 2>&1
+test -e "${repo}/build/duckdb-config-static/duckdb.h"
+make clean >"${work}/static-clean.log" 2>&1
+test -r "${repo}/build/duckdb-config-static/libduckdb_static.a"
+test -r "${repo}/build/duckdb-config-static/libduckdb_math.a"
 
-if ! ./configure --with-pdo-duckdb="$duckdb_prefix" --with-php-config="$php_config" >"$work/restore.log" 2>&1; then
-    cat "$work/restore.log" >&2
+if ! ./configure --with-pdo-duckdb="${duckdb_prefix}" --with-php-config="${php_config}" >"${work}/restore.log" 2>&1; then
+    cat "${work}/restore.log" >&2
     exit 1
 fi
 grep -F 'build/duckdb-config-libdir' Makefile >/dev/null
-test -r "$duckdb_prefix/lib/libduckdb.so"
+test -r "${duckdb_prefix}/lib/libduckdb.so"
+current_sha=$(sha256sum "${duckdb_prefix}/lib/libduckdb.so")
+current_sha=${current_sha%% *}
+test "${current_sha}" = "${prefix_sha}"
 echo 'configure prefix whitespace probe: ok'
