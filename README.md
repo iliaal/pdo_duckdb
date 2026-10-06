@@ -287,6 +287,7 @@ generated keys, use a sequence and `currval()`.
 | DuckDB type | PHP value |
 |-------------|-----------|
 | `BOOLEAN` | `int` `0`/`1` (not `bool`) |
+| `TINYINT`, `SMALLINT`, `INTEGER`, `BIGINT`, `UTINYINT`, `USMALLINT`, `UINTEGER` | `int` (a string for `BIGINT`/`UINTEGER` values outside the PHP integer range on 32-bit PHP) |
 | `FLOAT`, `DOUBLE` | `float` |
 | `BLOB` | binary string |
 | everything else (`VARCHAR`, `DATE`/`TIME`/`TIMESTAMP`, `DECIMAL`, `HUGEINT`/`UBIGINT`/`UHUGEINT`, nested types) | canonical string form |
