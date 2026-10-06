@@ -287,9 +287,10 @@ generated keys, use a sequence and `currval()`.
 | DuckDB type | PHP value |
 |-------------|-----------|
 | `BOOLEAN` | `int` `0`/`1` (not `bool`) |
+| `TINYINT`, `SMALLINT`, `INTEGER`, `BIGINT`, `UTINYINT`, `USMALLINT`, `UINTEGER` | `int` (a string for `BIGINT`/`UINTEGER` values outside the PHP integer range on 32-bit PHP) |
 | `FLOAT`, `DOUBLE` | `float` |
 | `BLOB` | binary string |
-| everything else (`VARCHAR`, `DATE`/`TIME`/`TIMESTAMP`, `DECIMAL`, `HUGEINT`/`UBIGINT`/`UHUGEINT`, nested types) | canonical string form |
+| everything else (`VARCHAR`, `DATE`/`TIME`/`TIMESTAMP`, `DECIMAL`, `HUGEINT`/`UBIGINT`/`UHUGEINT`, nested types) | canonical string form (exceptions for `VARIANT`, `GEOMETRY`, and `TIMESTAMPTZ` below) |
 | SQL NULL | `null` |
 
 `getColumnMeta()` reports the real DuckDB type name per column and a `pdo_type`
@@ -297,8 +298,7 @@ that matches the fetch shape: `PDO::PARAM_INT` for exactly `BOOLEAN`,
 `TINYINT`, `SMALLINT`, `INTEGER`, `BIGINT`, `UTINYINT`, `USMALLINT`,
 `UINTEGER`; `PDO::PARAM_LOB` for `BLOB`; `PDO::PARAM_STR` for everything else
 (so `UBIGINT` and `HUGEINT` stay `PARAM_STR`). `DECIMAL` columns also report
-`precision`/`scale`. On 32-bit PHP, a `BIGINT`/`UINTEGER` value that overflows
-`zend_long` is returned as a string instead of wrapping.
+`precision`/`scale`.
 
 Nested values with boolean, integer, `DECIMAL`, `DATE`, and `UUID` leaves use a
 direct renderer; nested values whose leaves need DuckDB's quoting rules use
