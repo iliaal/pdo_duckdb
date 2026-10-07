@@ -165,6 +165,7 @@ take their `DEFAULT` (or `NULL`). This helps with tables that generate keys or
 timestamps:
 
 ```php
+$db->exec("CREATE SEQUENCE seq");
 $db->exec("CREATE TABLE events (id BIGINT DEFAULT nextval('seq'), ts TIMESTAMP DEFAULT now(), payload VARCHAR)");
 $app = $db->duckdbAppender('events', null, ['payload']);
 $app->appendRow('hello')->appendRow('world');   // id and ts fill themselves
