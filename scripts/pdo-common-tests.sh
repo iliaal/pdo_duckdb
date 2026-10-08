@@ -69,6 +69,14 @@ out="$work/out.log"
 set +e
 TEST_PHP_EXECUTABLE="$PHP" NO_INTERACTION=1 "$PHP" "$RUN_TESTS" "${ext_args[@]}" \
     --show-diff -g FAIL,BORK,LEAK,XLEAK -p "$PHP" "$work/common.phpt" 2>&1 | tee "$out"
+pipeline_status=("${PIPESTATUS[@]}")
+# run-tests uses 1 for ordinary test failures (or 0 when REPORT_EXIT_STATUS
+# is disabled). A crash or signal must not be hidden by a matching summary.
+# Likewise, a failed tee means the captured output cannot be trusted.
+if [ "${pipeline_status[0]}" -gt 1 ] || [ "${pipeline_status[1]}" -ne 0 ]; then
+    echo "::error::PDO common runner/logging failed (PHP: ${pipeline_status[0]}, tee: ${pipeline_status[1]})."
+    exit 1
+fi
 
 clean="$work/clean.log"
 sed -E 's/\x1b\[[0-9;]*m//g' "$out" | tr '\r' '\n' > "$clean"
