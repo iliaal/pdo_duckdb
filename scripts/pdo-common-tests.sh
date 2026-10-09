@@ -14,6 +14,7 @@
 # A new failure fails the job; an allowlisted test that starts passing ALSO fails
 # it (so the list gets tightened rather than silently masking a future regression).
 #
+# Set EXPECTED_FAILS="" to require a clean run with no failures.
 # Default allowlist (DuckDB SQL-dialect strictness, not driver bugs):
 #   - bug_36798: DuckDB rejects non-UTF-8 bytes in string literals.
 #   - bug_43130: ":id-value" rewrites to "$1-value", which DuckDB rejects at
@@ -35,7 +36,7 @@ RUN_TESTS="${RUN_TESTS:?set RUN_TESTS to a run-tests.php path}"
 COMMON_DIR="${COMMON_DIR:?set COMMON_DIR to a php-src ext/pdo/tests directory}"
 DUCKDB_PREFIX="${DUCKDB_PREFIX:-$HOME/duckdb}"
 EXTDIR="$("$(dirname "$PHP")/php-config" --extension-dir 2>/dev/null || echo)"
-EXPECTED_FAILS="${EXPECTED_FAILS:-bug_36798.phpt bug_43130.phpt}"
+EXPECTED_FAILS="${EXPECTED_FAILS-bug_36798.phpt bug_43130.phpt}"
 
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
@@ -94,6 +95,13 @@ borked="$(grep -oE 'Tests (borked|leaked)[[:space:]]*:[[:space:]]*[0-9]+' "$clea
     | grep -oE '[0-9]+$' | awk '{s+=$1} END{print s+0}')"
 set -e
 borked="${borked:-0}"
+
+# With an empty allowlist, missing output would otherwise look like a clean
+# run. Require the completed harness summary to report at least one test.
+if ! grep -qE 'Number of tests[[:space:]]*:[[:space:]]*[1-9][0-9]*' "$clean"; then
+    echo "::error::PDO common harness did not complete a non-empty test run."
+    exit 1
+fi
 
 if [ "$actual" = "$expected" ] && [ "$borked" -eq 0 ]; then
     echo "PDO common: failure set matches the expected allowlist:"
