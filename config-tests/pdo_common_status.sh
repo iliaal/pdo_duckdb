@@ -15,7 +15,8 @@ if [ "${1:-}" = -m ]; then
     exit 0
 fi
 if [ "${FAKE_EMPTY:-0}" = 0 ]; then
-    printf 'Number of tests : %s\n' "${FAKE_TEST_COUNT:-2}"
+    printf 'Number of tests : %5s          %8s\n' \
+        "${FAKE_TEST_COUNT:-2}" "${FAKE_EXECUTED_COUNT-2}"
     cat <<'SUMMARY'
 Tests borked    : 0
 Tests leaked    : 0
@@ -70,3 +71,8 @@ ALLOWLIST= FAKE_FAILURES=0 check 'clean run with empty allowlist' 0 0 0 0
 ALLOWLIST= check 'unexpected failures with empty allowlist' 1 1 0 0
 ALLOWLIST= FAKE_FAILURES=0 check 'missing run with empty allowlist' 1 0 0 1
 ALLOWLIST= FAKE_FAILURES=0 FAKE_TEST_COUNT=0 check 'zero tests with empty allowlist' 1 0 0 0
+
+# The first summary count includes skipped tests; the second counts execution.
+ALLOWLIST= FAKE_FAILURES=0 FAKE_EXECUTED_COUNT=0 check 'all tests skipped with empty allowlist' 1 0 0 0
+ALLOWLIST= FAKE_FAILURES=0 FAKE_TEST_COUNT=10 FAKE_EXECUTED_COUNT=1 check 'some tests skipped with empty allowlist' 0 0 0 0
+ALLOWLIST= FAKE_FAILURES=0 FAKE_EXECUTED_COUNT= check 'missing executed-test count' 1 0 0 0
