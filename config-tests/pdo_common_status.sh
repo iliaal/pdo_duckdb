@@ -15,14 +15,19 @@ if [ "${1:-}" = -m ]; then
     exit 0
 fi
 if [ "${FAKE_EMPTY:-0}" = 0 ]; then
+    printf 'Number of tests : %s\n' "${FAKE_TEST_COUNT:-2}"
     cat <<'SUMMARY'
 Tests borked    : 0
 Tests leaked    : 0
+SUMMARY
+    if [ "${FAKE_FAILURES:-1}" = 1 ]; then
+        cat <<'SUMMARY'
 FAILED TEST SUMMARY
 bug 36798 [bug_36798.phpt]
 bug 43130 [bug_43130.phpt]
 =====
 SUMMARY
+    fi
 fi
 exit "${FAKE_PHP_STATUS:-1}"
 PHP
@@ -40,7 +45,7 @@ check() {
     local status=0
     PATH="$work/bin:$PATH" PHP="$work/bin/php" RUN_TESTS="$work/run-tests.php" \
         COMMON_DIR="$work/common" EXT="$work/pdo_duckdb.so" \
-        EXPECTED_FAILS='bug_36798.phpt bug_43130.phpt' \
+        EXPECTED_FAILS="${ALLOWLIST-bug_36798.phpt bug_43130.phpt}" \
         FAKE_PHP_STATUS="$php_status" FAKE_TEE_STATUS="$tee_status" FAKE_EMPTY="$empty" \
         bash "$harness" > "$work/output" 2>&1 || status=$?
     if [ "$status" -ne "$expected" ]; then
@@ -59,3 +64,9 @@ check 'tee failure after matching summary' 1 1 1 0
 check 'runner and tee failure after matching summary' 1 255 1 0
 check 'runner failure without summary' 1 255 0 1
 check 'missing expected failures' 1 0 0 1
+
+# An explicitly empty allowlist means that every common test must pass.
+ALLOWLIST= FAKE_FAILURES=0 check 'clean run with empty allowlist' 0 0 0 0
+ALLOWLIST= check 'unexpected failures with empty allowlist' 1 1 0 0
+ALLOWLIST= FAKE_FAILURES=0 check 'missing run with empty allowlist' 1 0 0 1
+ALLOWLIST= FAKE_FAILURES=0 FAKE_TEST_COUNT=0 check 'zero tests with empty allowlist' 1 0 0 0
