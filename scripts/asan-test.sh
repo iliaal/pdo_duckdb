@@ -24,14 +24,14 @@ EXT="${EXT:-$(pwd)/modules/pdo_duckdb.so}"
 EXT_DIR="$(cd "$(dirname "$EXT")" && pwd -P)"
 EXT="$EXT_DIR/$(basename "$EXT")"
 
-libasan=$(ldd "$PHP" | awk '/libasan/ {print $3; exit}')
+libasan=$(ldd "$PHP" | awk '/libasan/ && !found {print $3; found = 1}')
 if [ -z "$libasan" ]; then
     echo "error: $PHP is not linked against libasan (not an ASan build)" >&2
     exit 1
 fi
 # libstdc++ is a dependency of libduckdb, not PHP.
-libstdcpp=$(ldd "$DUCKDB_PREFIX/lib/libduckdb.so" 2>/dev/null | awk '/libstdc\+\+/ {print $3; exit}')
-[ -z "$libstdcpp" ] && libstdcpp=$(ldconfig -p 2>/dev/null | awk '/libstdc\+\+\.so\.6/ {print $NF; exit}')
+libstdcpp=$(ldd "$DUCKDB_PREFIX/lib/libduckdb.so" 2>/dev/null | awk '/libstdc\+\+/ && !found {print $3; found = 1}')
+[ -z "$libstdcpp" ] && libstdcpp=$(ldconfig -p 2>/dev/null | awk '/libstdc\+\+\.so\.6/ && !found {print $NF; found = 1}')
 
 export LD_LIBRARY_PATH="$DUCKDB_PREFIX/lib:${LD_LIBRARY_PATH:-}"
 export LD_PRELOAD="$libasan${libstdcpp:+ $libstdcpp}"
