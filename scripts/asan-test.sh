@@ -24,14 +24,14 @@ EXT="${EXT:-$(pwd)/modules/pdo_duckdb.so}"
 EXT_DIR="$(cd "$(dirname "$EXT")" && pwd -P)"
 EXT="$EXT_DIR/$(basename "$EXT")"
 
-libasan=$(ldd "$PHP" | awk '/libasan/ {print $3; exit}')
+libasan=$(ldd "$PHP" | awk '/libasan/ && !found {print $3; found = 1}')
 if [ -z "$libasan" ]; then
     echo "error: $PHP is not linked against libasan (not an ASan build)" >&2
     exit 1
 fi
 # libstdc++ is a dependency of libduckdb, not PHP.
-libstdcpp=$(ldd "$DUCKDB_PREFIX/lib/libduckdb.so" 2>/dev/null | awk '/libstdc\+\+/ {print $3; exit}')
-[ -z "$libstdcpp" ] && libstdcpp=$(ldconfig -p 2>/dev/null | awk '/libstdc\+\+\.so\.6/ {print $NF; exit}')
+libstdcpp=$(ldd "$DUCKDB_PREFIX/lib/libduckdb.so" 2>/dev/null | awk '/libstdc\+\+/ && !found {print $3; found = 1}')
+[ -z "$libstdcpp" ] && libstdcpp=$(ldconfig -p 2>/dev/null | awk '/libstdc\+\+\.so\.6/ && !found {print $NF; found = 1}')
 
 export LD_LIBRARY_PATH="$DUCKDB_PREFIX/lib:${LD_LIBRARY_PATH:-}"
 export LD_PRELOAD="$libasan${libstdcpp:+ $libstdcpp}"
@@ -48,5 +48,7 @@ echo "LD_PRELOAD=$LD_PRELOAD"
 echo "ASAN_OPTIONS=$ASAN_OPTIONS"
 
 # pdo_duckdb may be built into PHP or loaded as a shared module from EXT.
-export TEST_PHP_ARGS="-d extension_dir=$EXT_DIR${TEST_PHP_ARGS:+ $TEST_PHP_ARGS}"
-TEST_PHP_EXECUTABLE="$PHP" "$PHP" -d extension="$EXT" "$RUN_TESTS" -p "$PHP" tests/
+# run-tests splits TEST_PHP_ARGS on spaces rather than parsing shell quoting.
+# Pass our path as a real argv entry so checkouts with spaces keep working.
+TEST_PHP_EXECUTABLE="$PHP" "$PHP" -d extension="$EXT" "$RUN_TESTS" \
+    -d "extension_dir=$EXT_DIR" -p "$PHP" tests/
