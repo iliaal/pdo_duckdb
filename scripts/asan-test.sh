@@ -48,5 +48,7 @@ echo "LD_PRELOAD=$LD_PRELOAD"
 echo "ASAN_OPTIONS=$ASAN_OPTIONS"
 
 # pdo_duckdb may be built into PHP or loaded as a shared module from EXT.
-export TEST_PHP_ARGS="-d extension_dir=$EXT_DIR${TEST_PHP_ARGS:+ $TEST_PHP_ARGS}"
-TEST_PHP_EXECUTABLE="$PHP" "$PHP" -d extension="$EXT" "$RUN_TESTS" -p "$PHP" tests/
+# run-tests splits TEST_PHP_ARGS on spaces rather than parsing shell quoting.
+# Pass our path as a real argv entry so checkouts with spaces keep working.
+TEST_PHP_EXECUTABLE="$PHP" "$PHP" -d extension="$EXT" "$RUN_TESTS" \
+    -d "extension_dir=$EXT_DIR" -p "$PHP" tests/
