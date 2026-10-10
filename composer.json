@@ -29,8 +29,8 @@
             },
             {
                 "name": "with-pdo-duckdb-static",
-                "description": "Link a self-contained static libduckdb (for prebuilt PIE bundles)",
-                "needs-value": false
+                "description": "DuckDB static-libs bundle directory (containing duckdb.h and lib*.a archives)",
+                "needs-value": true
             }
         ]
     }

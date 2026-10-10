@@ -33,6 +33,8 @@ jobs:
           tools: composer
           coverage: none
       - run: composer validate --strict
+      - name: PIE configure-option metadata regression test
+        run: php config-tests/configure_options.php
 
   pie-smoke:
     name: PIE install smoke

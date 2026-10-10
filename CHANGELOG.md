@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   out-of-tree builds, macOS shared libraries, relative library symlinks, and
   rebuilds after `make clean`. Run configure regression probes in an isolated
   directory so they cannot remove libraries or alter the source checkout.
+- Accept a directory value for the `--with-pdo-duckdb-static` PIE option, which
+  configure requires; PIE previously rejected or dropped the bundle path.
 
 ### Known limitation
 
