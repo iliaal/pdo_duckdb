@@ -97,9 +97,10 @@ set -e
 borked="${borked:-0}"
 
 # With an empty allowlist, missing output would otherwise look like a clean
-# run. Require the completed harness summary to report at least one test.
-if ! grep -qE 'Number of tests[[:space:]]*:[[:space:]]*[1-9][0-9]*' "$clean"; then
-    echo "::error::PDO common harness did not complete a non-empty test run."
+# run. The first count includes skipped tests; the second excludes skips and
+# borks. Require both counts so an entirely skipped suite cannot pass.
+if ! grep -qE '^Number of tests[[:space:]]*:[[:space:]]*[1-9][0-9]*[[:space:]]+[1-9][0-9]*[[:space:]]*$' "$clean"; then
+    echo "::error::PDO common harness did not complete a non-empty executed test run."
     exit 1
 fi
 
