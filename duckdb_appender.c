@@ -32,6 +32,17 @@ static zend_class_entry *pdo_duckdb_ce; /* the Pdo\Duckdb PDO subclass */
 #define PDO_DUCKDB_APPENDER_COL_NESTED 1u
 #define PDO_DUCKDB_APPENDER_COL_BLOB   2u
 
+/* Per-column, per-scalar-kind pre-append validation, indexed by
+ * Z_TYPE - IS_FALSE (false, true, long, double, string). */
+#define PDO_DUCKDB_CHK_NONE       0u
+#define PDO_DUCKDB_CHK_PROBE      1u /* exact CAST probe */
+#define PDO_DUCKDB_CHK_BOUNDS     2u /* probe only outside col_num_bounds */
+#define PDO_DUCKDB_CHK_INT_RANGE  3u /* pdo_duckdb_validate_integer_range() */
+#define PDO_DUCKDB_CHK_FLOAT      4u /* DOUBLE -> FLOAT overflow */
+#define PDO_DUCKDB_CHK_NOT_STRING 5u /* BLOB takes only strings */
+#define PDO_DUCKDB_CHK_NESTED     6u /* nested columns take only arrays */
+#define PDO_DUCKDB_CHK_KINDS      5
+
 static void pdo_duckdb_appender_throw(duckdb_appender ap, const char *what)
 {
 	duckdb_error_data ed = ap ? duckdb_appender_error_data(ap) : NULL;
@@ -195,12 +206,28 @@ static duckdb_prepared_statement pdo_duckdb_appender_prepare_probe(duckdb_connec
 }
 
 /* On failure stores an emalloc'd detail in *errp. */
-static bool pdo_duckdb_appender_probe_value(duckdb_prepared_statement probe, const char *s, size_t len, char **errp)
+static bool pdo_duckdb_appender_probe_value(duckdb_prepared_statement probe, zval *v, char **errp)
 {
 	duckdb_result res;
+	duckdb_state bst;
 
 	*errp = NULL;
-	if (duckdb_bind_varchar_length(probe, 1, s, (idx_t)len) != DuckDBSuccess) {
+	switch (Z_TYPE_P(v)) {
+		case IS_TRUE:
+		case IS_FALSE:
+			bst = duckdb_bind_boolean(probe, 1, Z_TYPE_P(v) == IS_TRUE);
+			break;
+		case IS_LONG:
+			bst = duckdb_bind_int64(probe, 1, (int64_t)Z_LVAL_P(v));
+			break;
+		case IS_DOUBLE:
+			bst = duckdb_bind_double(probe, 1, Z_DVAL_P(v));
+			break;
+		default:
+			bst = duckdb_bind_varchar_length(probe, 1, Z_STRVAL_P(v), (idx_t)Z_STRLEN_P(v));
+			break;
+	}
+	if (bst != DuckDBSuccess) {
 		*errp = estrdup("unable to bind the cast probe");
 		return false;
 	}
@@ -229,6 +256,8 @@ static zend_object *pdo_duckdb_appender_new(zend_class_entry *ce)
 	a->col_flags = NULL;
 	a->col_desc = NULL;
 	a->col_probes = NULL;
+	a->col_num_bounds = NULL;
+	a->col_checks = NULL;
 	a->pdo = NULL;
 
 	return &a->std;
@@ -299,6 +328,14 @@ static void pdo_duckdb_appender_free(zend_object *obj)
 		efree(a->col_flags);
 		a->col_flags = NULL;
 	}
+	if (a->col_num_bounds) {
+		efree(a->col_num_bounds);
+		a->col_num_bounds = NULL;
+	}
+	if (a->col_checks) {
+		efree(a->col_checks);
+		a->col_checks = NULL;
+	}
 	if (a->pdo) {
 		OBJ_RELEASE(a->pdo);
 		a->pdo = NULL;
@@ -356,6 +393,94 @@ const zend_function_entry *pdo_duckdb_get_driver_methods(pdo_dbh_t *dbh, int kin
 		default:
 			return NULL;
 	}
+}
+
+/* Bounds sit strictly inside DuckDB's cast limits, so a value within them
+ * cannot fail the cast whichever way DuckDB rounds it. Values outside, and
+ * NaN, fall back to the exact CAST probe. */
+static bool pdo_duckdb_appender_num_bounds(duckdb_type tid, duckdb_logical_type lt, double *b)
+{
+	switch (tid) {
+		case DUCKDB_TYPE_TINYINT:   b[0] = -127.0; b[1] = 126.0; return true;
+		case DUCKDB_TYPE_SMALLINT:  b[0] = -32767.0; b[1] = 32766.0; return true;
+		case DUCKDB_TYPE_INTEGER:   b[0] = -2147483647.0; b[1] = 2147483646.0; return true;
+		case DUCKDB_TYPE_BIGINT:    b[0] = -9.2e18; b[1] = 9.2e18; return true;
+		case DUCKDB_TYPE_HUGEINT:   b[0] = -1.7e38; b[1] = 1.7e38; return true;
+		case DUCKDB_TYPE_UTINYINT:  b[0] = 0.0; b[1] = 254.0; return true;
+		case DUCKDB_TYPE_USMALLINT: b[0] = 0.0; b[1] = 65534.0; return true;
+		case DUCKDB_TYPE_UINTEGER:  b[0] = 0.0; b[1] = 4294967294.0; return true;
+		case DUCKDB_TYPE_UBIGINT:   b[0] = 0.0; b[1] = 1.8e19; return true;
+		case DUCKDB_TYPE_UHUGEINT:  b[0] = 0.0; b[1] = 3.4e38; return true;
+		case DUCKDB_TYPE_DECIMAL: {
+			/* Keep at least one unit of the last digit, and a relative margin
+			 * far above double rounding error, below 10^width. */
+			double limit = pow(10.0, (double)duckdb_decimal_width(lt));
+			double margin = limit * 1e-6 > 1.0 ? limit * 1e-6 : 1.0;
+			b[1] = (limit - margin) / pow(10.0, (double)duckdb_decimal_scale(lt));
+			b[0] = -b[1];
+			return true;
+		}
+		default:
+			return false;
+	}
+}
+
+/* A failed native append invalidates the appender and discards every row it
+ * has buffered, so each scalar DuckDB might refuse to cast is checked first.
+ * Planned once per column to keep appendRow() to a table lookup. */
+static void pdo_duckdb_appender_plan_checks(pdo_duckdb_appender *a, idx_t c)
+{
+	unsigned char *chk = &a->col_checks[c * PDO_DUCKDB_CHK_KINDS];
+	duckdb_type tid = a->col_type_ids[c];
+	bool probe = a->col_probes[c] != NULL;
+	bool bounded = probe && pdo_duckdb_appender_num_bounds(tid, a->col_types[c],
+		&a->col_num_bounds[c * 2]);
+	unsigned char other = probe ? PDO_DUCKDB_CHK_PROBE : PDO_DUCKDB_CHK_NONE;
+	unsigned char *b = &chk[0], *l = &chk[IS_LONG - IS_FALSE];
+	unsigned char *d = &chk[IS_DOUBLE - IS_FALSE], *s = &chk[IS_STRING - IS_FALSE];
+
+	if (a->col_flags[c] & PDO_DUCKDB_APPENDER_COL_NESTED) {
+		memset(chk, PDO_DUCKDB_CHK_NESTED, PDO_DUCKDB_CHK_KINDS);
+		return;
+	}
+	if (a->col_flags[c] & PDO_DUCKDB_APPENDER_COL_BLOB) {
+		memset(chk, PDO_DUCKDB_CHK_NOT_STRING, PDO_DUCKDB_CHK_KINDS);
+		*s = PDO_DUCKDB_CHK_NONE;
+		return;
+	}
+	*s = other;
+	switch (tid) {
+		/* Non-string scalars always cast to these targets. */
+		case DUCKDB_TYPE_BOOLEAN:
+		case DUCKDB_TYPE_BIT:
+		case DUCKDB_TYPE_DOUBLE:
+			*b = *l = *d = PDO_DUCKDB_CHK_NONE;
+			break;
+		case DUCKDB_TYPE_FLOAT:
+			*b = *l = PDO_DUCKDB_CHK_NONE;
+			*d = PDO_DUCKDB_CHK_FLOAT;
+			break;
+		case DUCKDB_TYPE_BIGINT:
+		case DUCKDB_TYPE_HUGEINT:
+			*l = PDO_DUCKDB_CHK_NONE;
+			*b = *d = bounded ? PDO_DUCKDB_CHK_BOUNDS : other;
+			break;
+		case DUCKDB_TYPE_TINYINT:
+		case DUCKDB_TYPE_SMALLINT:
+		case DUCKDB_TYPE_INTEGER:
+		case DUCKDB_TYPE_UTINYINT:
+		case DUCKDB_TYPE_USMALLINT:
+		case DUCKDB_TYPE_UINTEGER:
+		case DUCKDB_TYPE_UBIGINT:
+		case DUCKDB_TYPE_UHUGEINT:
+			*l = PDO_DUCKDB_CHK_INT_RANGE;
+			*b = *d = bounded ? PDO_DUCKDB_CHK_BOUNDS : other;
+			break;
+		default:
+			*b = *l = *d = bounded ? PDO_DUCKDB_CHK_BOUNDS : other;
+			break;
+	}
+	chk[IS_TRUE - IS_FALSE] = *b;
 }
 
 /* {{{ duckdbAppender(string $table, ?string $schema = null, ?array $columns = null): Pdo\Duckdb\Appender */
@@ -447,6 +572,7 @@ static void pdo_duckdb_appender_create_impl(INTERNAL_FUNCTION_PARAMETERS)
 		a->col_types = emalloc(sizeof(duckdb_logical_type) * a->ncols);
 		a->col_type_ids = emalloc(sizeof(duckdb_type) * a->ncols);
 		a->col_flags = ecalloc(a->ncols, sizeof(unsigned char));
+		a->col_num_bounds = ecalloc(a->ncols * 2, sizeof(double));
 		for (c = 0; c < a->ncols; c++) {
 			duckdb_type tid;
 			a->col_types[c] = duckdb_appender_column_type(ap, c);
@@ -471,6 +597,10 @@ static void pdo_duckdb_appender_create_impl(INTERNAL_FUNCTION_PARAMETERS)
 				a->col_probes[c] = pdo_duckdb_appender_prepare_probe(
 					H->conn, a->col_type_ids[c], a->col_types[c]);
 			}
+		}
+		a->col_checks = emalloc(a->ncols * PDO_DUCKDB_CHK_KINDS);
+		for (c = 0; c < a->ncols; c++) {
+			pdo_duckdb_appender_plan_checks(a, c);
 		}
 	}
 }
@@ -787,6 +917,26 @@ static duckdb_value pdo_duckdb_build_value(zval *z, const pdo_duckdb_nested_rend
 	}
 }
 
+/* Smallest magnitude that rounds to FLOAT infinity (2^128 - 2^103), which is
+ * where DuckDB's DOUBLE -> FLOAT cast starts failing. Comparing avoids the
+ * undefined out-of-range double -> float conversion in C. */
+#define PDO_DUCKDB_FLOAT_ROUNDS_TO_INF 0x1.ffffffp+127
+
+static bool pdo_duckdb_appender_probe_row_value(pdo_duckdb_appender *a, uint32_t i, zval *v)
+{
+	char *perr = NULL;
+
+	if (pdo_duckdb_appender_probe_value(a->col_probes[i], v, &perr)) {
+		return true;
+	}
+	zend_throw_exception_ex(php_pdo_get_exception(), 0,
+		"Failed to append value: %s", perr ? perr : "unknown error");
+	if (perr) {
+		efree(perr);
+	}
+	return false;
+}
+
 ZEND_METHOD(Pdo_Duckdb_Appender, appendRow)
 {
 	zval *args = NULL;
@@ -823,27 +973,48 @@ ZEND_METHOD(Pdo_Duckdb_Appender, appendRow)
 			case IS_LONG:
 			case IS_DOUBLE:
 			case IS_STRING: {
-				duckdb_type ctid = a->col_type_ids[i];
-				if (a->col_flags[i] & PDO_DUCKDB_APPENDER_COL_NESTED) {
-					zend_type_error("Pdo\\Duckdb\\Appender::appendRow(): argument #%u expects an array for a nested column",
-						i + 1);
-					goto build_failed;
-				}
-				if (Z_TYPE_P(v) == IS_LONG &&
-					!pdo_duckdb_validate_integer_range(Z_LVAL_P(v), ctid, i + 1)) {
-					goto build_failed;
-				}
-				if (Z_TYPE_P(v) == IS_STRING && a->col_probes[i]) {
-					char *perr = NULL;
-					if (!pdo_duckdb_appender_probe_value(a->col_probes[i],
-							Z_STRVAL_P(v), Z_STRLEN_P(v), &perr)) {
-						zend_throw_exception_ex(php_pdo_get_exception(), 0,
-							"Failed to append value: %s", perr ? perr : "unknown error");
-						if (perr) {
-							efree(perr);
+				double d;
+				switch (a->col_checks[i * PDO_DUCKDB_CHK_KINDS + (Z_TYPE_P(v) - IS_FALSE)]) {
+					case PDO_DUCKDB_CHK_NONE:
+						break;
+					case PDO_DUCKDB_CHK_INT_RANGE:
+						if (!pdo_duckdb_validate_integer_range(Z_LVAL_P(v), a->col_type_ids[i], i + 1)) {
+							goto build_failed;
 						}
+						break;
+					case PDO_DUCKDB_CHK_FLOAT:
+						if (zend_finite(Z_DVAL_P(v)) &&
+							fabs(Z_DVAL_P(v)) >= PDO_DUCKDB_FLOAT_ROUNDS_TO_INF) {
+							zend_throw_exception_ex(php_pdo_get_exception(), 0,
+								"Failed to append value: argument #%u value %.17G is out of range for FLOAT",
+								i + 1, Z_DVAL_P(v));
+							goto build_failed;
+						}
+						break;
+					case PDO_DUCKDB_CHK_BOUNDS:
+						d = Z_TYPE_P(v) == IS_DOUBLE ? Z_DVAL_P(v)
+							: Z_TYPE_P(v) == IS_LONG ? (double)Z_LVAL_P(v)
+							: (double)(Z_TYPE_P(v) == IS_TRUE);
+						if (d >= a->col_num_bounds[i * 2] && d <= a->col_num_bounds[i * 2 + 1]) {
+							break;
+						}
+						if (!pdo_duckdb_appender_probe_row_value(a, i, v)) {
+							goto build_failed;
+						}
+						break;
+					case PDO_DUCKDB_CHK_PROBE:
+						if (!pdo_duckdb_appender_probe_row_value(a, i, v)) {
+							goto build_failed;
+						}
+						break;
+					case PDO_DUCKDB_CHK_NOT_STRING:
+						zend_type_error("Pdo\\Duckdb\\Appender::appendRow(): argument #%u expects a string for a BLOB column",
+							i + 1);
 						goto build_failed;
-					}
+					case PDO_DUCKDB_CHK_NESTED:
+						zend_type_error("Pdo\\Duckdb\\Appender::appendRow(): argument #%u expects an array for a nested column",
+							i + 1);
+						goto build_failed;
 				}
 				break;
 			}

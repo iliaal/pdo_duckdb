@@ -143,6 +143,11 @@ typedef struct {
 	/* CAST probes validate strings before any append. NULL entries skip probing;
 	 * the array is NULL when ncols == 0. */
 	duckdb_prepared_statement *col_probes;
+	/* Per column {lo, hi}: numeric values inside skip the CAST probe. NULL if
+	 * ncols == 0. */
+	double *col_num_bounds;
+	/* Per column, PDO_DUCKDB_CHK_KINDS pre-append check codes. NULL if ncols == 0. */
+	unsigned char *col_checks;
 	zend_object *pdo;	/* PDO object kept alive; it owns the connection */
 	zend_object std;
 } pdo_duckdb_appender;
