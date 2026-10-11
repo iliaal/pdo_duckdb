@@ -28,7 +28,7 @@ $cases = [
     ['BLOB', 'x', 5],
 ];
 foreach ($cases as [$type, $good, $bad]) {
-    $db = new PDO('duckdb::memory:');
+    $db = PHP_VERSION_ID >= 80400 ? PDO::connect('duckdb::memory:') : new PDO('duckdb::memory:');
     $db->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
     $db->exec("CREATE TABLE t (id INTEGER, v $type)");
     $app = $db->duckdbAppender('t');
@@ -50,7 +50,7 @@ foreach ($cases as [$type, $good, $bad]) {
 }
 
 // Values at the edge of the fast-accept bounds still go through DuckDB's cast.
-$db = new PDO('duckdb::memory:');
+$db = PHP_VERSION_ID >= 80400 ? PDO::connect('duckdb::memory:') : new PDO('duckdb::memory:');
 $db->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
 $db->exec('CREATE TABLE e (f FLOAT, i INTEGER, d DECIMAL(4,1), u UTINYINT)');
 $app = $db->duckdbAppender('e');
