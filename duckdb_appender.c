@@ -557,9 +557,9 @@ static duckdb_value pdo_duckdb_make_leaf(zval *z, duckdb_type tid, uint32_t argp
 		case IS_TRUE:  return duckdb_create_bool(true);
 		case IS_FALSE: return duckdb_create_bool(false);
 		case IS_DOUBLE:
-			return tid == DUCKDB_TYPE_FLOAT
-				? duckdb_create_float((float)Z_DVAL_P(z))
-				: duckdb_create_double(Z_DVAL_P(z));
+			/* Let DuckDB validate narrowing casts instead of turning a finite
+			 * out-of-range double into FLOAT infinity in C. */
+			return duckdb_create_double(Z_DVAL_P(z));
 		case IS_STRING:
 			return tid == DUCKDB_TYPE_BLOB
 				? duckdb_create_blob((const uint8_t *)Z_STRVAL_P(z), (idx_t)Z_STRLEN_P(z))

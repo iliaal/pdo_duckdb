@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Reject finite floating-point overflow in nested appender `FLOAT` values instead
+  of silently storing infinity; validation failures leave the appender usable.
+
 - Clear stale statement results when parameter binding fails during `execute()`,
   while preserving active results and row counts after failed standalone
   `bindValue()` or `bindParam()` calls.
