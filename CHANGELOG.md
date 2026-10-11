@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Preserve apostrophes and backslashes in the PDO common test directory and
+  database path instead of generating invalid or altered redirect PHP.
 - Reject finite floating-point overflow in nested appender `FLOAT` values instead
   of silently storing infinity; validation failures leave the appender usable.
 - Reject booleans, integers, and floats that DuckDB cannot cast to their
@@ -16,7 +18,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and discarding its buffered rows. This covers `FLOAT` overflow, out-of-range
   values for integer and `DECIMAL` columns, and numbers or booleans for
   temporal, `UUID`, and `BLOB` columns.
-
 - Clear stale statement results when parameter binding fails during `execute()`,
   while preserving active results and row counts after failed standalone
   `bindValue()` or `bindParam()` calls.
