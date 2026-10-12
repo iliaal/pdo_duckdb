@@ -43,14 +43,18 @@ trap 'rm -rf "$work"' EXIT
 
 DSN="${PDOTEST_DSN:-duckdb:$work/common.duckdb}"
 
-cat > "$work/common.phpt" <<EOF
+# Keep caller paths as environment data: interpolating them into PHP string
+# literals breaks apostrophes and changes backslash pairs.
+export PDOTEST_DSN="$DSN" PDO_DUCKDB_COMMON_DIR="$COMMON_DIR"
+cat > "$work/common.phpt" <<'EOF'
 --TEST--
 DuckDB (PDO common tests)
 --EXTENSIONS--
 pdo
 pdo_duckdb
 --REDIRECTTEST--
-return ['ENV' => ['PDOTEST_DSN' => '$DSN'], 'TESTS' => '$COMMON_DIR'];
+return ['ENV' => ['PDOTEST_DSN' => getenv('PDOTEST_DSN')],
+        'TESTS' => getenv('PDO_DUCKDB_COMMON_DIR')];
 EOF
 
 export LD_LIBRARY_PATH="$DUCKDB_PREFIX/lib:${LD_LIBRARY_PATH:-}"
