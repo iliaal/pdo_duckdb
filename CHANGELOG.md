@@ -28,6 +28,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   directory so they cannot remove libraries or alter the source checkout.
 - Accept a directory value for the `--with-pdo-duckdb-static` PIE option, which
   configure requires; PIE previously rejected or dropped the bundle path.
+- Finish macOS load-command inspection before selecting the minimum version,
+  preventing broken-pipe failures in binary validation and release archive checks.
 
 ### Known limitation
 

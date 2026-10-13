@@ -27,6 +27,8 @@ jobs:
           persist-credentials: false
       - name: ASan argument forwarding regression tests
         run: bash config-tests/asan_arguments.sh
+      - name: macOS minimum-version probe regression tests
+        run: bash config-tests/macos_minimum_probe.sh
       - name: Common-suite harness regression tests
         run: bash config-tests/pdo_common_status.sh
       - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0

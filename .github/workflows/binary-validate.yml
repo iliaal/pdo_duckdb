@@ -136,7 +136,9 @@ jobs:
             fi
             echo "ok: C++ runtime fully resolved (0 undefined std/cxxabi)"
           else
-            min_macos=$(otool -l modules/pdo_duckdb.so | awk '$1 == "minos" { print $2; exit }')
+            # Finish the producer before inspecting its output under pipefail.
+            otool -l modules/pdo_duckdb.so > "$RUNNER_TEMP/pdo-duckdb-load-commands.txt"
+            min_macos=$(awk '$1 == "minos" { print $2; exit }' "$RUNNER_TEMP/pdo-duckdb-load-commands.txt")
             case "$min_macos" in
               11.0|11.0.0) ;;
               *) printf 'ERROR: module has unexpected macOS minimum: %s\n' "$min_macos"; exit 1 ;;
