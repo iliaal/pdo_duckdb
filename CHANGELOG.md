@@ -21,6 +21,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Clear stale statement results when parameter binding fails during `execute()`,
   while preserving active results and row counts after failed standalone
   `bindValue()` or `bindParam()` calls.
+- Reject empty or entirely skipped ASan test runs in the local helper and CI,
+  instead of treating a successful runner process as runtime validation.
 - Match DuckDB's dollar-quote tag grammar, including non-ASCII identifier bytes.
 - Support DuckDB prefixes containing spaces in shared and static builds, including
   out-of-tree builds, macOS shared libraries, relative library symlinks, and

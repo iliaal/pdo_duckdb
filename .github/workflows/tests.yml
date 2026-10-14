@@ -488,17 +488,18 @@ jobs:
           export NO_INTERACTION=1
           set +e
           /tmp/php-asan/bin/php run-tests.php --show-diff --asan -g FAIL,BORK,LEAK,XLEAK tests/ 2>&1 | tee /tmp/test-output.txt
-          test_status=${PIPESTATUS[0]}
+          test_status=("${PIPESTATUS[@]}")
           set -e
-          if [ "$test_status" -ne 0 ]; then
-            echo "::error::run-tests.php failed under ASAN (exit $test_status)"
-            exit "$test_status"
+          if [ "${test_status[0]}" -ne 0 ]; then
+            echo "::error::run-tests.php failed under ASAN (exit ${test_status[0]})"
+            exit "${test_status[0]}"
+          fi
+          if [ "${test_status[1]}" -ne 0 ]; then
+            echo "::error::ASAN test output could not be recorded (exit ${test_status[1]})"
+            exit "${test_status[1]}"
           fi
           if grep -qP 'Expected leak\s*:\s*[1-9][0-9]*' /tmp/test-output.txt; then
             echo "::error::ASAN test run contains expected leaks (XLEAK)"
             exit 1
           fi
-          if ! grep -qP 'Number of tests\s*:\s*[1-9][0-9]*' /tmp/test-output.txt; then
-            echo "::error::ASAN test harness did not complete a non-empty test run"
-            exit 1
-          fi
+          bash scripts/check-executed-tests.sh /tmp/test-output.txt

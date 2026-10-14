@@ -33,6 +33,11 @@ fi
 libstdcpp=$(ldd "$DUCKDB_PREFIX/lib/libduckdb.so" 2>/dev/null | awk '/libstdc\+\+/ && !found {print $3; found = 1}')
 [ -z "$libstdcpp" ] && libstdcpp=$(ldconfig -p 2>/dev/null | awk '/libstdc\+\+\.so\.6/ && !found {print $NF; found = 1}')
 
+summary_check="$(cd "$(dirname "$0")" && pwd)/check-executed-tests.sh"
+work="$(mktemp -d)"
+# Keep helper processes out of the ASan preload intended for PHP.
+trap 'LD_PRELOAD= rm -rf "$work"' EXIT
+
 export LD_LIBRARY_PATH="$DUCKDB_PREFIX/lib:${LD_LIBRARY_PATH:-}"
 export LD_PRELOAD="$libasan${libstdcpp:+ $libstdcpp}"
 export ASAN_OPTIONS="${ASAN_OPTIONS:-detect_leaks=1:abort_on_error=1}"
@@ -50,5 +55,16 @@ echo "ASAN_OPTIONS=$ASAN_OPTIONS"
 # pdo_duckdb may be built into PHP or loaded as a shared module from EXT.
 # run-tests splits TEST_PHP_ARGS on spaces rather than parsing shell quoting.
 # Pass our path as a real argv entry so checkouts with spaces keep working.
+set +e
 TEST_PHP_EXECUTABLE="$PHP" "$PHP" -d extension="$EXT" "$RUN_TESTS" \
-    -d "extension_dir=$EXT_DIR" -p "$PHP" tests/
+    -d "extension_dir=$EXT_DIR" -p "$PHP" tests/ 2>&1 | LD_PRELOAD= tee "$work/output.log"
+status=("${PIPESTATUS[@]}")
+set -e
+# A plausible summary must never mask a failed runner or incomplete log.
+if [ "${status[0]}" -ne 0 ]; then
+    exit "${status[0]}"
+fi
+if [ "${status[1]}" -ne 0 ]; then
+    exit "${status[1]}"
+fi
+LD_PRELOAD= bash "$summary_check" "$work/output.log"
