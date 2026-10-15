@@ -62,7 +62,14 @@ export LD_LIBRARY_PATH="$DUCKDB_PREFIX/lib:${LD_LIBRARY_PATH:-}"
 ext_args=()
 # Loading PDO twice adds a warning to every test's output. A shared pdo.so
 # loaded RTLD_LOCAL may fail pdo_dbh_new; use a PDO-static PHP in that case.
-if ! "$PHP" -m 2>/dev/null | grep -qix pdo \
+# Read the complete producer output before checking it: grep -q can close a
+# pipe early and turn a successful module listing into SIGPIPE under pipefail.
+modules="$work/modules.log"
+if ! "$PHP" -m > "$modules" 2>/dev/null; then
+    echo "::error::Could not list PHP modules for the PDO common runner."
+    exit 1
+fi
+if ! grep -qix pdo "$modules" \
     && [ -n "$EXTDIR" ] && [ -f "$EXTDIR/pdo.so" ]; then
     ext_args+=(-d "extension=$EXTDIR/pdo.so")
 fi

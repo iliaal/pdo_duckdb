@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Check the complete PHP module listing before loading shared PDO in the common
+  test runner, avoiding duplicate loads after an early pipe close, and stop if
+  the module probe fails.
 - Preserve apostrophes and backslashes in the PDO common test directory and
   database path instead of generating invalid or altered redirect PHP.
 - Reject finite floating-point overflow in nested appender `FLOAT` values instead
