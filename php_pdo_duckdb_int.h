@@ -140,7 +140,7 @@ typedef struct {
 	unsigned char *col_flags;		/* fast-path flags */
 	/* Cached nested metadata; scalar leaves borrow col_types[i]. NULL if ncols == 0. */
 	pdo_duckdb_nested_render_type **col_desc;
-	/* CAST probes validate strings before any append. NULL entries skip probing;
+	/* CAST probes validate scalars before any append. NULL entries skip probing;
 	 * the array is NULL when ncols == 0. */
 	duckdb_prepared_statement *col_probes;
 	/* Per column {lo, hi}: numeric values inside skip the CAST probe. NULL if

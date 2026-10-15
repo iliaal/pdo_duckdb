@@ -136,12 +136,16 @@ destructor also closes (and warns on failure), but prefer an explicit
 `close()`.
 
 Soft validation failures (`ValueError`/`TypeError` for arity, types, ranges)
-leave the appender live so you can retry the row. String scalars bound for
-spellable non-`VARCHAR`/`BLOB` columns (e.g. `'not-a-date'` into `DATE`) are
-checked with a prepared `CAST` probe before any native append touches the row.
-A probe failure throws `PDOException("Failed to append value: …")` and also
-leaves the appender live. Hard DuckDB failures on append/flush/close (or a
-scalar the probe can't spell, failing on the native path) poison the appender:
+leave the appender live so you can retry the row. Scalar cast validation also
+runs before any native append touches the row, using range checks or a prepared
+`CAST` probe where the target type supports one. This covers invalid strings
+(e.g. `'not-a-date'` into `DATE`), uncastable booleans and numbers, and numeric
+overflow. `BLOB` columns accept only strings or `null`; other scalars throw
+`TypeError`. Cast-probe failures and finite overflow in a top-level `FLOAT`
+column throw
+`PDOException("Failed to append value: …")`, preserving the appender and its
+buffered rows. Hard DuckDB failures on append/flush/close (including casts
+without an available preflight probe) poison the appender:
 later use throws `Error` and you must create a new one. Rows already flushed
 survive, but buffered rows are lost, so call `flush()` per unit of work to
 bound the loss.
