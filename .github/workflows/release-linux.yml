@@ -140,7 +140,10 @@ jobs:
           test -f release-stage/pdo_duckdb.so
 
           if [ "$RUNNER_OS" = Linux ]; then
-            if ldd release-stage/pdo_duckdb.so | grep -qi libduckdb; then
+            # Finish the inspector before matching: an early grep -q exit can
+            # SIGPIPE the producer and turn a match into a pass under pipefail.
+            ldd release-stage/pdo_duckdb.so > "$RUNNER_TEMP/pdo-duckdb-linked-libraries.txt"
+            if grep -qi libduckdb "$RUNNER_TEMP/pdo-duckdb-linked-libraries.txt"; then
               echo "release archive still depends on libduckdb"
               exit 1
             fi
@@ -166,7 +169,8 @@ jobs:
                 if ((int) $d->query("SELECT count(*) FROM t")->fetchColumn() !== 2) exit(1);
               '
           else
-            if otool -L release-stage/pdo_duckdb.so | grep -qi libduckdb; then
+            otool -L release-stage/pdo_duckdb.so > "$RUNNER_TEMP/pdo-duckdb-linked-libraries.txt"
+            if grep -qi libduckdb "$RUNNER_TEMP/pdo-duckdb-linked-libraries.txt"; then
               echo "release archive still depends on libduckdb"
               exit 1
             fi
