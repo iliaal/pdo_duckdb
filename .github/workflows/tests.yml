@@ -126,6 +126,11 @@ jobs:
           sha256sum duckdb/lib/libduckdb.so run-tests.php > "$RUNNER_TEMP/probe-input.sha256"
           TMPDIR="$PWD/build/probe-tmp" "$link/config-tests/prefix_spaces.sh"
           sha256sum --check "$RUNNER_TEMP/probe-input.sha256"
+      - name: DuckDB 2.0 header detection regression probe
+        if: matrix.php == '8.4'
+        env:
+          DUCKDB_PREFIX: ${{ github.workspace }}/duckdb
+        run: sh config-tests/duckdb_v2_detection.sh
       - name: Build extension
         shell: bash
         run: |
@@ -384,7 +389,15 @@ jobs:
           tools: phpize, php-config
           coverage: none
 
+      - name: Cache DuckDB 2.0 preview
+        id: cache-duckdb-preview
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: duckdb
+          key: libduckdb-preview-linux-amd64-${{ env.DUCKDB_PREVIEW_SHA256 }}-v1
+
       - name: Download DuckDB 2.0 preview
+        if: steps.cache-duckdb-preview.outputs.cache-hit != 'true'
         run: |
           curl -fsSL -o /tmp/libduckdb.tar.gz "${DUCKDB_PREVIEW_URL}"
           echo "${DUCKDB_PREVIEW_SHA256}  /tmp/libduckdb.tar.gz" | sha256sum --check --strict

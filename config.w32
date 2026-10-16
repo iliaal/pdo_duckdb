@@ -15,18 +15,19 @@ if (PHP_PDO_DUCKDB != "no") {
 		: CHECK_FUNC_IN_HEADER("duckdb.h", "DUCKDB_TYPE_VARIANT", PHP_PDO_DUCKDB) ||
 			CHECK_FUNC_IN_HEADER("duckdb.h", "DUCKDB_TYPE_VARIANT", PHP_PDO_DUCKDB + "\\include");
 
-	if (CHECK_HEADER_ADD_INCLUDE("duckdb.h", "CFLAGS_PDO_DUCKDB", header_search) &&
+	var duckdb_inc = CHECK_HEADER_ADD_INCLUDE("duckdb.h", "CFLAGS_PDO_DUCKDB", header_search);
+
+	if (duckdb_inc &&
 		version_header_ok &&
 		CHECK_LIB("duckdb.lib", "pdo_duckdb", lib_search)) {
-		var have_tz_ns = (PHP_PDO_DUCKDB == "yes")
-			? GREP_HEADER("duckdb.h", "DUCKDB_TYPE_TIMESTAMP_TZ_NS", null)
-			: GREP_HEADER("duckdb.h", "DUCKDB_TYPE_TIMESTAMP_TZ_NS", PHP_PDO_DUCKDB) ||
-				GREP_HEADER("duckdb.h", "DUCKDB_TYPE_TIMESTAMP_TZ_NS", PHP_PDO_DUCKDB + "\\include");
-		var v2_regex = "#define\\s+DUCKDB_V2_API_VERSION_MAJOR\\s+[2-9]";
-		var have_v2 = (PHP_PDO_DUCKDB == "yes")
-			? GREP_HEADER("duckdb_v2.h", v2_regex, null)
-			: GREP_HEADER("duckdb_v2.h", v2_regex, PHP_PDO_DUCKDB) ||
-				GREP_HEADER("duckdb_v2.h", v2_regex, PHP_PDO_DUCKDB + "\\include");
+		// Only headers in the directory duckdb.h came from count, so a stray
+		// duckdb_v2.h on the include path cannot flip a 1.5.x build.
+		var duckdb_inc_dir = (typeof(duckdb_inc) == "string") ? duckdb_inc : null;
+		var have_tz_ns = duckdb_inc_dir != null &&
+			GREP_HEADER("duckdb.h", "DUCKDB_TYPE_TIMESTAMP_TZ_NS", duckdb_inc_dir);
+		var have_v2 = duckdb_inc_dir != null &&
+			FSO.FileExists(duckdb_inc_dir + "\\duckdb_v2.h") &&
+			GREP_HEADER("duckdb_v2.h", "#define\\s+DUCKDB_V2_API_VERSION_MAJOR\\s+[2-9]", duckdb_inc_dir);
 		AC_DEFINE("HAVE_DECL_DUCKDB_TYPE_TIMESTAMP_TZ_NS", have_tz_ns ? 1 : 0);
 		if (have_v2) {
 			if (!have_tz_ns) {

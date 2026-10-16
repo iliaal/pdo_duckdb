@@ -265,14 +265,19 @@ if test "$PHP_PDO_DUCKDB" != "no"; then
 
   dnl DuckDB 2.0 keeps reporting DUCKDB_API_VERSION 1.5.6 in duckdb.h, so the
   dnl generation is detected from the versioned v2 header it ships alongside.
+  dnl Only the copy next to the selected duckdb.h counts: a stray duckdb_v2.h
+  dnl on the default include path must not flip a 1.5.x build.
   AC_MSG_CHECKING([for the DuckDB 2.0 C API (duckdb_v2.h)])
-  AC_COMPILE_IFELSE([AC_LANG_PROGRAM([[
-#include <duckdb.h>
-#include <duckdb_v2.h>
+  pdo_duckdb_have_v2=no
+  if test -r "$DUCKDB_CONFIG_INCLUDE/duckdb_v2.h"; then
+    AC_COMPILE_IFELSE([AC_LANG_PROGRAM([[
+#include "$DUCKDB_CONFIG_INCLUDE/duckdb.h"
+#include "$DUCKDB_CONFIG_INCLUDE/duckdb_v2.h"
 #if !defined(DUCKDB_V2_API_VERSION_MAJOR) || DUCKDB_V2_API_VERSION_MAJOR < 2
 #error DuckDB 2.0 C API not found
 #endif
-  ]], [[]])], [pdo_duckdb_have_v2=yes], [pdo_duckdb_have_v2=no])
+    ]], [[]])], [pdo_duckdb_have_v2=yes], [])
+  fi
   AC_MSG_RESULT([$pdo_duckdb_have_v2])
   CPPFLAGS="$save_CPPFLAGS"
 
