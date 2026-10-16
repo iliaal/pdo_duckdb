@@ -917,16 +917,17 @@ typedef bool (*pdo_duckdb_varchar_row_cb)(void *ctx, char **cells);
 /* Walk a materialized result of ncols VARCHAR columns through the data-chunk
  * API; the duckdb_value_* row API misreads and crashes on DuckDB 2.0 results
  * with a NULL-typed column. Returns false, after *rows_out rows, on a column
- * shape mismatch, a cell holding a NUL byte (the callers need C strings), a
- * fetch error, or a callback stop. */
+ * shape mismatch, a cell holding a NUL byte (the callers need C strings; sets
+ * *nul_cell), a fetch error, or a callback stop. */
 static bool pdo_duckdb_each_varchar_row(duckdb_result *res, idx_t ncols,
-		pdo_duckdb_varchar_row_cb cb, void *ctx, idx_t *rows_out)
+		pdo_duckdb_varchar_row_cb cb, void *ctx, idx_t *rows_out, bool *nul_cell)
 {
 	duckdb_data_chunk chunk;
 	idx_t col;
 	bool ok = true;
 
 	*rows_out = 0;
+	*nul_cell = false;
 	if (ncols == 0 || ncols > PDO_DUCKDB_HELPER_MAX_COLUMNS || duckdb_column_count(res) != ncols) {
 		return false;
 	}
@@ -961,6 +962,7 @@ static bool pdo_duckdb_each_varchar_row(duckdb_result *res, idx_t ncols,
 				p = duckdb_string_t_data(&data[col][row]);
 				len = (size_t)duckdb_string_t_length(data[col][row]);
 				if (memchr(p, '\0', len)) {
+					*nul_cell = true;
 					ok = false;
 					break;
 				}
@@ -1008,6 +1010,8 @@ static void pdo_duckdb_append_quoted(smart_str *sql, const char *s, char quote)
 	smart_str_appendc(sql, quote);
 }
 
+static void pdo_duckdb_refuse_sandbox(pdo_duckdb_db_handle *H, const char *reason);
+
 static bool pdo_duckdb_detach_row(void *ctx, char **cells)
 {
 	pdo_duckdb_db_handle *H = (pdo_duckdb_db_handle *)ctx;
@@ -1038,7 +1042,7 @@ static bool pdo_duckdb_detach_out_of_basedir(pdo_duckdb_db_handle *H)
 {
 	duckdb_result res = {0};
 	idx_t rows;
-	bool ok;
+	bool ok, nul_cell;
 
 	if (duckdb_query(H->conn,
 			"SELECT database_name, path FROM duckdb_databases() "
@@ -1048,8 +1052,11 @@ static bool pdo_duckdb_detach_out_of_basedir(pdo_duckdb_db_handle *H)
 		return false;
 	}
 
-	ok = pdo_duckdb_each_varchar_row(&res, 2, pdo_duckdb_detach_row, H, &rows);
+	ok = pdo_duckdb_each_varchar_row(&res, 2, pdo_duckdb_detach_row, H, &rows, &nul_cell);
 	duckdb_destroy_result(&res);
+	if (nul_cell) {
+		pdo_duckdb_refuse_sandbox(H, "an attached database name or path contains a NUL byte");
+	}
 	return ok;
 }
 
@@ -1140,7 +1147,7 @@ static bool pdo_duckdb_check_loaded_extensions(pdo_duckdb_db_handle *H, duckdb_c
 	pdo_duckdb_loaded_extensions loaded = {{0}, false};
 	smart_str names;
 	idx_t rows;
-	bool listed;
+	bool listed, nul_cell;
 
 	*quack_loaded = false;
 	if (duckdb_query(conn,
@@ -1153,7 +1160,7 @@ static bool pdo_duckdb_check_loaded_extensions(pdo_duckdb_db_handle *H, duckdb_c
 		return false;
 	}
 
-	listed = pdo_duckdb_each_varchar_row(&res, 1, pdo_duckdb_loaded_extension_row, &loaded, &rows);
+	listed = pdo_duckdb_each_varchar_row(&res, 1, pdo_duckdb_loaded_extension_row, &loaded, &rows, &nul_cell);
 	duckdb_destroy_result(&res);
 	*quack_loaded = loaded.quack_loaded;
 	names = loaded.names;
