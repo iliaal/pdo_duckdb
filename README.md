@@ -305,9 +305,11 @@ that matches the fetch shape: `PDO::PARAM_INT` for exactly `BOOLEAN`,
 (so `UBIGINT` and `HUGEINT` stay `PARAM_STR`). `DECIMAL` columns also report
 `precision`/`scale`.
 
-Nested values with boolean, integer, `DECIMAL`, `DATE`, and `UUID` leaves use a
-direct renderer; nested values whose leaves need DuckDB's quoting rules use
-DuckDB's own renderer. Nested fetches return canonical strings, not PHP arrays;
+Nested values with boolean, integer, `FLOAT`/`DOUBLE`, `DECIMAL`, `DATE`,
+`TIME`, `TIMESTAMP`, `UUID`, and `VARCHAR` leaves use a direct renderer that
+applies DuckDB's quoting rules, so
+`[TIMESTAMP '2020-01-01 10:00:00']` returns `['2020-01-01 10:00:00']`, exactly
+like `CAST(... AS VARCHAR)`. Other nested values use DuckDB's own renderer. Nested fetches return canonical strings, not PHP arrays;
 for a different PHP-facing shape, use SQL projections such as `unnest`,
 `struct_extract`, or `json`.
 

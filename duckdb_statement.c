@@ -1100,8 +1100,10 @@ static void pdo_duckdb_smart_append_i64(smart_str *out, int64_t value)
  * NestedToVarcharCast::LOOKUP_TABLE (nested_to_varchar_cast.cpp). A value is
  * single-quoted (backslash-escaping only '\'' and '\\') when empty, padded
  * with recognized whitespace, case-insensitively "null", or containing one
- * of "'(),:=[]{}; otherwise it is emitted bare. UNION members render raw in
- * the engine, so the recursion below passes escape=false for those. */
+ * of "'(),:=[]{}; otherwise it is emitted bare. The engine applies the same
+ * test to the VARCHAR rendering of every LIST/STRUCT/MAP child, so a TIME or
+ * TIMESTAMP leaf (its ':') is quoted too. UNION members render raw in the
+ * engine, so the recursion below passes escape=false for those. */
 static const bool pdo_duckdb_varchar_quote_table[256] = {
 	['"'] = true, ['\''] = true, ['('] = true, [')'] = true, [','] = true,
 	[':'] = true, ['='] = true, ['['] = true, [']'] = true, ['{'] = true,
@@ -1239,7 +1241,12 @@ static bool pdo_duckdb_smart_append_fast_scalar(duckdb_type tid, duckdb_logical_
 				zval_ptr_dtor(&tmp);
 				return false;
 			}
-			smart_str_appendl(out, Z_STRVAL(tmp), Z_STRLEN(tmp));
+			if (escape_varchar && (tid == DUCKDB_TYPE_DATE || tid == DUCKDB_TYPE_TIMESTAMP
+					|| tid == DUCKDB_TYPE_TIME)) {
+				pdo_duckdb_smart_append_escaped_varchar(out, Z_STRVAL(tmp), Z_STRLEN(tmp));
+			} else {
+				smart_str_appendl(out, Z_STRVAL(tmp), Z_STRLEN(tmp));
+			}
 			zval_ptr_dtor(&tmp);
 			return true;
 		case DUCKDB_TYPE_VARCHAR: {
