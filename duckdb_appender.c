@@ -760,9 +760,15 @@ static duckdb_value pdo_duckdb_build_value(zval *z, const pdo_duckdb_nested_rend
 		v = pdo_duckdb_make_leaf(z, tid, argpos);
 		if (!v && !EG(exception)) {
 			/* make_leaf throws on an out-of-range integer; only report an
-			 * unsupported type when it returned NULL without throwing. */
-			zend_type_error("Pdo\\Duckdb\\Appender::appendRow(): argument #%u is of unsupported type %s",
-				argpos, zend_zval_value_name(z));
+			 * unsupported type when it returned NULL without throwing.
+			 * duckdb_create_varchar_length returns NULL for invalid UTF-8. */
+			if (Z_TYPE_P(z) == IS_STRING && tid != DUCKDB_TYPE_BLOB) {
+				zend_type_error("Pdo\\Duckdb\\Appender::appendRow(): argument #%u contains a string that is not valid UTF-8",
+					argpos);
+			} else {
+				zend_type_error("Pdo\\Duckdb\\Appender::appendRow(): argument #%u is of unsupported type %s",
+					argpos, zend_zval_value_name(z));
+			}
 		}
 		return v;
 	}

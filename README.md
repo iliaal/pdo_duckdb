@@ -140,8 +140,8 @@ leave the appender live so you can retry the row. Scalar cast validation also
 runs before any native append touches the row, using range checks or a prepared
 `CAST` probe where the target type supports one. This covers invalid strings
 (e.g. `'not-a-date'` into `DATE`), uncastable booleans and numbers, and numeric
-overflow. `BLOB` columns accept only strings or `null`; other scalars throw
-`TypeError`. Cast-probe failures and finite overflow in a top-level `FLOAT`
+overflow. It doesn't check `VARCHAR` strings for valid UTF-8 (see below).
+`BLOB` columns accept only strings or `null`; other scalars throw `TypeError`. Cast-probe failures and finite overflow in a top-level `FLOAT`
 column throw
 `PDOException("Failed to append value: …")`, preserving the appender and its
 buffered rows. Hard DuckDB failures on append/flush/close (including casts
@@ -149,6 +149,17 @@ without an available preflight probe) poison the appender:
 later use throws `Error` and you must create a new one. Rows already flushed
 survive, but buffered rows are lost, so call `flush()` per unit of work to
 bound the loss.
+
+The appender doesn't check strings for valid UTF-8 before a top-level
+`VARCHAR` append. If you pass invalid UTF-8 for a `VARCHAR` column,
+`appendRow()` accepts it, and the next `flush()` or `close()` throws
+`PDOException` and poisons the appender, losing every buffered row, including
+valid rows appended before and after the bad one. Invalid UTF-8 inside a `LIST`,
+`ARRAY`, `STRUCT`, or `MAP` value throws `TypeError` (`argument #N contains a
+string that is not valid UTF-8`) and leaves the appender live. Invalid UTF-8
+for a `UNION` member throws `PDOException` from `appendRow()` and poisons the
+appender. If your input can contain arbitrary bytes, validate it first, for
+example with `mb_check_encoding($s, 'UTF-8')`, or store it in a `BLOB` column.
 
 `appendRow(...$values)` takes one argument per column (left to right) and
 returns the appender for chaining. PHP `null`/`bool`/`int`/`float`/`string` map
@@ -309,7 +320,18 @@ Nested values with boolean, integer, `FLOAT`/`DOUBLE`, `DECIMAL`, `DATE`,
 `TIME`, `TIMESTAMP`, `UUID`, and `VARCHAR` leaves use a direct renderer that
 applies DuckDB's quoting rules, so
 `[TIMESTAMP '2020-01-01 10:00:00']` returns `['2020-01-01 10:00:00']`, exactly
-like `CAST(... AS VARCHAR)`. Other nested values use DuckDB's own renderer. Nested fetches return canonical strings, not PHP arrays;
+like `CAST(... AS VARCHAR)`. Other nested values use DuckDB's own renderer.
+
+A NUL byte inside a nested `VARCHAR` member truncates the fetched string,
+because the driver matches DuckDB's value renderer, which returns a
+NUL-terminated C string. With the direct renderer, the member is cut at the NUL
+and loses its closing quote, but later members still render:
+`['it''s' || chr(0), 'x', 'admin']` returns `['it\'s, x, admin]`. With DuckDB's
+renderer, everything after the NUL is dropped, closing brackets included. In
+both cases, you can't reliably split the result into elements. Top-level
+`VARCHAR` and `BLOB` columns aren't affected. If nested strings can contain NUL
+bytes, unnest them in SQL or render them yourself, for example with
+`to_json()` or `hex()`. Nested fetches return canonical strings, not PHP arrays;
 for a different PHP-facing shape, use SQL projections such as `unnest`,
 `struct_extract`, or `json`.
 
