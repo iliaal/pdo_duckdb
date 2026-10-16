@@ -181,7 +181,8 @@ jobs:
           bash scripts/check-required-tests.sh "$RUNNER_TEMP/test-output.txt" \
             tests/117_sandbox_loaded_quack_lazy.phpt \
             tests/118_sandbox_loaded_quack_persistent.phpt \
-            tests/119_sandbox_uncontained_extension.phpt
+            tests/119_sandbox_uncontained_extension.phpt \
+            tests/136_sandbox_quack_listener_nul_uri.phpt
 
       - name: PDO common tests
         # Only on 8.4/8.5, where the suite runs clean apart from the 2
@@ -364,7 +365,8 @@ jobs:
           bash scripts/check-required-tests.sh "$RUNNER_TEMP/test-output.txt" \
             tests/117_sandbox_loaded_quack_lazy.phpt \
             tests/118_sandbox_loaded_quack_persistent.phpt \
-            tests/119_sandbox_uncontained_extension.phpt
+            tests/119_sandbox_uncontained_extension.phpt \
+            tests/136_sandbox_quack_listener_nul_uri.phpt
 
       - name: PDO common tests
         run: |
@@ -526,10 +528,12 @@ jobs:
             tests/117_sandbox_loaded_quack_lazy.phpt \
             tests/118_sandbox_loaded_quack_persistent.phpt \
             tests/119_sandbox_uncontained_extension.phpt \
+            tests/136_sandbox_quack_listener_nul_uri.phpt \
             tests/131_sandbox_extension_repositories.phpt \
             tests/132_persistent_connect_discard.phpt \
             tests/133_sandbox_connect_quack_v2.phpt \
-            tests/134_sandbox_file_writers_v2.phpt
+            tests/134_sandbox_file_writers_v2.phpt \
+            tests/137_sandbox_attach_nul_path.phpt
 
   portable-integers:
     name: Portable integer renderers - PHP 8.4
@@ -694,4 +698,5 @@ jobs:
           bash scripts/check-required-tests.sh /tmp/test-output.txt \
             tests/117_sandbox_loaded_quack_lazy.phpt \
             tests/118_sandbox_loaded_quack_persistent.phpt \
-            tests/119_sandbox_uncontained_extension.phpt
+            tests/119_sandbox_uncontained_extension.phpt \
+            tests/136_sandbox_quack_listener_nul_uri.phpt
