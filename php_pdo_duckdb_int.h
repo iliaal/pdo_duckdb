@@ -113,6 +113,10 @@ typedef struct _pdo_duckdb_variant_probe {
 	idx_t array_size;
 	idx_t child_count;
 	struct _pdo_duckdb_variant_probe **children;
+#ifdef HAVE_DUCKDB_V2
+	/* A leaf's real type id: VARIANT, or a type the driver cannot decode. */
+	duckdb_type opaque_type;
+#endif
 } pdo_duckdb_variant_probe;
 
 typedef enum {

@@ -25,7 +25,11 @@ foreach ([
     "SELECT DATE '2020-01-01' AS d",
     "SELECT 1 AS i, [DATE '2020-01-01'] AS l",
     "SELECT {'d': DATE '2020-01-01'} AS s",
-    "SELECT CAST(42 AS VARIANT) AS v, DATE '2020-01-01' AS d",
+    // The error names the cell that blocked the row, not another column's type.
+    "SELECT CAST(42 AS VARIANT) AS v, NULL::DATE AS d",
+    "SELECT NULL::VARIANT AS v, DATE '2020-01-01' AS d",
+    "SELECT {'v': CAST(42 AS VARIANT), 'd': NULL::DATE} AS s",
+    "SELECT {'v': NULL::VARIANT, 'd': DATE '2020-01-01'} AS s",
 ] as $sql) {
     $st = $db->query($sql);
     echo $st->getColumnMeta($st->columnCount() - 1)['native_type'], ': ';
@@ -46,7 +50,10 @@ var_dump($st->fetch(PDO::FETCH_NUM), $st->fetch(PDO::FETCH_NUM), $st->errorInfo(
 DATE: SQLSTATE[HY000]: General error: 5 DuckDB type id 13 is not supported by this pdo_duckdb build; cast the value to VARCHAR in SQL
 LIST: SQLSTATE[HY000]: General error: 5 DuckDB type id 13 is not supported by this pdo_duckdb build; cast the value to VARCHAR in SQL
 STRUCT: SQLSTATE[HY000]: General error: 5 DuckDB type id 13 is not supported by this pdo_duckdb build; cast the value to VARCHAR in SQL
+DATE: SQLSTATE[HY000]: General error: 5 DuckDB VARIANT values are not supported by the C result API; cast the value to VARCHAR in SQL
 DATE: SQLSTATE[HY000]: General error: 5 DuckDB type id 13 is not supported by this pdo_duckdb build; cast the value to VARCHAR in SQL
+STRUCT: SQLSTATE[HY000]: General error: 5 DuckDB VARIANT values are not supported by the C result API; cast the value to VARCHAR in SQL
+STRUCT: SQLSTATE[HY000]: General error: 5 DuckDB type id 13 is not supported by this pdo_duckdb build; cast the value to VARCHAR in SQL
 array(2) {
   [0]=>
   NULL

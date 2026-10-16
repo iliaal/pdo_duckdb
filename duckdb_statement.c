@@ -276,7 +276,15 @@ static int pdo_duckdb_stmt_bind_failure(pdo_stmt_t *stmt);
 
 /* Stands in for a subtree whose probe could not be allocated: any non-NULL
  * cell is treated as holding a VARIANT. */
+#ifdef HAVE_DUCKDB_V2
+static pdo_duckdb_variant_probe pdo_duckdb_variant_probe_any = { DUCKDB_TYPE_VARIANT, 0, 0, NULL, DUCKDB_TYPE_INVALID };
+
+/* The opaque_type of the leaf that made the last probe hit; INVALID for the
+ * allocation-failure stand-in. */
+ZEND_TLS duckdb_type pdo_duckdb_tls_probe_hit_type;
+#else
 static pdo_duckdb_variant_probe pdo_duckdb_variant_probe_any = { DUCKDB_TYPE_VARIANT, 0, 0, NULL };
+#endif
 
 static void pdo_duckdb_variant_probe_destroy(pdo_duckdb_variant_probe *p)
 {
@@ -335,29 +343,6 @@ static bool pdo_duckdb_type_has_variant(duckdb_logical_type lt)
 	return false;
 }
 
-#ifdef HAVE_DUCKDB_V2
-static bool pdo_duckdb_type_find_undecodable(duckdb_logical_type lt, duckdb_type *out)
-{
-	duckdb_type tid = duckdb_get_type_id(lt);
-	idx_t n = pdo_duckdb_variant_probe_arity(tid, lt), i;
-
-	if (tid != DUCKDB_TYPE_VARIANT && !pdo_duckdb_type_decodable(tid)) {
-		*out = tid;
-		return true;
-	}
-	for (i = 0; i < n; i++) {
-		duckdb_logical_type child = pdo_duckdb_variant_probe_child(tid, lt, i);
-		bool hit = pdo_duckdb_type_find_undecodable(child, out);
-
-		duckdb_destroy_logical_type(&child);
-		if (hit) {
-			return true;
-		}
-	}
-	return false;
-}
-#endif
-
 static pdo_duckdb_variant_probe *pdo_duckdb_variant_probe_build(duckdb_logical_type lt)
 {
 	duckdb_type tid = duckdb_get_type_id(lt);
@@ -372,6 +357,7 @@ static pdo_duckdb_variant_probe *pdo_duckdb_variant_probe_build(duckdb_logical_t
 		}
 #ifdef HAVE_DUCKDB_V2
 		p->type = DUCKDB_TYPE_VARIANT;
+		p->opaque_type = tid;
 #else
 		p->type = tid;
 #endif
@@ -424,6 +410,9 @@ static bool pdo_duckdb_variant_probe_hit(duckdb_vector vec, idx_t row, const pdo
 
 	switch (p->type) {
 		case DUCKDB_TYPE_VARIANT:
+#ifdef HAVE_DUCKDB_V2
+			pdo_duckdb_tls_probe_hit_type = p->opaque_type;
+#endif
 			return true;
 
 		case DUCKDB_TYPE_LIST:
@@ -2471,24 +2460,15 @@ static int pdo_duckdb_stmt_fetched_row(pdo_stmt_t *stmt)
 		return 1;
 	}
 #ifdef HAVE_DUCKDB_V2
-	{
-		duckdb_type unknown = DUCKDB_TYPE_INVALID;
-		idx_t i;
+	if (pdo_duckdb_tls_probe_hit_type != DUCKDB_TYPE_VARIANT
+			&& pdo_duckdb_tls_probe_hit_type != DUCKDB_TYPE_INVALID) {
+		char msg[128];
 
-		for (i = 0; i < S->variant_col_count; i++) {
-			if (pdo_duckdb_type_find_undecodable(S->col_logical_types[S->variant_cols[i]], &unknown)) {
-				break;
-			}
-		}
-		if (i < S->variant_col_count) {
-			char msg[192];
-
-			snprintf(msg, sizeof(msg), "DuckDB type id %d is not supported by this pdo_duckdb build;"
-				" cast the value to VARCHAR in SQL", (int)unknown);
-			pdo_duckdb_error_stmt_code(stmt, PDO_DUCKDB_ERRCODE_STREAMING, msg);
-		} else {
-			pdo_duckdb_error_stmt_code(stmt, PDO_DUCKDB_ERRCODE_STREAMING, PDO_DUCKDB_VARIANT_ERRMSG);
-		}
+		snprintf(msg, sizeof(msg), "DuckDB type id %d is not supported by this pdo_duckdb build;"
+			" cast the value to VARCHAR in SQL", (int)pdo_duckdb_tls_probe_hit_type);
+		pdo_duckdb_error_stmt_code(stmt, PDO_DUCKDB_ERRCODE_STREAMING, msg);
+	} else {
+		pdo_duckdb_error_stmt_code(stmt, PDO_DUCKDB_ERRCODE_STREAMING, PDO_DUCKDB_VARIANT_ERRMSG);
 	}
 #else
 	pdo_duckdb_error_stmt_code(stmt, PDO_DUCKDB_ERRCODE_STREAMING, PDO_DUCKDB_VARIANT_ERRMSG);
