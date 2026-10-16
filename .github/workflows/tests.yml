@@ -142,6 +142,20 @@ jobs:
             exit 1
           fi
 
+      - name: Cache DuckDB test extensions
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: duckdb-test-extensions
+          key: duckdb-test-extensions-linux-amd64-${{ env.DUCKDB_VERSION }}-${{ hashFiles('scripts/install-test-extensions.php') }}
+
+      - name: Install DuckDB test extensions
+        # Tests 117-119 SKIP when these can't be installed; installing here makes
+        # a failed download fail the job, and the run below rejects any SKIP.
+        run: |
+          export LD_LIBRARY_PATH="$PWD/duckdb/lib"
+          php -d "extension=$PWD/modules/pdo_duckdb.so" \
+            scripts/install-test-extensions.php "$PWD/duckdb-test-extensions"
+
       - name: Run tests
         run: |
           export LD_LIBRARY_PATH="$PWD/duckdb/lib"
@@ -149,10 +163,25 @@ jobs:
           export TEST_PHP_EXECUTABLE
           export TEST_PHP_ARGS="-d extension=$PWD/modules/pdo_duckdb.so"
           export NO_INTERACTION=1
-          # Direct invocation: run-tests.php exits non-zero on failures and the
-          # --show-diff output is printed inline (no capture-under-bash-e, which
-          # would abort at the assignment and hide the diff).
-          php run-tests.php --show-diff -g FAIL,BORK,LEAK,XLEAK tests/
+          export PDO_DUCKDB_TEST_EXTENSION_DIR="$PWD/duckdb-test-extensions"
+          # tee keeps the --show-diff output inline; set +e keeps a failing run
+          # from aborting before its exit status is read.
+          set +e
+          php run-tests.php --show-diff -g FAIL,BORK,LEAK,XLEAK,SKIP tests/ 2>&1 | tee "$RUNNER_TEMP/test-output.txt"
+          test_status=("${PIPESTATUS[@]}")
+          set -e
+          if [ "${test_status[0]}" -ne 0 ]; then
+            echo "::error::run-tests.php failed (exit ${test_status[0]})"
+            exit "${test_status[0]}"
+          fi
+          if [ "${test_status[1]}" -ne 0 ]; then
+            echo "::error::Test output could not be recorded (exit ${test_status[1]})"
+            exit "${test_status[1]}"
+          fi
+          bash scripts/check-required-tests.sh "$RUNNER_TEMP/test-output.txt" \
+            tests/117_sandbox_loaded_quack_lazy.phpt \
+            tests/118_sandbox_loaded_quack_persistent.phpt \
+            tests/119_sandbox_uncontained_extension.phpt
 
       - name: PDO common tests
         # Only on 8.4/8.5, where the suite runs clean apart from the 2
@@ -299,13 +328,43 @@ jobs:
             exit 1
           fi
 
+      - name: Cache DuckDB test extensions
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: duckdb-test-extensions
+          key: duckdb-test-extensions-linux-amd64-${{ env.DUCKDB_VERSION }}-${{ hashFiles('scripts/install-test-extensions.php') }}
+
+      - name: Install DuckDB test extensions
+        # Tests 117-119 SKIP when these can't be installed; installing here makes
+        # a failed download fail the job, and the run below rejects any SKIP.
+        run: |
+          export LD_LIBRARY_PATH="$PWD/duckdb/lib"
+          /tmp/php-branch/bin/php -d "extension=$PWD/modules/pdo_duckdb.so" \
+            scripts/install-test-extensions.php "$PWD/duckdb-test-extensions"
+
       - name: Run tests
         run: |
           export LD_LIBRARY_PATH="$PWD/duckdb/lib"
           export TEST_PHP_EXECUTABLE=/tmp/php-branch/bin/php
           export TEST_PHP_ARGS="-d extension=$PWD/modules/pdo_duckdb.so"
           export NO_INTERACTION=1
-          /tmp/php-branch/bin/php run-tests.php --show-diff -g FAIL,BORK,LEAK,XLEAK tests/
+          export PDO_DUCKDB_TEST_EXTENSION_DIR="$PWD/duckdb-test-extensions"
+          set +e
+          /tmp/php-branch/bin/php run-tests.php --show-diff -g FAIL,BORK,LEAK,XLEAK,SKIP tests/ 2>&1 | tee "$RUNNER_TEMP/test-output.txt"
+          test_status=("${PIPESTATUS[@]}")
+          set -e
+          if [ "${test_status[0]}" -ne 0 ]; then
+            echo "::error::run-tests.php failed (exit ${test_status[0]})"
+            exit "${test_status[0]}"
+          fi
+          if [ "${test_status[1]}" -ne 0 ]; then
+            echo "::error::Test output could not be recorded (exit ${test_status[1]})"
+            exit "${test_status[1]}"
+          fi
+          bash scripts/check-required-tests.sh "$RUNNER_TEMP/test-output.txt" \
+            tests/117_sandbox_loaded_quack_lazy.phpt \
+            tests/118_sandbox_loaded_quack_persistent.phpt \
+            tests/119_sandbox_uncontained_extension.phpt
 
       - name: PDO common tests
         run: |
@@ -556,14 +615,29 @@ jobs:
             --with-php-config=/tmp/php-asan/bin/php-config
           make -j"$(nproc)"
 
+      - name: Cache DuckDB test extensions
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: duckdb-test-extensions
+          key: duckdb-test-extensions-linux-amd64-${{ env.DUCKDB_VERSION }}-${{ hashFiles('scripts/install-test-extensions.php') }}
+
+      - name: Install DuckDB test extensions
+        # Tests 117-119 SKIP when these can't be installed; installing here makes
+        # a failed download fail the job, and the run below rejects any SKIP.
+        run: |
+          export LD_LIBRARY_PATH="$PWD/duckdb/lib:${LD_LIBRARY_PATH}"
+          /tmp/php-asan/bin/php -d "extension=$PWD/modules/pdo_duckdb.so" \
+            scripts/install-test-extensions.php "$PWD/duckdb-test-extensions"
+
       - name: Run tests under ASAN
         run: |
           export LD_LIBRARY_PATH="$PWD/duckdb/lib:${LD_LIBRARY_PATH}"
           export TEST_PHP_EXECUTABLE=/tmp/php-asan/bin/php
           export TEST_PHP_ARGS="-d extension=$PWD/modules/pdo_duckdb.so"
           export NO_INTERACTION=1
+          export PDO_DUCKDB_TEST_EXTENSION_DIR="$PWD/duckdb-test-extensions"
           set +e
-          /tmp/php-asan/bin/php run-tests.php --show-diff --asan -g FAIL,BORK,LEAK,XLEAK tests/ 2>&1 | tee /tmp/test-output.txt
+          /tmp/php-asan/bin/php run-tests.php --show-diff --asan -g FAIL,BORK,LEAK,XLEAK,SKIP tests/ 2>&1 | tee /tmp/test-output.txt
           test_status=("${PIPESTATUS[@]}")
           set -e
           if [ "${test_status[0]}" -ne 0 ]; then
@@ -579,3 +653,7 @@ jobs:
             exit 1
           fi
           bash scripts/check-executed-tests.sh /tmp/test-output.txt
+          bash scripts/check-required-tests.sh /tmp/test-output.txt \
+            tests/117_sandbox_loaded_quack_lazy.phpt \
+            tests/118_sandbox_loaded_quack_persistent.phpt \
+            tests/119_sandbox_uncontained_extension.phpt
