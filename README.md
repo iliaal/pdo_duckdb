@@ -592,8 +592,10 @@ Other contracts:
   SQL NULL `VARIANT` cells read back as `null`. Before PHP 8.5, `fetchAll()`
   reports a failure only when it happens on its first row, so under
   `ERRMODE_WARNING` or `ERRMODE_SILENT` a later `VARIANT` row ends the result
-  early with no warning; check `errorInfo()`. Cast to `VARCHAR` in SQL to fetch
-  the value.
+  early with no warning; check `errorInfo()`. Because the failed fetch returns
+  `false`, a `while ($row = $stmt->fetch())` loop stops at that row as if the
+  result had ended. Cast `VARIANT` columns to `VARCHAR` in SQL to fetch the
+  value, or check `errorInfo()` after the loop.
 - **`getAttribute()`.** Returns the library version for
   `ATTR_CLIENT_VERSION`/`ATTR_SERVER_VERSION`, `"duckdb"` for
   `ATTR_DRIVER_NAME`, and the streaming flag for
