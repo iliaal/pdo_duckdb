@@ -110,6 +110,13 @@ static void duckdb_handle_closer(pdo_dbh_t *dbh) /* {{{ */
 
 	if (H) {
 		if (H->conn) {
+			/* A query that failed while DuckDB was starting it (e.g. a file log
+			 * sink that cannot be opened) leaves a stale active query, which
+			 * disconnect would end inside the ClientContext destructor; a second
+			 * sink failure there calls std::terminate. An empty query ends any
+			 * active query first, under duckdb_query's catch-all, and parses
+			 * nothing. */
+			duckdb_query(H->conn, "", NULL);
 			duckdb_disconnect(&H->conn);
 			H->conn = NULL;
 		}
