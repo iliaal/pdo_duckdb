@@ -1179,33 +1179,47 @@ static bool pdo_duckdb_check_loaded_extensions(pdo_duckdb_db_handle *H, duckdb_c
 	return false;
 }
 
-static bool pdo_duckdb_stop_quack_listener_row(void *ctx, char **cells)
-{
-	duckdb_connection conn = (duckdb_connection)ctx;
-	smart_str sql = {0};
-
-	if (!cells[0]) {
-		return true;
-	}
-	smart_str_appends(&sql, "SELECT * FROM quack_stop(");
-	pdo_duckdb_append_quoted(&sql, cells[0], '\'');
-	smart_str_appendc(&sql, ')');
-	smart_str_0(&sql);
-	(void)pdo_duckdb_query_ok(conn, ZSTR_VAL(sql.s));
-	smart_str_free(&sql);
-	return true;
-}
-
+/* Best effort past every per-row failure. URIs are bound byte for byte: one
+ * holding a NUL must not end the walk and leave later listeners running. */
 static void pdo_duckdb_stop_quack_listeners(duckdb_connection conn)
 {
 	duckdb_result res = {0};
-	idx_t rows;
+	duckdb_prepared_statement stop = NULL;
+	duckdb_data_chunk chunk;
 
 	if (duckdb_query(conn, "SELECT #1 FROM quack_server_list()", &res) != DuckDBSuccess) {
 		duckdb_destroy_result(&res);
 		return;
 	}
-	(void)pdo_duckdb_each_varchar_row(&res, 1, pdo_duckdb_stop_quack_listener_row, conn, &rows);
+	if (duckdb_column_count(&res) != 1 || duckdb_column_type(&res, 0) != DUCKDB_TYPE_VARCHAR
+			|| duckdb_prepare(conn, "SELECT * FROM quack_stop($1)", &stop) != DuckDBSuccess) {
+		duckdb_destroy_prepare(&stop);
+		duckdb_destroy_result(&res);
+		return;
+	}
+
+	while ((chunk = duckdb_fetch_chunk(res)) != NULL) {
+		idx_t size = duckdb_data_chunk_get_size(chunk);
+		duckdb_vector vec = duckdb_data_chunk_get_vector(chunk, 0);
+		duckdb_string_t *data = (duckdb_string_t *)duckdb_vector_get_data(vec);
+		uint64_t *validity = duckdb_vector_get_validity(vec);
+		idx_t row;
+
+		for (row = 0; row < size; row++) {
+			duckdb_result stopped = {0};
+
+			if (validity && !duckdb_validity_row_is_valid(validity, row)) {
+				continue;
+			}
+			if (duckdb_bind_varchar_length(stop, 1, duckdb_string_t_data(&data[row]),
+					duckdb_string_t_length(data[row])) == DuckDBSuccess) {
+				(void)duckdb_execute_prepared(stop, &stopped);
+				duckdb_destroy_result(&stopped);
+			}
+		}
+		duckdb_destroy_data_chunk(&chunk);
+	}
+	duckdb_destroy_prepare(&stop);
 	duckdb_destroy_result(&res);
 }
 
