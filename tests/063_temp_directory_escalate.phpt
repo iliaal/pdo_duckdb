@@ -8,7 +8,10 @@ pdo_duckdb
 // DuckDB EnableExternalAccessSetting::OnSet re-adds temporary_directory to
 // allowed_directories when external access is turned off. The driver must
 // clear temp_directory (to empty, not the basedir root) before that flip.
-$outside = sys_get_temp_dir() . '/pdo_duckdb_oob_temp_' . getmypid();
+$outside = sys_get_temp_dir() . '/pdo_duckdb_063_oob';
+foreach (glob("$outside/*") ?: [] as $f) {
+    @unlink($f);
+}
 @mkdir($outside, 0700, true);
 file_put_contents("$outside/leak.csv", "col\nsecret\n");
 
@@ -38,9 +41,11 @@ var_dump((int)$db->query('SELECT 7')->fetchColumn());
 ?>
 --CLEAN--
 <?php
-$outside = sys_get_temp_dir() . '/pdo_duckdb_oob_temp_' . getmypid();
-@unlink("$outside/leak.csv");
-@rmdir($outside);
+$dir = sys_get_temp_dir() . '/pdo_duckdb_063_oob';
+foreach (glob("$dir/*") ?: [] as $f) {
+    @unlink($f);
+}
+@rmdir($dir);
 ?>
 --EXPECT--
 external=false

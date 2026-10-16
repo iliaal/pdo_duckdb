@@ -5,8 +5,13 @@ pdo
 pdo_duckdb
 --FILE--
 <?php
-$outside = sys_get_temp_dir() . '/pdo_duckdb_oob_attach_' . getmypid() . '.duckdb';
-@unlink($outside);
+$dir = sys_get_temp_dir() . '/pdo_duckdb_065_oob';
+foreach (glob("$dir/*") ?: [] as $f) {
+    @unlink($f);
+}
+@rmdir($dir);
+@mkdir($dir, 0700, true);
+$outside = "$dir/other.duckdb";
 
 $db = new PDO('duckdb::memory:', null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
 $db->exec('ATTACH ' . $db->quote($outside) . ' AS other');
@@ -35,9 +40,11 @@ var_dump((int)$db->query('SELECT 3')->fetchColumn());
 ?>
 --CLEAN--
 <?php
-$outside = sys_get_temp_dir() . '/pdo_duckdb_oob_attach_' . getmypid() . '.duckdb';
-@unlink($outside);
-@unlink($outside . '.wal');
+$dir = sys_get_temp_dir() . '/pdo_duckdb_065_oob';
+foreach (glob("$dir/*") ?: [] as $f) {
+    @unlink($f);
+}
+@rmdir($dir);
 ?>
 --EXPECT--
 detached
