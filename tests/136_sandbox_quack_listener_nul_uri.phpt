@@ -40,10 +40,10 @@ if ($dir = getenv('PDO_DUCKDB_TEST_EXTENSION_DIR')) {
 $db->exec('LOAD httpfs; LOAD quack');
 
 // quack_server_list() has no defined order (the tested builds list newest
-// first), so plain listeners go on both sides of the NUL-suffixed one.
-$ports = ['first plain' => free_port(), 'NUL-suffixed' => free_port(), 'last plain' => free_port()];
+// first), so plain listeners go on both sides of the NUL-embedded one.
+$ports = ['first plain' => free_port(), 'NUL-embedded' => free_port(), 'last plain' => free_port()];
 foreach ($ports as $label => $port) {
-    $uri = "'quack:127.0.0.1:$port'" . ($label === 'NUL-suffixed' ? ' || chr(0)' : '');
+    $uri = "'quack:127.0.0.1:$port'" . ($label === 'NUL-embedded' ? " || chr(0) || 'x'" : '');
     $db->query("CALL quack_serve($uri, token='tttt', disable_ssl=true)")->fetchAll();
 }
 foreach ($ports as $label => $port) {
@@ -64,9 +64,9 @@ foreach ($ports as $label => $port) {
 ?>
 --EXPECT--
 first plain before: listening
-NUL-suffixed before: listening
+NUL-embedded before: listening
 last plain before: listening
 SELECT: refused
 first plain after: stopped
-NUL-suffixed after: stopped
+NUL-embedded after: stopped
 last plain after: stopped
