@@ -420,6 +420,8 @@ jobs:
           make -j"$(nproc)"
 
       - name: Run full suite against DuckDB floor
+        # No extension pre-install or required-tests gate here: the sandbox
+        # extension tests (117-119) may SKIP in this lane.
         run: |
           export LD_LIBRARY_PATH="$PWD/duckdb/lib"
           TEST_PHP_EXECUTABLE="$(command -v php)"
@@ -480,6 +482,20 @@ jobs:
             exit 1
           fi
 
+      - name: Cache DuckDB test extensions
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: duckdb-test-extensions
+          key: duckdb-test-extensions-linux-amd64-preview-${{ env.DUCKDB_PREVIEW_SHA256 }}-${{ hashFiles('scripts/install-test-extensions.php') }}
+
+      - name: Install DuckDB test extensions
+        # Tests 117-119 SKIP when these can't be installed; installing here makes
+        # a failed download fail the job, and the run below rejects any SKIP.
+        run: |
+          export LD_LIBRARY_PATH="$PWD/duckdb/lib"
+          php -d "extension=$PWD/modules/pdo_duckdb.so" \
+            scripts/install-test-extensions.php "$PWD/duckdb-test-extensions"
+
       - name: Run full suite against DuckDB 2.0 preview
         run: |
           export LD_LIBRARY_PATH="$PWD/duckdb/lib"
@@ -493,7 +509,23 @@ jobs:
             echo $v, "\n";
             exit(str_starts_with($v, "v2.") ? 0 : 1);
           '
-          php run-tests.php --show-diff -g FAIL,BORK,LEAK,XLEAK tests/
+          export PDO_DUCKDB_TEST_EXTENSION_DIR="$PWD/duckdb-test-extensions"
+          set +e
+          php run-tests.php --show-diff -g FAIL,BORK,LEAK,XLEAK,SKIP tests/ 2>&1 | tee "$RUNNER_TEMP/test-output.txt"
+          test_status=("${PIPESTATUS[@]}")
+          set -e
+          if [ "${test_status[0]}" -ne 0 ]; then
+            echo "::error::run-tests.php failed (exit ${test_status[0]})"
+            exit "${test_status[0]}"
+          fi
+          if [ "${test_status[1]}" -ne 0 ]; then
+            echo "::error::Test output could not be recorded (exit ${test_status[1]})"
+            exit "${test_status[1]}"
+          fi
+          bash scripts/check-required-tests.sh "$RUNNER_TEMP/test-output.txt" \
+            tests/117_sandbox_loaded_quack_lazy.phpt \
+            tests/118_sandbox_loaded_quack_persistent.phpt \
+            tests/119_sandbox_uncontained_extension.phpt
 
   portable-integers:
     name: Portable integer renderers - PHP 8.4
@@ -529,6 +561,8 @@ jobs:
           make -j"$(nproc)"
 
       - name: Run full suite through portable integer renderers
+        # No extension pre-install or required-tests gate here: the sandbox
+        # extension tests (117-119) may SKIP in this lane.
         run: |
           export LD_LIBRARY_PATH="$PWD/duckdb/lib"
           TEST_PHP_EXECUTABLE="$(command -v php)"
