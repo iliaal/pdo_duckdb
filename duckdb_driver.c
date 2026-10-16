@@ -1354,6 +1354,29 @@ static void pdo_duckdb_liveness_discard(pdo_dbh_t *dbh)
 	}
 }
 
+#ifdef HAVE_DUCKDB_V2
+/* After a DuckDB 2.0 CONNECT every statement on the connection except
+ * CONNECT/DISCONNECT runs on the remote database, and nothing reports the
+ * binding without SQL. DISCONNECT runs locally and fails with "no active
+ * CONNECT" on a local session; any other outcome counts as CONNECTed. */
+static bool pdo_duckdb_session_is_local(duckdb_connection conn)
+{
+	duckdb_result res = {0};
+	const char *err;
+	bool local;
+
+	if (duckdb_query(conn, "DISCONNECT", &res) == DuckDBSuccess) {
+		duckdb_destroy_result(&res);
+		return false;
+	}
+	err = duckdb_result_error(&res);
+	local = duckdb_result_error_type(&res) == DUCKDB_ERROR_INVALID_INPUT
+		&& err && strstr(err, "no active CONNECT") != NULL;
+	duckdb_destroy_result(&res);
+	return local;
+}
+#endif
+
 static zend_result pdo_duckdb_check_liveness(pdo_dbh_t *dbh)
 {
 	pdo_duckdb_db_handle *H = (pdo_duckdb_db_handle *)dbh->driver_data;
@@ -1367,6 +1390,14 @@ static zend_result pdo_duckdb_check_liveness(pdo_dbh_t *dbh)
 	 * A second live PDO wrapper (refcount > 1) may be mid-transaction; a
 	 * failed RESET there aborts it. */
 	if (dbh->refcount <= 1) {
+#ifdef HAVE_DUCKDB_V2
+		/* The residue SQL below would reach the remote database, and the next
+		 * request would inherit the binding. */
+		if (!pdo_duckdb_session_is_local(H->conn)) {
+			pdo_duckdb_liveness_discard(dbh);
+			return FAILURE;
+		}
+#endif
 		if (!H->external_access_disabled) {
 			for (i = 0; i < sizeof(pdo_duckdb_liveness_network_resets)
 					/ sizeof(pdo_duckdb_liveness_network_resets[0]); i++) {
