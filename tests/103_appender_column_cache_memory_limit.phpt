@@ -6,6 +6,7 @@ pdo_duckdb
 --SKIPIF--
 <?php
 if (!function_exists('proc_open')) die('skip proc_open() unavailable');
+if (getenv('TEST_PHP_EXTRA_ARGS') === false) die('skip needs run-tests.php child arguments');
 $env = getenv();
 $env['USE_ZEND_ALLOC'] = '0';
 $env['USE_TRACKED_ALLOC'] = '1';
@@ -51,15 +52,9 @@ $dir = __DIR__ . '/103_work';
 $script = $dir . '/child.php';
 file_put_contents($script, $child);
 
-$ext_dir = ini_get('extension_dir');
-$cmd = [PHP_BINARY, '-n', '-d', 'extension_dir=' . $ext_dir,
-    '-d', 'display_startup_errors=0', '-d', 'log_errors=0'];
-foreach (['pdo', 'pdo_duckdb'] as $ext) {
-    if (is_file($ext_dir . '/' . $ext . '.' . PHP_SHLIB_SUFFIX)) {
-        $cmd[] = '-d';
-        $cmd[] = 'extension=' . $ext;
-    }
-}
+// Children get the runner's own -n/-d arguments, which is how CI loads
+// pdo_duckdb (by absolute path through TEST_PHP_ARGS).
+$php = escapeshellarg(getenv('TEST_PHP_EXECUTABLE')) . ' ' . getenv('TEST_PHP_EXTRA_ARGS');
 $env = getenv();
 $env['USE_ZEND_ALLOC'] = '0';
 $env['USE_TRACKED_ALLOC'] = '1';
@@ -72,7 +67,7 @@ $fatal = $survived = 0;
 $limits = range(512, 40 * $n, 512);
 $limits[] = 8 * 1024 * 1024;
 foreach ($limits as $headroom) {
-    $proc = proc_open(array_merge($cmd, [$script, (string)$n, (string)$headroom]),
+    $proc = proc_open($php . ' ' . implode(' ', array_map('escapeshellarg', [$script, $n, $headroom])),
         [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['redirect', 1]], $pipes, null, $env);
     fclose($pipes[0]);
     $out = stream_get_contents($pipes[1]);

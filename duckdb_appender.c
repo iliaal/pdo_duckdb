@@ -93,53 +93,75 @@ static void pdo_duckdb_appender_desc_destroy(pdo_duckdb_nested_render_type *t)
 	efree(t);
 }
 
-static pdo_duckdb_nested_render_type *pdo_duckdb_appender_desc_build(duckdb_type tid, duckdb_logical_type lt, bool owns_lt)
+/* Each node is stored in its parent slot before anything inside it is
+ * allocated, and child_count is set only once the child arrays exist, so a
+ * memory_limit bailout leaves a tree pdo_duckdb_appender_desc_destroy() can
+ * free, including the DuckDB-allocated child types and field names. */
+static pdo_duckdb_nested_render_type *pdo_duckdb_appender_desc_node(pdo_duckdb_nested_render_type **slot)
 {
-	pdo_duckdb_nested_render_type *t = ecalloc(1, sizeof(*t));
-	idx_t i;
+	*slot = ecalloc(1, sizeof(**slot));
+	return *slot;
+}
 
-	t->type = tid;
-	t->logical_type = lt;
-	t->owns_logical_type = owns_lt;
+static void pdo_duckdb_appender_desc_child(pdo_duckdb_nested_render_type **slot, duckdb_logical_type parent,
+	duckdb_type parent_tid, idx_t i);
 
-	switch (tid) {
-		case DUCKDB_TYPE_LIST: {
-			duckdb_logical_type child = duckdb_list_type_child_type(lt);
-			t->child_count = 1;
+static void pdo_duckdb_appender_desc_fill(pdo_duckdb_nested_render_type *t)
+{
+	idx_t i, n;
+
+	switch (t->type) {
+		case DUCKDB_TYPE_ARRAY:
+			t->array_size = duckdb_array_type_array_size(t->logical_type);
+			ZEND_FALLTHROUGH;
+		case DUCKDB_TYPE_LIST:
 			t->children = ecalloc(1, sizeof(*t->children));
-			t->children[0] = pdo_duckdb_appender_desc_build(duckdb_get_type_id(child), child, true);
-			return t;
-		}
-		case DUCKDB_TYPE_ARRAY: {
-			duckdb_logical_type child = duckdb_array_type_child_type(lt);
 			t->child_count = 1;
-			t->array_size = duckdb_array_type_array_size(lt);
-			t->children = ecalloc(1, sizeof(*t->children));
-			t->children[0] = pdo_duckdb_appender_desc_build(duckdb_get_type_id(child), child, true);
-			return t;
-		}
+			pdo_duckdb_appender_desc_child(&t->children[0], t->logical_type, t->type, 0);
+			return;
 		case DUCKDB_TYPE_STRUCT:
-			t->child_count = duckdb_struct_type_child_count(lt);
-			t->children = ecalloc(t->child_count, sizeof(*t->children));
-			t->child_names = ecalloc(t->child_count, sizeof(*t->child_names));
-			for (i = 0; i < t->child_count; i++) {
-				duckdb_logical_type child = duckdb_struct_type_child_type(lt, i);
-				t->child_names[i] = duckdb_struct_type_child_name(lt, i);
-				t->children[i] = pdo_duckdb_appender_desc_build(duckdb_get_type_id(child), child, true);
+			n = duckdb_struct_type_child_count(t->logical_type);
+			t->children = ecalloc(n, sizeof(*t->children));
+			t->child_names = ecalloc(n, sizeof(*t->child_names));
+			t->child_count = n;
+			for (i = 0; i < n; i++) {
+				t->child_names[i] = duckdb_struct_type_child_name(t->logical_type, i);
+				pdo_duckdb_appender_desc_child(&t->children[i], t->logical_type, t->type, i);
 			}
-			return t;
-		case DUCKDB_TYPE_MAP: {
-			duckdb_logical_type key = duckdb_map_type_key_type(lt);
-			duckdb_logical_type value = duckdb_map_type_value_type(lt);
-			t->child_count = 2;
+			return;
+		case DUCKDB_TYPE_MAP:
 			t->children = ecalloc(2, sizeof(*t->children));
-			t->children[0] = pdo_duckdb_appender_desc_build(duckdb_get_type_id(key), key, true);
-			t->children[1] = pdo_duckdb_appender_desc_build(duckdb_get_type_id(value), value, true);
-			return t;
-		}
+			t->child_count = 2;
+			pdo_duckdb_appender_desc_child(&t->children[0], t->logical_type, t->type, 0);
+			pdo_duckdb_appender_desc_child(&t->children[1], t->logical_type, t->type, 1);
+			return;
 		default:
-			return t;
+			return;
 	}
+}
+
+static void pdo_duckdb_appender_desc_child(pdo_duckdb_nested_render_type **slot, duckdb_logical_type parent,
+	duckdb_type parent_tid, idx_t i)
+{
+	pdo_duckdb_nested_render_type *t = pdo_duckdb_appender_desc_node(slot);
+
+	switch (parent_tid) {
+		case DUCKDB_TYPE_LIST:
+			t->logical_type = duckdb_list_type_child_type(parent);
+			break;
+		case DUCKDB_TYPE_ARRAY:
+			t->logical_type = duckdb_array_type_child_type(parent);
+			break;
+		case DUCKDB_TYPE_MAP:
+			t->logical_type = i == 0 ? duckdb_map_type_key_type(parent) : duckdb_map_type_value_type(parent);
+			break;
+		default:
+			t->logical_type = duckdb_struct_type_child_type(parent, i);
+			break;
+	}
+	t->owns_logical_type = true;
+	t->type = duckdb_get_type_id(t->logical_type);
+	pdo_duckdb_appender_desc_fill(t);
 }
 
 /* CAST probes must match the exact target type, including DECIMAL width/scale.
@@ -295,23 +317,40 @@ static void pdo_duckdb_appender_unlink(pdo_duckdb_appender *a)
 	a->H = NULL;
 }
 
-/* Destroys the native objects bound to the connection. Flushing belongs to
- * dtor_obj; an appender still open here skipped its destructor (fatal error,
- * or a bailout during shutdown destructors), so its buffered rows are
- * discarded instead of flushed into a connection that is being torn down. */
+/* Closes (flushing buffered rows) and destroys the native appender and its
+ * cast probes while the connection is still open. Runs from free_obj, or
+ * from the driver's closer when GC or request shutdown frees the PDO object
+ * first; whichever runs first unlinks the appender, and an unlinked appender
+ * has no native state left. */
 static void pdo_duckdb_appender_release_native(pdo_duckdb_appender *a)
 {
+	pdo_duckdb_db_handle *H = a->H;
+
+	if (!H) {
+		return;
+	}
 	pdo_duckdb_appender_unlink(a);
 	if (a->appender) {
 		duckdb_appender ap = a->appender;
 		bool was_closed = a->closed;
+		duckdb_state close_state = DuckDBSuccess;
 
 		a->appender = NULL;
 		a->closed = true;
 		if (!was_closed) {
-			(void)duckdb_appender_clear(ap);
+			/* Sandbox first so a destruction-time close cannot write outside
+			 * a mid-request open_basedir tighten. */
+			(void)pdo_duckdb_enforce_sandbox(H);
+			close_state = duckdb_appender_close(ap);
+			if (close_state != DuckDBSuccess) {
+				pdo_duckdb_appender_warning(ap,
+					"Pdo\\Duckdb\\Appender close during destruction failed");
+			}
 		}
-		if (duckdb_appender_destroy(&ap) != DuckDBSuccess && !was_closed) {
+		/* A failed append, flush, or close leaves its rows buffered, and
+		 * destroy closes again, which would flush them. */
+		(void)duckdb_appender_clear(ap);
+		if (duckdb_appender_destroy(&ap) != DuckDBSuccess && !was_closed && close_state == DuckDBSuccess) {
 			php_error_docref(NULL, E_WARNING,
 				"Pdo\\Duckdb\\Appender destroy during destruction failed");
 		}
@@ -335,22 +374,21 @@ void pdo_duckdb_appenders_release(pdo_duckdb_db_handle *H)
 	}
 }
 
-/* Flush here rather than in free_obj: GC and request shutdown call every
- * dtor_obj before any free_obj, so the connection is still open and an
- * enclosing transaction has not yet been rolled back by PDO's free_obj. */
-static void pdo_duckdb_appender_dtor(zend_object *obj)
+/* PDO's free_obj rolls back an open transaction before the closer runs. Rows
+ * still buffered in that PDO object's appenders belong to the abandoned
+ * transaction, so they are discarded rather than flushed afterwards in
+ * autocommit. An appender freed before its PDO object flushed into the
+ * transaction instead, and the rollback discards those rows the same way. */
+void pdo_duckdb_appenders_discard_for_rollback(pdo_duckdb_db_handle *H)
 {
-	pdo_duckdb_appender *a = pdo_duckdb_appender_from_obj(obj);
+	pdo_duckdb_appender *a;
 
-	zend_objects_destroy_object(obj);
-	if (a->appender && !a->closed && a->H) {
-		/* Sandbox first so a destruction-time close cannot write outside a
-		 * mid-request open_basedir tighten. */
-		(void)pdo_duckdb_enforce_sandbox(a->H);
-		a->closed = true;
-		if (duckdb_appender_close(a->appender) != DuckDBSuccess) {
-			pdo_duckdb_appender_warning(a->appender,
-				"Pdo\\Duckdb\\Appender close during destruction failed");
+	for (a = H->appenders; a; a = a->next_live) {
+		/* A linked appender holds a reference to a->pdo, and neither GC nor
+		 * the shutdown sweep releases object memory before every free_obj
+		 * has run, so the flags read is safe. */
+		if (a->appender && !a->closed && a->pdo && (OBJ_FLAGS(a->pdo) & IS_OBJ_FREE_CALLED)) {
+			(void)duckdb_appender_clear(a->appender);
 		}
 	}
 }
@@ -429,7 +467,6 @@ zend_result pdo_duckdb_appender_minit(void)
 
 	memcpy(&pdo_duckdb_appender_handlers, zend_get_std_object_handlers(), sizeof(zend_object_handlers));
 	pdo_duckdb_appender_handlers.offset = offsetof(pdo_duckdb_appender, std);
-	pdo_duckdb_appender_handlers.dtor_obj = pdo_duckdb_appender_dtor;
 	pdo_duckdb_appender_handlers.free_obj = pdo_duckdb_appender_free;
 	pdo_duckdb_appender_handlers.clone_obj = NULL;
 	pdo_duckdb_appender_handlers.get_gc = pdo_duckdb_appender_get_gc;
@@ -600,13 +637,25 @@ static void pdo_duckdb_appender_create_impl(INTERNAL_FUNCTION_PARAMETERS)
 		} ZEND_HASH_FOREACH_END();
 	}
 
+	/* The object comes first so a memory_limit bailout cannot strand a native
+	 * appender: from here on free_obj owns everything stored in it. */
+	object_init_ex(return_value, pdo_duckdb_appender_ce);
+	a = pdo_duckdb_appender_from_obj(Z_OBJ_P(return_value));
+	a->pdo = Z_OBJ_P(ZEND_THIS);
+	GC_ADDREF(a->pdo);
+
 	if (duckdb_appender_create(H->conn, schema ? ZSTR_VAL(schema) : NULL, ZSTR_VAL(table), &ap) != DuckDBSuccess) {
 		pdo_duckdb_appender_throw(ap, "Unable to create DuckDB appender");
 		if (ap) {
 			duckdb_appender_destroy(&ap);
 		}
+		zval_ptr_dtor(return_value);
+		ZVAL_NULL(return_value);
 		RETURN_THROWS();
 	}
+	a->appender = ap;
+	a->closed = false;
+	pdo_duckdb_appender_link(a, H);
 
 	if (columns) {
 		zval *col;
@@ -614,20 +663,15 @@ static void pdo_duckdb_appender_create_impl(INTERNAL_FUNCTION_PARAMETERS)
 		ZEND_HASH_FOREACH_VAL(columns, col) {
 			ZVAL_DEREF(col);
 			if (duckdb_appender_add_column(ap, Z_STRVAL_P(col)) != DuckDBSuccess) {
+				/* Nothing was appended; skip the destruction-time close. */
+				a->closed = true;
 				pdo_duckdb_appender_throw(ap, "Unable to add appender column");
-				duckdb_appender_destroy(&ap);
+				zval_ptr_dtor(return_value);
+				ZVAL_NULL(return_value);
 				RETURN_THROWS();
 			}
 		} ZEND_HASH_FOREACH_END();
 	}
-
-	object_init_ex(return_value, pdo_duckdb_appender_ce);
-	a = pdo_duckdb_appender_from_obj(Z_OBJ_P(return_value));
-	a->appender = ap;
-	a->closed = false;
-	pdo_duckdb_appender_link(a, H);
-	a->pdo = Z_OBJ_P(ZEND_THIS);
-	GC_ADDREF(a->pdo);
 
 	/* Cached so appendRow() doesn't allocate a logical type per cell. Zeroed:
 	 * free_obj walks ncols entries, and a memory_limit bailout in the
@@ -657,8 +701,10 @@ static void pdo_duckdb_appender_create_impl(INTERNAL_FUNCTION_PARAMETERS)
 		a->col_desc = ecalloc(a->ncols, sizeof(pdo_duckdb_nested_render_type *));
 		a->col_probes = ecalloc(a->ncols, sizeof(duckdb_prepared_statement));
 		for (c = 0; c < a->ncols; c++) {
-			a->col_desc[c] = pdo_duckdb_appender_desc_build(
-				a->col_type_ids[c], a->col_types[c], false);
+			pdo_duckdb_nested_render_type *d = pdo_duckdb_appender_desc_node(&a->col_desc[c]);
+			d->type = a->col_type_ids[c];
+			d->logical_type = a->col_types[c];
+			pdo_duckdb_appender_desc_fill(d);
 			if (!(a->col_flags[c] & PDO_DUCKDB_APPENDER_COL_NESTED)) {
 				a->col_probes[c] = pdo_duckdb_appender_prepare_probe(
 					H->conn, a->col_type_ids[c], a->col_types[c]);

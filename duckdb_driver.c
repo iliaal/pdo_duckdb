@@ -834,6 +834,7 @@ static bool duckdb_handle_commit(pdo_dbh_t *dbh)
 
 static bool duckdb_handle_rollback(pdo_dbh_t *dbh)
 {
+	pdo_duckdb_appenders_discard_for_rollback((pdo_duckdb_db_handle *)dbh->driver_data);
 	return duckdb_simple_exec(dbh, "ROLLBACK");
 }
 

@@ -144,9 +144,22 @@ $app->close();   // flush + finalize; further append/flush/close throw
 ```
 
 `flush()` commits buffered rows and leaves the appender usable. `close()`
-flushes, finalizes the native appender, and marks the PHP object closed. The
-destructor also closes (and warns on failure), but prefer an explicit
-`close()`.
+flushes, finalizes the native appender, and marks the PHP object closed.
+Prefer an explicit `close()`. If you don't close an appender, PHP closes it when
+the appender or its connection is destroyed:
+
+- The buffered rows are flushed when you unset the appender, during garbage
+  collection, and at the end of the request, including after a fatal error. A
+  failed flush raises a warning. In autocommit mode the rows are committed; in
+  an open transaction they join it.
+- If a transaction is still open when the PDO object is destroyed, PDO rolls it
+  back and the appender's buffered rows are discarded with it, whichever of the
+  two objects PHP frees first.
+- DuckDB flushes the appender on its own every 204,800 rows (DuckDB 1.5).
+  Those rows join the transaction that is open at that moment, so a later
+  discard of the buffer doesn't remove them.
+- Rows that a failed append, flush, or close leaves in the buffer are
+  discarded. They are never flushed later.
 
 Soft validation failures (`ValueError`/`TypeError` for arity, types, ranges)
 leave the appender live so you can retry the row. Scalar cast validation also

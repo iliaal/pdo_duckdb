@@ -171,6 +171,7 @@ static inline pdo_duckdb_appender *pdo_duckdb_appender_from_obj(zend_object *o)
 
 zend_result pdo_duckdb_appender_minit(void);
 void pdo_duckdb_appenders_release(pdo_duckdb_db_handle *H);
+void pdo_duckdb_appenders_discard_for_rollback(pdo_duckdb_db_handle *H);
 const zend_function_entry *pdo_duckdb_get_driver_methods(pdo_dbh_t *dbh, int kind);
 
 /* Frees the grow-only thread-local statement caches so they aren't reported as

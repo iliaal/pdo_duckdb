@@ -6,13 +6,22 @@ pdo_duckdb
 --SKIPIF--
 <?php
 if (!function_exists('proc_open')) die('skip proc_open() unavailable');
+if (getenv('TEST_PHP_EXTRA_ARGS') === false) die('skip needs run-tests.php child arguments');
 ?>
 --FILE--
 <?php
 // Request shutdown frees objects by descending handle (or via the shutdown
-// GC), ignoring the appender's reference to its PDO object. Each scenario runs
-// in a child process; the parent then reopens the database file to see which
-// rows the child's teardown committed.
+// GC), ignoring the appender's reference to its PDO object, so here the PDO
+// object is freed first. Each scenario runs in a child process; the parent
+// then reopens the database file to see which rows the teardown committed.
+//
+// Expected rows per scenario:
+// - txn=0: an unclosed appender flushes at teardown in autocommit, as it does
+//   when the appender is freed first, so both rows land (2). This includes
+//   mode=fatal, where PHP skips destructors after the fatal error.
+// - txn=1: PDO rolls back the open transaction when its object is freed; the
+//   appender's buffered rows belong to that transaction and are discarded (0),
+//   matching the order where the appender flushes into the transaction first.
 $child = <<<'PHP'
 <?php
 [, $path, $mode, $txn] = $argv;
@@ -43,7 +52,7 @@ if ($mode === 'gc') {
     unset($holder);
 }
 if ($mode === 'fatal') {
-    // A fatal error skips destructors, so buffered rows are discarded.
+    // A fatal error skips destructors; teardown still flushes or discards.
     ini_set('memory_limit', '16M');
     $big = str_repeat('x', 64 * 1024 * 1024);
 }
@@ -55,17 +64,9 @@ $dir = __DIR__ . '/102_work';
 $script = $dir . '/child.php';
 file_put_contents($script, $child);
 
-$ext_dir = ini_get('extension_dir');
-// display_startup_errors=0 hides "already loaded" when pdo is static but a
-// pdo.so also sits in extension_dir.
-$cmd = [PHP_BINARY, '-n', '-d', 'extension_dir=' . $ext_dir,
-    '-d', 'display_startup_errors=0', '-d', 'log_errors=0'];
-foreach (['pdo', 'pdo_duckdb'] as $ext) {
-    if (is_file($ext_dir . '/' . $ext . '.' . PHP_SHLIB_SUFFIX)) {
-        $cmd[] = '-d';
-        $cmd[] = 'extension=' . $ext;
-    }
-}
+// Children get the runner's own -n/-d arguments, which is how CI loads
+// pdo_duckdb (by absolute path through TEST_PHP_ARGS).
+$php = escapeshellarg(getenv('TEST_PHP_EXECUTABLE')) . ' ' . getenv('TEST_PHP_EXTRA_ARGS');
 
 // Without ZendMM, only the tracked allocator enforces memory_limit.
 $env = getenv();
@@ -77,7 +78,7 @@ foreach (['store', 'gc', 'fatal'] as $mode) {
     foreach (['0', '1'] as $txn) {
         $path = $dir . "/{$mode}_{$txn}.duckdb";
         @unlink($path);
-        $proc = proc_open(array_merge($cmd, [$script, $path, $mode, $txn]),
+        $proc = proc_open($php . ' ' . implode(' ', array_map('escapeshellarg', [$script, $path, $mode, $txn])),
             [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['redirect', 1]], $pipes, null, $env);
         fclose($pipes[0]);
         $out = stream_get_contents($pipes[1]);
@@ -110,6 +111,6 @@ mode=store txn=0 rows=2
 mode=store txn=1 rows=0
 mode=gc txn=0 rows=2
 mode=gc txn=1 rows=0
-mode=fatal txn=0 rows=0
+mode=fatal txn=0 rows=2
 mode=fatal txn=1 rows=0
 done
