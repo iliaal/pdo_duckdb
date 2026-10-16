@@ -1338,24 +1338,29 @@ static void pdo_duckdb_nested_render_type_destroy(pdo_duckdb_nested_render_type 
 			duckdb_free(type->child_names[i]);
 		}
 	}
-	if (type->children) {
-		efree(type->children);
-	}
-	if (type->child_names) {
-		efree(type->child_names);
-	}
+	free(type->children);
+	free(type->child_names);
 	if (type->owns_logical_type && type->logical_type) {
 		duckdb_destroy_logical_type(&type->logical_type);
 	}
-	efree(type);
+	free(type);
 }
 
 static pdo_duckdb_nested_render_type *pdo_duckdb_nested_render_type_build(
 		duckdb_type tid, duckdb_logical_type lt, bool owns_lt)
 {
-	pdo_duckdb_nested_render_type *type = ecalloc(1, sizeof(*type));
+	/* Plain malloc keeps memory_limit bailouts out of the build: a bailout
+	 * would strand the native logical types and names of a subtree that is
+	 * not yet attached to the statement. */
+	pdo_duckdb_nested_render_type *type = calloc(1, sizeof(*type));
 	idx_t i;
 
+	if (!type) {
+		if (owns_lt) {
+			duckdb_destroy_logical_type(&lt);
+		}
+		return NULL;
+	}
 	type->type = tid;
 	type->logical_type = lt;
 	type->owns_logical_type = owns_lt;
@@ -1363,8 +1368,13 @@ static pdo_duckdb_nested_render_type *pdo_duckdb_nested_render_type_build(
 	switch (tid) {
 		case DUCKDB_TYPE_LIST: {
 			duckdb_logical_type child = duckdb_list_type_child_type(lt);
+			type->children = calloc(1, sizeof(*type->children));
+			if (!type->children) {
+				duckdb_destroy_logical_type(&child);
+				pdo_duckdb_nested_render_type_destroy(type);
+				return NULL;
+			}
 			type->child_count = 1;
-			type->children = ecalloc(1, sizeof(*type->children));
 			type->children[0] = pdo_duckdb_nested_render_type_build(
 				duckdb_get_type_id(child), child, true);
 			if (!type->children[0]) {
@@ -1375,8 +1385,13 @@ static pdo_duckdb_nested_render_type *pdo_duckdb_nested_render_type_build(
 		}
 		case DUCKDB_TYPE_ARRAY: {
 			duckdb_logical_type child = duckdb_array_type_child_type(lt);
+			type->children = calloc(1, sizeof(*type->children));
+			if (!type->children) {
+				duckdb_destroy_logical_type(&child);
+				pdo_duckdb_nested_render_type_destroy(type);
+				return NULL;
+			}
 			type->child_count = 1;
-			type->children = ecalloc(1, sizeof(*type->children));
 			type->children[0] = pdo_duckdb_nested_render_type_build(
 				duckdb_get_type_id(child), child, true);
 			if (!type->children[0]) {
@@ -1387,8 +1402,13 @@ static pdo_duckdb_nested_render_type *pdo_duckdb_nested_render_type_build(
 		}
 		case DUCKDB_TYPE_STRUCT:
 			type->child_count = duckdb_struct_type_child_count(lt);
-			type->children = ecalloc(type->child_count, sizeof(*type->children));
-			type->child_names = ecalloc(type->child_count, sizeof(*type->child_names));
+			type->children = calloc(type->child_count ? type->child_count : 1, sizeof(*type->children));
+			type->child_names = calloc(type->child_count ? type->child_count : 1, sizeof(*type->child_names));
+			if (!type->children || !type->child_names) {
+				type->child_count = 0;
+				pdo_duckdb_nested_render_type_destroy(type);
+				return NULL;
+			}
 			for (i = 0; i < type->child_count; i++) {
 				duckdb_logical_type child = duckdb_struct_type_child_type(lt, i);
 				char *name = duckdb_struct_type_child_name(lt, i);
@@ -1412,8 +1432,14 @@ static pdo_duckdb_nested_render_type *pdo_duckdb_nested_render_type_build(
 		case DUCKDB_TYPE_MAP: {
 			duckdb_logical_type key = duckdb_map_type_key_type(lt);
 			duckdb_logical_type value = duckdb_map_type_value_type(lt);
+			type->children = calloc(2, sizeof(*type->children));
+			if (!type->children) {
+				duckdb_destroy_logical_type(&key);
+				duckdb_destroy_logical_type(&value);
+				pdo_duckdb_nested_render_type_destroy(type);
+				return NULL;
+			}
 			type->child_count = 2;
-			type->children = ecalloc(2, sizeof(*type->children));
 			type->children[0] = pdo_duckdb_nested_render_type_build(
 				duckdb_get_type_id(key), key, true);
 			if (!type->children[0]) {
@@ -1431,7 +1457,12 @@ static pdo_duckdb_nested_render_type *pdo_duckdb_nested_render_type_build(
 		}
 		case DUCKDB_TYPE_UNION:
 			type->child_count = duckdb_union_type_member_count(lt);
-			type->children = ecalloc(type->child_count, sizeof(*type->children));
+			type->children = calloc(type->child_count ? type->child_count : 1, sizeof(*type->children));
+			if (!type->children) {
+				type->child_count = 0;
+				pdo_duckdb_nested_render_type_destroy(type);
+				return NULL;
+			}
 			for (i = 0; i < type->child_count; i++) {
 				duckdb_logical_type member = duckdb_union_type_member_type(lt, i);
 				type->children[i] = pdo_duckdb_nested_render_type_build(
