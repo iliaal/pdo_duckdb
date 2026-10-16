@@ -1,5 +1,5 @@
 --TEST--
-pdo_duckdb: unbuffered results can be interleaved without a driver-side guard
+pdo_duckdb: rows already in the current unbuffered chunk stay readable after another statement
 --EXTENSIONS--
 pdo
 pdo_duckdb
