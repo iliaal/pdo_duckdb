@@ -348,21 +348,26 @@ generated keys, use a sequence and `currval()`.
 
 ### Type mapping
 
-| DuckDB type | PHP value |
-|-------------|-----------|
-| `BOOLEAN` | `int` `0`/`1` (not `bool`) |
-| `TINYINT`, `SMALLINT`, `INTEGER`, `BIGINT`, `UTINYINT`, `USMALLINT`, `UINTEGER` | `int` (a string for `BIGINT`/`UINTEGER` values outside the PHP integer range on 32-bit PHP) |
-| `FLOAT`, `DOUBLE` | `float` |
-| `BLOB` | binary string |
-| everything else (`VARCHAR`, `DATE`/`TIME`/`TIMESTAMP`, `DECIMAL`, `HUGEINT`/`UBIGINT`/`UHUGEINT`, nested types) | canonical string form (exceptions for `VARIANT`, `GEOMETRY`, and `TIMESTAMPTZ` below) |
-| SQL NULL | `null` |
+| DuckDB type | PHP value | DuckDB 2.0+ build |
+|-------------|-----------|-------------------|
+| `BOOLEAN` | `int` `0`/`1` (not `bool`) | Same |
+| `TINYINT`, `SMALLINT`, `INTEGER`, `BIGINT`, `UTINYINT`, `USMALLINT`, `UINTEGER` | `int` (a string for `BIGINT`/`UINTEGER` values outside the PHP integer range on 32-bit PHP) | Same |
+| `FLOAT`, `DOUBLE` | `float` | Same |
+| `BLOB` | binary string | Same |
+| everything else (`VARCHAR`, `DATE`/`TIME`/`TIMESTAMP`, `DECIMAL`, `HUGEINT`/`UBIGINT`/`UHUGEINT`, nested types) | canonical string form (exceptions for `VARIANT`, `GEOMETRY`, and `TIMESTAMPTZ` below) | Same, including the zero-field `STRUCT` (`{}`) that only DuckDB 2.0 can build |
+| `TIMESTAMPTZ_NS` | Not available: DuckDB 1.5 has no such type | canonical string form of the UTC instant, like `TIMESTAMPTZ` |
+| A type newer than the DuckDB headers the driver was built with | Not applicable | `null` when NULL; any other value reports a PDO error, like `VARIANT` |
+| SQL NULL | `null` | Same |
 
 `getColumnMeta()` reports the real DuckDB type name per column and a `pdo_type`
 that matches the fetch shape: `PDO::PARAM_INT` for exactly `BOOLEAN`,
 `TINYINT`, `SMALLINT`, `INTEGER`, `BIGINT`, `UTINYINT`, `USMALLINT`,
 `UINTEGER`; `PDO::PARAM_LOB` for `BLOB`; `PDO::PARAM_STR` for everything else
 (so `UBIGINT` and `HUGEINT` stay `PARAM_STR`). `DECIMAL` columns also report
-`precision`/`scale`.
+`precision`/`scale`. On a DuckDB 2.0 build, `TIMESTAMPTZ_NS` columns report
+`TIMESTAMP_TZ_NS`, and a column of DuckDB's `NULL` type reports `NULL` with
+`PDO::PARAM_NULL`. DuckDB 2.0 gives a bare `SELECT NULL` that type; DuckDB 1.5
+types it `INTEGER`.
 
 Nested values with boolean, integer, `FLOAT`/`DOUBLE`, `DECIMAL`, `DATE`,
 `TIME`, `TIMESTAMP`, `UUID`, and `VARCHAR` leaves use a direct renderer that
@@ -384,15 +389,15 @@ both cases, you can't reliably split the result into elements. Top-level
 bytes, unnest them in SQL or render them yourself, for example with
 `to_json()` or `hex()`.
 
-`GEOMETRY` (from the spatial extension) returns its WKB bytes as an uppercase
-hex string. Nested `GEOMETRY` elements inside `LIST`/`ARRAY`/`STRUCT`/`MAP`/
+`GEOMETRY` returns its WKB bytes as an uppercase hex string. Nested `GEOMETRY` elements inside `LIST`/`ARRAY`/`STRUCT`/`MAP`/
 `UNION` render the same uppercase hex per element, because the C API has no
 geometry value constructor and the driver declares those containers with
-`VARCHAR` in place of `GEOMETRY`. For WKT, call `ST_AsText()` in SQL.
+`VARCHAR` in place of `GEOMETRY`. For WKT, select `CAST(col AS VARCHAR)`, or
+call `ST_AsText()` from the spatial extension.
 
 `TIMESTAMPTZ` native fetches render the instant in UTC (`+00`), both at the top
 level and as a nested leaf. For DuckDB's session-`TimeZone` rendering, select
-`CAST(col AS VARCHAR)`.
+`CAST(col AS VARCHAR)`. `TIMESTAMPTZ_NS` on DuckDB 2.0 follows the same rule.
 
 DuckDB's C result API can't extract non-NULL `VARIANT` cells safely, so
 fetching a row that holds one reports a PDO error; cast it to `VARCHAR` (or
@@ -535,6 +540,53 @@ those only to a 2.0 build. DuckDB 1.5 accepts `lambda_syntax`.
   for example `variant_extract(v, 'a')::INTEGER`. Fetching a non-NULL `VARIANT`
   value still reports a PDO error, as on 1.5; cast it to a concrete type in
   the query.
+
+### Types
+
+A build against the DuckDB 2.0 headers handles the types that DuckDB 2.0 adds
+or changes. The [type mapping](#type-mapping) table lists the PHP values.
+
+- **`TIMESTAMPTZ_NS`.** Fetches return the UTC instant with up to nine
+  fractional digits, for example `2020-01-01 00:00:00.123456789+00`, at the top
+  level and inside `LIST`, `ARRAY`, `STRUCT`, `MAP`, and `UNION` values. The
+  session `TimeZone` doesn't change the result. The appender casts strings into
+  `TIMESTAMPTZ_NS` columns. It checks each scalar before appending, so a string
+  that DuckDB can't parse, or an integer or float, throws a `PDOException` and
+  leaves the appender usable. A bad value inside a nested column throws a
+  `ValueError`.
+- **`NULL` type.** A bare `SELECT NULL`, or a parameter bound to `null` in a
+  select list, produces a column of DuckDB's `NULL` type. It fetches as `null`
+  and reports `native_type` `NULL` with `PDO::PARAM_NULL`. On DuckDB 1.5 the
+  same column is an `INTEGER`.
+- **`GEOMETRY`.** Unchanged: fetches return uppercase hex WKB. DuckDB 2.0 adds
+  a core `BLOB` to `GEOMETRY` cast, so `CAST(from_hex(?) AS GEOMETRY)` turns a
+  fetched value back into a geometry without the spatial extension.
+- **`VARIANT`.** Unchanged: fetching a non-NULL value reports a PDO error. The
+  appender stores PHP scalars into a `VARIANT` column as `VARCHAR`, `INT64`,
+  `DOUBLE`, or boolean values.
+- **Empty `STRUCT`.** DuckDB 2.0 can build a `STRUCT` with no fields (`{}`).
+  It fetches as `{}`, and the appender accepts an empty PHP array for it.
+- **Newer types.** If DuckDB returns a type that the driver's headers don't
+  define, a non-NULL value reports `DuckDB type id N is not supported by this
+  pdo_duckdb build; cast the value to VARCHAR in SQL`.
+
+DuckDB's own `CAST(x AS VARCHAR)` misrenders a `TIMESTAMPTZ_NS` instant before
+1970 that falls less than one microsecond before a whole second, or raises an
+`INTERNAL Error` for it. For example, it renders `make_timestamp_ns(-1)` as
+`1970-01-01 00:00:00.00000000/+00`. The driver's own fetch of the same value is
+correct: `1969-12-31 23:59:59.999999999+00`.
+
+### `CONNECT`
+
+While a connection is redirected with DuckDB 2.0's `CONNECT` statement,
+`prepare()` and `query()` fail with `INTERNAL Error: PREPARE succeeded but the
+prepared statement was not registered`, and DuckDB has already run the
+statement on the remote database by then. A failed `prepare()` of an `INSERT`
+still inserts the row. `exec()` works. This is a DuckDB 2.0 preview defect in
+`duckdb_prepare()`, so the driver can't avoid it. Until DuckDB fixes it, use
+`exec()` for statements while connected, or `ATTACH` the remote database and
+query it with qualified names instead of `CONNECT`. `DISCONNECT` restores
+normal behavior.
 
 ### Driver differences
 
