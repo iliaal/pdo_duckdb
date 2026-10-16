@@ -141,8 +141,8 @@ runs before any native append touches the row, using range checks or a prepared
 `CAST` probe where the target type supports one. This covers invalid strings
 (e.g. `'not-a-date'` into `DATE`), uncastable booleans and numbers, and numeric
 overflow. It doesn't check `VARCHAR` strings for valid UTF-8 (see below).
-`BLOB` columns accept only strings or `null`; other scalars throw `TypeError`. Cast-probe failures and finite overflow in a top-level `FLOAT`
-column throw
+`BLOB` columns accept only strings or `null`; other scalars throw `TypeError`.
+Cast-probe failures and finite overflow in a top-level `FLOAT` column throw
 `PDOException("Failed to append value: …")`, preserving the appender and its
 buffered rows. Hard DuckDB failures on append/flush/close (including casts
 without an available preflight probe) poison the appender:
@@ -321,6 +321,9 @@ Nested values with boolean, integer, `FLOAT`/`DOUBLE`, `DECIMAL`, `DATE`,
 applies DuckDB's quoting rules, so
 `[TIMESTAMP '2020-01-01 10:00:00']` returns `['2020-01-01 10:00:00']`, exactly
 like `CAST(... AS VARCHAR)`. Other nested values use DuckDB's own renderer.
+Nested fetches return canonical strings, not PHP arrays; for a different
+PHP-facing shape, use SQL projections such as `unnest`, `struct_extract`, or
+`json`.
 
 A NUL byte inside a nested `VARCHAR` member truncates the fetched string,
 because the driver matches DuckDB's value renderer, which returns a
@@ -331,9 +334,7 @@ renderer, everything after the NUL is dropped, closing brackets included. In
 both cases, you can't reliably split the result into elements. Top-level
 `VARCHAR` and `BLOB` columns aren't affected. If nested strings can contain NUL
 bytes, unnest them in SQL or render them yourself, for example with
-`to_json()` or `hex()`. Nested fetches return canonical strings, not PHP arrays;
-for a different PHP-facing shape, use SQL projections such as `unnest`,
-`struct_extract`, or `json`.
+`to_json()` or `hex()`.
 
 `GEOMETRY` (from the spatial extension) returns its WKB bytes as an uppercase
 hex string. Nested `GEOMETRY` elements inside `LIST`/`ARRAY`/`STRUCT`/`MAP`/
