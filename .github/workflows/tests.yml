@@ -535,6 +535,43 @@ jobs:
             tests/134_sandbox_file_writers_v2.phpt \
             tests/137_sandbox_attach_nul_path.phpt
 
+      - name: Rebuild with the undecodable-type test hook
+        # Test 147 needs a module that treats DATE as a type it cannot decode;
+        # the regular build above skips it.
+        shell: bash
+        run: |
+          CFLAGS="-g -O2 -DPDO_DUCKDB_TEST_UNDECODABLE_TYPE=13" \
+            ./configure --with-pdo-duckdb="$PWD/duckdb" --enable-pdo-duckdb-dev
+          make clean
+          make -j"$(nproc)" 2>&1 | tee "$RUNNER_TEMP/build-hook.log"
+          if grep -q 'warning:' "$RUNNER_TEMP/build-hook.log"; then
+            echo "::error::Build produced warnings"
+            exit 1
+          fi
+
+      - name: Run the undecodable-type test against the hooked build
+        run: |
+          export LD_LIBRARY_PATH="$PWD/duckdb/lib"
+          TEST_PHP_EXECUTABLE="$(command -v php)"
+          export TEST_PHP_EXECUTABLE
+          export TEST_PHP_ARGS="-d extension=$PWD/modules/pdo_duckdb.so"
+          export NO_INTERACTION=1
+          set +e
+          php run-tests.php --show-diff -g FAIL,BORK,LEAK,XLEAK,SKIP \
+            tests/147_v2_undecodable_type_rejected.phpt 2>&1 | tee "$RUNNER_TEMP/test-hook-output.txt"
+          test_status=("${PIPESTATUS[@]}")
+          set -e
+          if [ "${test_status[0]}" -ne 0 ]; then
+            echo "::error::run-tests.php failed (exit ${test_status[0]})"
+            exit "${test_status[0]}"
+          fi
+          if [ "${test_status[1]}" -ne 0 ]; then
+            echo "::error::Test output could not be recorded (exit ${test_status[1]})"
+            exit "${test_status[1]}"
+          fi
+          bash scripts/check-required-tests.sh "$RUNNER_TEMP/test-hook-output.txt" \
+            tests/147_v2_undecodable_type_rejected.phpt
+
   portable-integers:
     name: Portable integer renderers - PHP 8.4
     runs-on: ubuntu-latest
