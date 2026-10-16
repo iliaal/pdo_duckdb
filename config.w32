@@ -23,17 +23,23 @@ if (PHP_PDO_DUCKDB != "no") {
 		// Only headers in the directory duckdb.h came from count, so a stray
 		// duckdb_v2.h on the include path cannot flip a 1.5.x build.
 		var duckdb_inc_dir = (typeof(duckdb_inc) == "string") ? duckdb_inc : null;
+		var v2_tests_note = "The PHPT suite's DuckDB 2.0 branches are then off as well, so the engine-behaviour tests (030, 035, 051, 078, 093) fail against a DuckDB 2.0 library; those failures are not driver bugs.";
 		var have_tz_ns = duckdb_inc_dir != null &&
 			GREP_HEADER("duckdb.h", "DUCKDB_TYPE_TIMESTAMP_TZ_NS", duckdb_inc_dir);
 		var have_v2 = duckdb_inc_dir != null &&
 			FSO.FileExists(duckdb_inc_dir + "\\duckdb_v2.h") &&
 			GREP_HEADER("duckdb_v2.h", "#define\\s+DUCKDB_V2_API_VERSION_MAJOR\\s+[2-9]", duckdb_inc_dir);
+		if (duckdb_inc_dir == null) {
+			WARNING("duckdb.h was found only through the INCLUDE environment variable, so its directory is unknown and the DuckDB 2.0 header probes are skipped. If this is DuckDB 2.0, pass --with-pdo-duckdb=DIR to enable the DuckDB 2.0 code paths. " + v2_tests_note);
+		}
 		AC_DEFINE("HAVE_DECL_DUCKDB_TYPE_TIMESTAMP_TZ_NS", have_tz_ns ? 1 : 0);
 		if (have_v2) {
 			if (!have_tz_ns) {
 				ERROR("duckdb_v2.h is DuckDB 2.0 but duckdb.h lacks DUCKDB_TYPE_TIMESTAMP_TZ_NS; the DuckDB headers come from different releases");
 			}
 			AC_DEFINE("HAVE_DUCKDB_V2", 1, "Whether the DuckDB 2.0 C API headers are available");
+		} else if (have_tz_ns) {
+			WARNING("duckdb.h declares DUCKDB_TYPE_TIMESTAMP_TZ_NS but duckdb_v2.h is not next to it. If this is DuckDB 2.0, install its full header set to enable the DuckDB 2.0 code paths. " + v2_tests_note);
 		}
 		EXTENSION("pdo_duckdb", "pdo_duckdb.c duckdb_driver.c duckdb_statement.c duckdb_appender.c");
 		ADD_EXTENSION_DEP("pdo_duckdb", "pdo");

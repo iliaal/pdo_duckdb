@@ -297,7 +297,7 @@ if test "$PHP_PDO_DUCKDB" != "no"; then
     fi
     AC_DEFINE([HAVE_DUCKDB_V2], [1], [Whether the DuckDB 2.0 C API headers are available])
   elif test "$ac_cv_have_decl_DUCKDB_TYPE_TIMESTAMP_TZ_NS" = "yes"; then
-    AC_MSG_WARN([duckdb.h declares DUCKDB_TYPE_TIMESTAMP_TZ_NS but duckdb_v2.h is not next to it. If this is DuckDB 2.0, install its full header set to enable the DuckDB 2.0 code paths.])
+    AC_MSG_WARN([duckdb.h declares DUCKDB_TYPE_TIMESTAMP_TZ_NS but duckdb_v2.h is not next to it. If this is DuckDB 2.0, install its full header set to enable the DuckDB 2.0 code paths. The PHPT suite's DuckDB 2.0 branches are then off as well, so the engine-behaviour tests (030, 035, 051, 078, 093) fail against a DuckDB 2.0 library; those failures are not driver bugs.])
   fi
   if test -n "$DUCKDB_CONFIG_STATIC_FINAL"; then
     if ! pdo_duckdb_promote_alias "$DUCKDB_CONFIG_STATIC_STAGE" "$DUCKDB_CONFIG_STATIC_FINAL"; then
