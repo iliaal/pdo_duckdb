@@ -1057,6 +1057,10 @@ static bool pdo_duckdb_detach_out_of_basedir(pdo_duckdb_db_handle *H)
  * DuckDB OnSet and cannot be cleared afterward (do not seed basedir root). */
 static const char *const pdo_duckdb_profile_pre_detach[] = {
 	"SET log_query_path=''",
+	/* A file log sink keeps writing through its open file after external
+	 * access is off, and CALL enable_logging() re-arms it even after the lock;
+	 * switching storage closes it. */
+	"SET logging_storage='memory'",
 	"SET profiling_output=''",
 	"SET allowed_configs = []",
 	"SET temp_directory=''",
