@@ -92,7 +92,7 @@ $db = new PDO('duckdb::memory:', null, null, [
 
 Any DuckDB setting name works (`access_mode`, `memory_limit`, `threads`, ...);
 an unknown option fails the connection. `force_mbedtls_unsafe` is rejected at
-connect time because libduckdb 1.5.3-1.5.5 crashes on a falsy value before the
+connect time because libduckdb 1.5.3-1.5.6 crashes on a falsy value before the
 database exists; if you need it, `SET` it after open.
 `PDO::DUCKDB_ATTR_CONFIG` is connect-time only and is refused with persistent
 handles, because PDO's persistent key doesn't include driver option arrays.

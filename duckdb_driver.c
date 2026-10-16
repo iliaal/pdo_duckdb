@@ -1204,7 +1204,7 @@ static bool pdo_duckdb_set_one_config(pdo_dbh_t *dbh, duckdb_config *config, con
 {
 	size_t key_len = strlen(key);
 
-	/* DuckDB 1.5.3–1.5.5 dereference a NULL DatabaseInstance for a falsy
+	/* DuckDB 1.5.3–1.5.6 dereference a NULL DatabaseInstance for a falsy
 	 * force_mbedtls_unsafe at config-time (SIGSEGV inside duckdb_set_config).
 	 * SET after open still works. */
 	if (key_len == sizeof("force_mbedtls_unsafe") - 1

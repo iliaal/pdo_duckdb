@@ -5,7 +5,7 @@ pdo
 pdo_duckdb
 --FILE--
 <?php
-// Falsy values SIGSEGV inside libduckdb 1.5.3-1.5.5 at duckdb_set_config.
+// Falsy values SIGSEGV inside libduckdb 1.5.3-1.5.6 at duckdb_set_config.
 // Reject the key unconditionally so neither DSN nor ATTR_CONFIG can reach it.
 
 function expect_connect_time($label, callable $fn): void
