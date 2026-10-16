@@ -37,7 +37,7 @@ function poisoned_appender(string $path, ?object &$placeholder = null): array
 }
 PHP;
 
-$dir = __DIR__ . '/104_work';
+$dir = __DIR__ . '/123_work';
 @mkdir($dir);
 file_put_contents($dir . '/scenario.inc', $scenario);
 require $dir . '/scenario.inc';
@@ -82,7 +82,7 @@ echo 'shutdown rows=', $db->query('SELECT count(*) FROM t')->fetchColumn(), "\n"
 ?>
 --CLEAN--
 <?php
-$dir = __DIR__ . '/104_work';
+$dir = __DIR__ . '/123_work';
 foreach (glob($dir . '/*') ?: [] as $f) {
     @unlink($f);
 }

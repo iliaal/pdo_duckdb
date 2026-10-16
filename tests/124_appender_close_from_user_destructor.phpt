@@ -45,7 +45,7 @@ if (spl_object_id($imp) <= spl_object_id($imp->ap)) {
 echo "end of script\n";
 PHP;
 
-$dir = __DIR__ . '/105_work';
+$dir = __DIR__ . '/124_work';
 @mkdir($dir);
 file_put_contents($dir . '/child.php', $child);
 $path = $dir . '/close.duckdb';
@@ -61,7 +61,7 @@ echo 'rows=', $db->query('SELECT count(*) FROM t')->fetchColumn(), "\n";
 ?>
 --CLEAN--
 <?php
-$dir = __DIR__ . '/105_work';
+$dir = __DIR__ . '/124_work';
 foreach (glob($dir . '/*') ?: [] as $f) {
     @unlink($f);
 }
