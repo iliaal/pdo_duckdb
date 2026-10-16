@@ -998,11 +998,14 @@ static const char *const pdo_duckdb_profile_post_detach[] = {
 	"SET lock_configuration=true",
 };
 
-/* Extensions whose file and network access goes through DuckDB's file system
- * layer, which enable_external_access=false denies (httpfs, spatial), or that do
- * no I/O of their own (the libduckdb built-ins). Any other loaded extension may
- * open sockets or listeners directly: quack serves and attaches remote DuckDBs
- * regardless of the profile. Unknown extensions are refused, not trusted. */
+/* Extensions the profile is known to contain. httpfs does its I/O through
+ * DuckDB's file system layer, which enable_external_access=false denies. The
+ * built-ins do no I/O of their own. spatial's bundled GDAL opens its own HTTP
+ * connections (/vsicurl/, WFS:, OAPIF:, ...); trusting it relies on spatial
+ * checking enable_external_access against its own VSI and driver prefix list.
+ * Any other loaded extension may open sockets or listeners directly: quack
+ * serves and attaches remote DuckDBs regardless of the profile. Unknown
+ * extensions are refused, not trusted. */
 #define PDO_DUCKDB_SANDBOX_CONTAINED_EXTENSIONS \
 	"'autocomplete', 'core_functions', 'httpfs', 'icu', 'json', 'parquet', 'spatial'"
 
