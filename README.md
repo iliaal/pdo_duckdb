@@ -394,7 +394,8 @@ Other contracts:
   `PDO::ATTR_AUTOCOMMIT` are not gettable.
 - **`duckdbTableNames()`.** An unparseable query throws `PDOException` with a
   detail-free message (`could not parse the query`); `prepare()` the query
-  for the engine's specific error. `UPDATE`, `DELETE`, and `MERGE` yield `[]`;
+  for the engine's specific error. `UPDATE`, `DELETE`, and `MERGE` yield `[]`
+  (`MERGE` needs DuckDB 1.5.5 or newer and throws on older releases);
   `INSERT ... SELECT` lists the tables it reads. DDL behavior is unspecified.
 
 ## Status

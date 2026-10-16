@@ -14,7 +14,16 @@ $db->exec("CREATE TABLE t(a INTEGER); CREATE TABLE x(a INTEGER);");
 // DML statements yield [], per the documented contract.
 var_dump($db->duckdbTableNames("UPDATE x SET a = 1"));
 var_dump($db->duckdbTableNames("DELETE FROM x"));
-var_dump($db->duckdbTableNames("MERGE INTO x USING t ON x.a = t.a WHEN MATCHED THEN UPDATE SET a = t.a"));
+// DuckDB 1.5.3 and 1.5.4 cannot bind MERGE for table-name extraction, so it throws there.
+$lib = ltrim($db->query("SELECT library_version FROM pragma_version()")->fetchColumn(), 'v');
+$merge_supported = version_compare($lib, '1.5.5', '>=');
+try {
+    $merge = $db->duckdbTableNames("MERGE INTO x USING t ON x.a = t.a WHEN MATCHED THEN UPDATE SET a = t.a");
+    echo $merge_supported && $merge === [] ? "merge: expected\n" : "merge: unexpected " . var_export($merge, true) . "\n";
+} catch (PDOException $e) {
+    echo !$merge_supported && $e->getMessage() === "PDO::duckdbTableNames(): could not parse the query"
+        ? "merge: expected\n" : "merge: unexpected " . $e->getMessage() . "\n";
+}
 
 // INSERT still extracts the referenced table.
 $names = $db->duckdbTableNames("INSERT INTO x SELECT a FROM t");
@@ -56,8 +65,7 @@ array(0) {
 }
 array(0) {
 }
-array(0) {
-}
+merge: expected
 array(1) {
   [0]=>
   string(1) "t"
