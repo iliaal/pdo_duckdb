@@ -202,6 +202,19 @@ void pdo_duckdb_tls_caches_shutdown(void)
 static void pdo_duckdb_stmt_cache_col_aux(pdo_duckdb_stmt *S);
 static int pdo_duckdb_stmt_bind_failure(pdo_stmt_t *stmt);
 
+static bool pdo_duckdb_stmt_reentry_refused(pdo_stmt_t *stmt)
+{
+	pdo_duckdb_stmt *S = (pdo_duckdb_stmt *)stmt->driver_data;
+
+	if (EXPECTED(!S->reporting_cell_error)) {
+		return false;
+	}
+	if (!EG(exception)) {
+		zend_throw_error(NULL, "Cannot use a PDOStatement while it is reporting a column fetch error");
+	}
+	return true;
+}
+
 static void pdo_duckdb_stmt_reset_result(pdo_duckdb_stmt *S)
 {
 	if (S->col_nested_renderers) {
@@ -307,6 +320,9 @@ static int pdo_duckdb_stmt_execute(pdo_stmt_t *stmt)
 {
 	pdo_duckdb_stmt *S = (pdo_duckdb_stmt *)stmt->driver_data;
 
+	if (pdo_duckdb_stmt_reentry_refused(stmt)) {
+		return 0;
+	}
 	pdo_duckdb_stmt_reset_result_full(stmt);
 	/* Zero before any failure return so re-execute errors do not leave a stale rowCount. */
 	stmt->row_count = 0;
@@ -2091,6 +2107,9 @@ static int pdo_duckdb_stmt_fetch(pdo_stmt_t *stmt,
 {
 	pdo_duckdb_stmt *S = (pdo_duckdb_stmt *)stmt->driver_data;
 
+	if (pdo_duckdb_stmt_reentry_refused(stmt)) {
+		return 0;
+	}
 	if (!S->has_result || S->done) {
 		return 0;
 	}
@@ -2199,6 +2218,21 @@ static bool pdo_duckdb_col_to_string(duckdb_vector vec, idx_t row,
 	return true;
 }
 
+/* PDO core keeps reading stmt->columns after get_col returns, but a
+ * warning-mode report can run userland (an error handler or an output
+ * callback). Refuse every statement operation that could free or rebuild
+ * that state until the report returns. */
+static void pdo_duckdb_stmt_report_variant(pdo_stmt_t *stmt)
+{
+	pdo_duckdb_stmt *S = (pdo_duckdb_stmt *)stmt->driver_data;
+
+	pdo_duckdb_error_stmt_code(stmt, PDO_DUCKDB_ERRCODE_STREAMING,
+		"DuckDB VARIANT values are not supported by the C result API; cast the value to VARCHAR in SQL");
+	S->reporting_cell_error++;
+	pdo_handle_error(stmt->dbh, stmt);
+	S->reporting_cell_error--;
+}
+
 static int pdo_duckdb_stmt_get_col(
 		pdo_stmt_t *stmt, int colno, zval *result, enum pdo_param_type *type)
 {
@@ -2289,9 +2323,7 @@ static int pdo_duckdb_stmt_get_col(
 
 		case DUCKDB_TYPE_VARIANT:
 			ZVAL_NULL(result);
-			pdo_duckdb_error_stmt_code(stmt, PDO_DUCKDB_ERRCODE_STREAMING,
-				"DuckDB VARIANT values are not supported by the C result API; cast the value to VARCHAR in SQL");
-			pdo_handle_error(stmt->dbh, stmt);
+			pdo_duckdb_stmt_report_variant(stmt);
 			return 1;
 
 		default: {
@@ -2320,9 +2352,7 @@ static int pdo_duckdb_stmt_get_col(
 			}
 			if (!pdo_duckdb_col_to_string(
 					vec, row, S->col_logical_types[colno], result)) {
-				pdo_duckdb_error_stmt_code(stmt, PDO_DUCKDB_ERRCODE_STREAMING,
-					"DuckDB VARIANT values are not supported by the C result API; cast the value to VARCHAR in SQL");
-				pdo_handle_error(stmt->dbh, stmt);
+				pdo_duckdb_stmt_report_variant(stmt);
 			}
 			return 1;
 		}
@@ -2459,6 +2489,12 @@ static int pdo_duckdb_stmt_param_hook(pdo_stmt_t *stmt, struct pdo_bound_param_d
 	zval *parameter;
 	idx_t idx;
 
+	/* Bound-column registration during a report would mutate the
+	 * bound_columns table PDO core may be iterating. FREE only runs from
+	 * table destruction and has nothing to refuse. */
+	if (event_type != PDO_PARAM_EVT_FREE && pdo_duckdb_stmt_reentry_refused(stmt)) {
+		return 0;
+	}
 	if (!param->is_param) {
 		return 1;
 	}
@@ -2658,6 +2694,9 @@ static int pdo_duckdb_stmt_param_hook(pdo_stmt_t *stmt, struct pdo_bound_param_d
 
 static int pdo_duckdb_stmt_cursor_closer(pdo_stmt_t *stmt)
 {
+	if (pdo_duckdb_stmt_reentry_refused(stmt)) {
+		return 0;
+	}
 	pdo_duckdb_stmt_reset_result_full(stmt);
 	return 1;
 }

@@ -137,6 +137,8 @@ typedef struct {
 	/* Clear DuckDB's retained bindings once per execute, including execute([]),
 	 * so omitted parameters cannot reuse stale values. */
 	bool binds_cleared;
+	/* Nonzero while get_col reports a cell error through pdo_handle_error. */
+	uint32_t reporting_cell_error;
 } pdo_duckdb_stmt;
 
 extern const pdo_driver_t pdo_duckdb_driver;
