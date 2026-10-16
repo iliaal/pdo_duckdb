@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Return an empty array from `PDO::duckdbTableNames()` for valid `UPDATE`,
+  `DELETE`, and `MERGE` statements instead of throwing.
 - Check the complete PHP module listing before loading shared PDO in the common
   test runner, avoiding duplicate loads after an early pipe close, and stop if
   the module probe fails.
