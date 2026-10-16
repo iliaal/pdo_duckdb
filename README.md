@@ -154,7 +154,14 @@ the appender or its connection is destroyed:
   an open transaction they join it.
 - If a transaction is still open when the PDO object is destroyed, PDO rolls it
   back and the appender's buffered rows are discarded with it, whichever of the
-  two objects PHP frees first.
+  two objects PHP frees first. On PHP versions where several PDO objects share
+  one persistent handle and PDO rolls the handle back when the first of them
+  is freed, an appender that belongs to another of those PDO objects keeps its
+  rows and flushes them in autocommit, as after an explicit `rollBack()`.
+- An explicit `rollBack()` doesn't discard the buffer. Rows you appended but
+  didn't flush stay buffered and are written by the next flush, in autocommit
+  or in whatever transaction is open then. Call `flush()` before you commit or
+  roll back so the rows land in the transaction you intend.
 - DuckDB flushes the appender on its own every 204,800 rows (DuckDB 1.5).
   Those rows join the transaction that is open at that moment, so a later
   discard of the buffer doesn't remove them.
