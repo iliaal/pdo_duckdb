@@ -257,19 +257,22 @@ static zend_long pdo_duckdb_stmt_rows_changed(duckdb_result *result)
 
 static void pdo_duckdb_stmt_cache_columns(pdo_duckdb_stmt *S)
 {
-	idx_t c;
+	idx_t c, n;
 
-	S->col_count = duckdb_column_count(&S->result);
-	if (S->col_count == 0) {
+	n = duckdb_column_count(&S->result);
+	if (n == 0) {
 		return;
 	}
 
-	S->col_types = emalloc(sizeof(duckdb_type) * S->col_count);
-	S->col_logical_types = emalloc(sizeof(duckdb_logical_type) * S->col_count);
-	S->col_nested_renderers = ecalloc(S->col_count, sizeof(pdo_duckdb_nested_render_type *));
-	for (c = 0; c < S->col_count; c++) {
+	/* A memory_limit bailout can unwind from any allocation below into
+	 * reset_result, so col_count only ever covers fully published columns. */
+	S->col_types = safe_emalloc(n, sizeof(duckdb_type), 0);
+	S->col_logical_types = safe_emalloc(n, sizeof(duckdb_logical_type), 0);
+	S->col_nested_renderers = ecalloc(n, sizeof(pdo_duckdb_nested_render_type *));
+	for (c = 0; c < n; c++) {
 		S->col_types[c] = duckdb_column_type(&S->result, c);
 		S->col_logical_types[c] = duckdb_column_logical_type(&S->result, c);
+		S->col_count = c + 1;
 		switch (S->col_types[c]) {
 			case DUCKDB_TYPE_LIST:
 			case DUCKDB_TYPE_ARRAY:
