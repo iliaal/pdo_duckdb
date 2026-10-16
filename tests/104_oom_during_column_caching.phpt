@@ -9,13 +9,12 @@ if (!function_exists('proc_open')) die('skip proc_open() unavailable');
 ?>
 --FILE--
 <?php
-/* The bailout must land inside execute()'s per-column caching loop, after the
- * column arrays exist. ZendMM only enforces memory_limit when it maps a new
- * chunk, so each child leaves a different amount of headroom and the sweep
- * covers several chunk boundaries inside the loop; the nested columns make
- * the loop allocate several chunks' worth on debug and release builds. The
- * freed junk strings leave non-zero bytes in the pages the column arrays
- * reuse. */
+/* Each child leaves a different amount of memory_limit headroom so that a
+ * bailout lands inside execute(). ZendMM only enforces the limit when it maps
+ * a new chunk, so the sweep spans several chunk boundaries. Builds that
+ * allocate per column while caching (3dc1a58 and earlier) bail inside the
+ * caching loop; the freed junk strings leave non-zero bytes in the pages the
+ * column arrays reuse. */
 $child = <<<'PHP'
 $n = 10000;
 $slack = (int)$argv[1];
