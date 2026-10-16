@@ -1,10 +1,11 @@
 --TEST--
-pdo_duckdb: another statement aborts a partially read unbuffered result at its next chunk
+pdo_duckdb: current engine behavior: another statement aborts a partially read unbuffered result at its next chunk
 --EXTENSIONS--
 pdo
 pdo_duckdb
 --FILE--
 <?php
+// Bead pdd-roi (planned active-stream guard) will change this to an error at the second statement.
 $db = new PDO('duckdb::memory:', null, null, [
     PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
     PDO::DUCKDB_ATTR_UNBUFFERED => true,
@@ -59,6 +60,16 @@ $alone = $db->query('SELECT i FROM range(5000) t(i)');
 $seen = 0;
 echo "no interleave: ", drain($alone, $seen), " $seen rows\n";
 
+$db->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_SILENT);
+$quiet = $db->query('SELECT i FROM range(5000) t(i)');
+$quiet->fetch();
+$db->query('SELECT 99');
+$seen = 1;
+while ($quiet->fetch() !== false) {
+    $seen++;
+}
+echo "silent: stopped after $seen rows, code=", $quiet->errorCode(), " driver=", $quiet->errorInfo()[1], "\n";
+
 echo $db->query('SELECT 42')->fetchColumn(), "\n";
 ?>
 --EXPECT--
@@ -76,4 +87,5 @@ bool(true)
 prepare rerun: completed 5000 rows
 single chunk: aborted after 10 rows
 no interleave: completed 5000 rows
+silent: stopped after 2048 rows, code=HY000 driver=5
 42
