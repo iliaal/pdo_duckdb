@@ -9,23 +9,43 @@ if (!function_exists('proc_open')) die('skip proc_open() unavailable');
 ?>
 --FILE--
 <?php
-/* Each child leaves a different amount of memory_limit headroom so that a
- * bailout lands inside execute(). ZendMM only enforces the limit when it maps
- * a new chunk, so the sweep spans several chunk boundaries. Builds that
- * allocate per column while caching (3dc1a58 and earlier) bail inside the
- * caching loop; the freed junk strings leave non-zero bytes in the pages the
- * column arrays reuse. */
+/* The child caps memory_limit headroom below one ZendMM chunk, so execute()
+ * cannot map a new chunk and bails once it has used the pages left free in
+ * the current one. A probe run fills those pages one at a time until it
+ * bails, which counts them; each sweep run then fills all but a few and
+ * frees a chosen number back. The parent measures execute()'s footprint and
+ * sweeps the freed amount up to it, so the bailout lands early (inside
+ * column caching) and late (in PDO core's column setup) whatever the
+ * footprint of the PHP and DuckDB build. Builds that allocate per column
+ * while caching (3dc1a58 and earlier) bail inside the caching loop; the
+ * freed filler pages hold non-zero bytes that the column arrays reuse. */
 $child = <<<'PHP'
-$n = 10000;
-$slack = (int)$argv[1];
+$n = 2000;
+[$mode, $filled, $freed] = [$argv[1], (int)($argv[2] ?? 0), (int)($argv[3] ?? 0)];
 $pdo = new PDO('duckdb::memory:;threads=1', null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
 $st = $pdo->prepare('SELECT ' . implode(',', array_fill(0, $n, '[[[[1]]]]')));
-$pad = str_repeat('x', 64 * 1024 * 1024 - memory_get_usage(true) - $slack);
-$junk = [];
-for ($j = 0; $j < 4; $j++) {
-    $junk[] = str_repeat("\x41", 8 * $n - 64);
+if ($mode === 'measure') {
+    $before = memory_get_usage();
+    $st->execute();
+    echo 'footprint=', memory_get_usage() - $before, "\n";
+    return;
 }
-unset($junk);
+$fill = array_fill(0, 4096, null);
+$pad = str_repeat('x', 64 * 1024 * 1024 - memory_get_usage(true) - 256 * 1024);
+/* 4071 bytes plus the zend_string header is exactly one 4 KiB page. */
+if ($mode === 'probe') {
+    for ($i = 0; $i < 4096; $i++) {
+        $fill[$i] = str_repeat("\x41", 4071);
+        echo '.';
+    }
+    return;
+}
+for ($i = 0; $i < $filled; $i++) {
+    $fill[$i] = str_repeat("\x41", 4071);
+}
+for ($i = 1; $i <= $freed; $i++) {
+    $fill[$filled - $i] = null;
+}
 echo "executing\n";
 $st->execute();
 echo "survived\n";
@@ -69,10 +89,23 @@ if (trim($probe) !== 'loaded') {
     echo "child cannot load pdo_duckdb:\n", $probe, "\n";
 }
 
+[, $measured] = run_child(child_command(['-r', $child, '--', 'measure']));
+[, $probed] = run_child(child_command(['-r', $child, '--', 'probe']));
+$footprint = preg_match('/^footprint=(\d+)$/m', $measured, $m) ? (int)$m[1] : 0;
+$free_pages = strspn($probed, '.');
+if ($footprint < 65536 || $free_pages < 16 || !str_contains($probed, 'Allowed memory size')) {
+    echo "cannot calibrate the sweep:\n", $measured, "\n", $probed, "\n";
+}
+/* Two pages of margin keep the sweep runs' own filling clear of the limit.
+ * Freeing more than execute() needs would let it finish. */
+$filled = $free_pages - 2;
+$span = min($filled, intdiv($footprint, 4096));
+
 $crashes = 0;
 $oom_in_execute = 0;
-foreach ([256, 2304, 4352] as $kib) {
-    [$rc, $out] = run_child(child_command(['-r', $child, '--', (string)($kib * 1024)]));
+for ($step = 0; $step < 6; $step++) {
+    $freed = intdiv($span * (2 * $step + 1), 12) + 1;
+    [$rc, $out] = run_child(child_command(['-r', $child, '--', 'run', (string)$filled, (string)$freed]));
     $oom = str_contains($out, "executing\n") && str_contains($out, 'Allowed memory size')
         && !str_contains($out, 'survived');
     if ($oom) {
@@ -80,7 +113,7 @@ foreach ([256, 2304, 4352] as $kib) {
     }
     if (!($rc === 0 && str_contains($out, 'survived')) && !($rc === 255 && $oom)) {
         $crashes++;
-        echo "headroom {$kib}KiB: rc=$rc\n", $out, "\n";
+        echo "freed $freed of $filled pages (footprint $footprint): rc=$rc\n", $out, "\n";
     }
 }
 echo "crashes: $crashes\n";
