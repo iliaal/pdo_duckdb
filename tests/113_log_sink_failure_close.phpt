@@ -6,6 +6,8 @@ pdo_duckdb
 --FILE--
 <?php
 require __DIR__ . '/duckdb_v2.inc';
+// DuckDB 2.0 does not leave a stale active query when the sink fails, so only
+// the 1.5.x run guards the disconnect abort; the 2.0 run checks error surfacing.
 $v2 = pdo_duckdb_v2_headers();
 // A path under a regular file is unwritable for every user, root included.
 $blocker = __DIR__ . '/113_log_sink.notadir';
