@@ -10,7 +10,7 @@ if (!pdo_duckdb_v2_headers()) die('skip needs a build against the DuckDB 2.0 hea
 ?>
 --FILE--
 <?php
-$db = new PDO('duckdb::memory:', null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
+$db = PHP_VERSION_ID >= 80400 ? PDO::connect('duckdb::memory:', null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]) : new PDO('duckdb::memory:', null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
 $db->exec("SET TimeZone='UTC'");
 $db->exec('CREATE TABLE t (id INTEGER, x TIMESTAMPTZ_NS, xs TIMESTAMPTZ_NS[], st STRUCT(t TIMESTAMPTZ_NS))');
 $ap = $db->duckdbAppender('t');

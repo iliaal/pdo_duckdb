@@ -6,7 +6,7 @@ pdo_duckdb
 --SKIPIF--
 <?php
 try {
-    $db = new PDO('duckdb::memory:', null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
+    $db = PHP_VERSION_ID >= 80400 ? PDO::connect('duckdb::memory:', null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]) : new PDO('duckdb::memory:', null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
     if ($dir = getenv('PDO_DUCKDB_TEST_EXTENSION_DIR')) {
         $db->exec('SET extension_directory=' . $db->quote($dir));
     }
@@ -34,7 +34,7 @@ function listening(int $port): bool {
 }
 
 function open_with_quack(): PDO {
-    $db = new PDO('duckdb::memory:', null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
+    $db = PHP_VERSION_ID >= 80400 ? PDO::connect('duckdb::memory:', null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]) : new PDO('duckdb::memory:', null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
     if ($dir = getenv('PDO_DUCKDB_TEST_EXTENSION_DIR')) {
         $db->exec('SET extension_directory=' . $db->quote($dir));
     }
@@ -104,7 +104,7 @@ attempt($server, 'server handle', fn($db) => $db->query('SELECT v FROM q.srv')->
 echo 'listener started before tightening: ', listening($port) ? 'STILL LISTENING' : 'stopped', "\n";
 
 // A handle opened under open_basedir is sandboxed at open: quack cannot load.
-$fresh = new PDO('duckdb::memory:', null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
+$fresh = PHP_VERSION_ID >= 80400 ? PDO::connect('duckdb::memory:', null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]) : new PDO('duckdb::memory:', null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
 try {
     $fresh->exec('LOAD quack');
     echo "fresh LOAD: ALLOWED\n";

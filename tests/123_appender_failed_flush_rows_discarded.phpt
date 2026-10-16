@@ -17,7 +17,7 @@ $scenario = <<<'PHP'
 <?php
 function poisoned_appender(string $path, ?object &$placeholder = null): array
 {
-    $db = new PDO('duckdb:' . $path, null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
+    $db = PHP_VERSION_ID >= 80400 ? PDO::connect('duckdb:' . $path, null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]) : new PDO('duckdb:' . $path, null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
     // Frees a lower object handle for the appender, so the shutdown sweep
     // reaches the PDO object first.
     $placeholder = null;
@@ -77,7 +77,7 @@ $out = stream_get_contents($pipes[1]);
 fclose($pipes[1]);
 $rc = proc_close($proc);
 echo "child rc=$rc\n$out";
-$db = new PDO('duckdb:' . $path, null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
+$db = PHP_VERSION_ID >= 80400 ? PDO::connect('duckdb:' . $path, null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]) : new PDO('duckdb:' . $path, null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
 echo 'shutdown rows=', $db->query('SELECT count(*) FROM t')->fetchColumn(), "\n";
 ?>
 --CLEAN--

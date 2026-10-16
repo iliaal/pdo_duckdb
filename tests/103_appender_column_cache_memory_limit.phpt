@@ -26,7 +26,7 @@ $child = <<<'PHP'
 <?php
 [, $n, $headroom] = $argv;
 $n = (int)$n;
-$db = new PDO('duckdb::memory:', null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
+$db = PHP_VERSION_ID >= 80400 ? PDO::connect('duckdb::memory:', null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]) : new PDO('duckdb::memory:', null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
 $cols = [];
 for ($i = 0; $i < $n; $i++) {
     $cols[] = "c$i INTEGER";

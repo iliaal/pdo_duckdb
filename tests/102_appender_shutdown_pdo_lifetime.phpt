@@ -29,7 +29,7 @@ if ($mode === 'store') {
     gc_disable();
 }
 $placeholder = new stdClass;
-$db = new PDO('duckdb:' . $path, null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
+$db = PHP_VERSION_ID >= 80400 ? PDO::connect('duckdb:' . $path, null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]) : new PDO('duckdb:' . $path, null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
 $db->exec('CREATE TABLE t (i INTEGER)');
 // The appender reuses the lower handle, so the object-store sweep reaches
 // the PDO object first.
@@ -91,7 +91,7 @@ foreach (['store', 'gc', 'fatal'] as $mode) {
             echo "mode=$mode txn=$txn rc=$rc\n$out\n";
             continue;
         }
-        $db = new PDO('duckdb:' . $path, null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
+        $db = PHP_VERSION_ID >= 80400 ? PDO::connect('duckdb:' . $path, null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]) : new PDO('duckdb:' . $path, null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
         printf("mode=%s txn=%s rows=%d\n", $mode, $txn, $db->query('SELECT count(*) FROM t')->fetchColumn());
         $db = null;
     }

@@ -16,7 +16,7 @@ $path = $dir . '/gc.duckdb';
 function make_cycle(string $path, bool $appender_low_handle, bool $in_txn): void
 {
     $placeholder = $appender_low_handle ? new stdClass : null;
-    $db = new PDO('duckdb:' . $path, null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
+    $db = PHP_VERSION_ID >= 80400 ? PDO::connect('duckdb:' . $path, null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]) : new PDO('duckdb:' . $path, null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
     $db->exec('CREATE OR REPLACE TABLE t (i INTEGER)');
     // Frees the lower object handle so the appender reuses it.
     $placeholder = null;
@@ -36,7 +36,7 @@ foreach ([false, true] as $low) {
     foreach ([false, true] as $txn) {
         make_cycle($path, $low, $txn);
         $collected = gc_collect_cycles();
-        $db = new PDO('duckdb:' . $path, null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
+        $db = PHP_VERSION_ID >= 80400 ? PDO::connect('duckdb:' . $path, null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]) : new PDO('duckdb:' . $path, null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
         printf("low=%d txn=%d collected=%s rows=%d\n", $low, $txn,
             $collected > 0 ? 'yes' : 'no', $db->query('SELECT count(*) FROM t')->fetchColumn());
         $db = null;

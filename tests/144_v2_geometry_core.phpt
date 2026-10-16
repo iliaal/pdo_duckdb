@@ -12,7 +12,7 @@ if (!pdo_duckdb_v2_headers()) die('skip needs a build against the DuckDB 2.0 hea
 <?php
 // No spatial extension: GEOMETRY, its WKT/WKB casts, and CRS-typed GEOMETRY
 // are core in DuckDB 2.0.
-$db = new PDO('duckdb::memory:', null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
+$db = PHP_VERSION_ID >= 80400 ? PDO::connect('duckdb::memory:', null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]) : new PDO('duckdb::memory:', null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
 $db->exec("SET autoload_known_extensions=false");
 
 $st = $db->query("SELECT 'POINT(1 2)'::GEOMETRY AS g, 'POINT(1 2)'::GEOMETRY('OGC:CRS84') AS gc,

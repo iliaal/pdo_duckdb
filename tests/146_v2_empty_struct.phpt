@@ -11,7 +11,7 @@ if (!pdo_duckdb_v2_headers()) die('skip needs a build against the DuckDB 2.0 hea
 --FILE--
 <?php
 // DuckDB 1.5 cannot build a zero-field STRUCT ({} is a parser error there).
-$db = new PDO('duckdb::memory:', null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
+$db = PHP_VERSION_ID >= 80400 ? PDO::connect('duckdb::memory:', null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]) : new PDO('duckdb::memory:', null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
 $db->exec('CREATE TABLE e AS SELECT * FROM (VALUES (1, {}), (2, NULL)) t(id, s)');
 // r has a BLOB sibling, which takes DuckDB's value renderer instead of the
 // driver's direct nested renderer.

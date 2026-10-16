@@ -32,7 +32,7 @@ class Importer
     }
 }
 
-$db = new PDO('duckdb:' . $argv[1], null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
+$db = PHP_VERSION_ID >= 80400 ? PDO::connect('duckdb:' . $argv[1], null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]) : new PDO('duckdb:' . $argv[1], null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
 $db->exec('CREATE TABLE t (i INTEGER)');
 // new evaluates its arguments after allocating the object.
 $ap = $db->duckdbAppender('t');
@@ -56,7 +56,7 @@ fclose($pipes[0]);
 $out = stream_get_contents($pipes[1]);
 fclose($pipes[1]);
 echo 'child rc=', proc_close($proc), "\n", $out;
-$db = new PDO('duckdb:' . $path, null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
+$db = PHP_VERSION_ID >= 80400 ? PDO::connect('duckdb:' . $path, null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]) : new PDO('duckdb:' . $path, null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
 echo 'rows=', $db->query('SELECT count(*) FROM t')->fetchColumn(), "\n";
 ?>
 --CLEAN--
