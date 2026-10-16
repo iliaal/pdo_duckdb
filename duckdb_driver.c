@@ -109,6 +109,7 @@ static void duckdb_handle_closer(pdo_dbh_t *dbh) /* {{{ */
 	pdo_duckdb_db_handle *H = (pdo_duckdb_db_handle *)dbh->driver_data;
 
 	if (H) {
+		pdo_duckdb_appenders_release(H);
 		if (H->conn) {
 			/* A query that failed while DuckDB was starting it (e.g. a file log
 			 * sink that cannot be opened) leaves a stale active query, which

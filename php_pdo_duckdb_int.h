@@ -59,6 +59,8 @@ typedef struct {
 	char *errmsg;
 } pdo_duckdb_error_info;
 
+struct _pdo_duckdb_appender;
+
 typedef struct {
 	duckdb_database db;
 	duckdb_connection conn;
@@ -81,6 +83,10 @@ typedef struct {
 	 * after handle_factory. Accept DUCKDB_ATTR_CONFIG exactly for that reapply;
 	 * later runtime calls cannot change an already-open DuckDB database. */
 	bool config_reapply_pending;
+	/* Appenders with native state on conn. The closer releases them before
+	 * disconnecting: GC and request shutdown can free the PDO object before
+	 * an appender that still references it. */
+	struct _pdo_duckdb_appender *appenders;
 } pdo_duckdb_db_handle;
 
 typedef struct _pdo_duckdb_nested_render_type {
@@ -131,7 +137,7 @@ typedef struct {
 extern const pdo_driver_t pdo_duckdb_driver;
 extern const struct pdo_stmt_methods duckdb_stmt_methods;
 
-typedef struct {
+typedef struct _pdo_duckdb_appender {
 	duckdb_appender appender;
 	bool closed;
 	idx_t ncols;					/* appender target column count */
@@ -149,6 +155,10 @@ typedef struct {
 	/* Per column, PDO_DUCKDB_CHK_KINDS pre-append check codes. NULL if ncols == 0. */
 	unsigned char *col_checks;
 	zend_object *pdo;	/* PDO object kept alive; it owns the connection */
+	/* Connection handle while linked into H->appenders; NULL once released. */
+	pdo_duckdb_db_handle *H;
+	struct _pdo_duckdb_appender *prev_live;
+	struct _pdo_duckdb_appender *next_live;
 	zend_object std;
 } pdo_duckdb_appender;
 
@@ -160,6 +170,7 @@ static inline pdo_duckdb_appender *pdo_duckdb_appender_from_obj(zend_object *o)
 }
 
 zend_result pdo_duckdb_appender_minit(void);
+void pdo_duckdb_appenders_release(pdo_duckdb_db_handle *H);
 const zend_function_entry *pdo_duckdb_get_driver_methods(pdo_dbh_t *dbh, int kind);
 
 /* Frees the grow-only thread-local statement caches so they aren't reported as

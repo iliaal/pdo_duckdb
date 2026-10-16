@@ -245,9 +245,6 @@ static zend_object *pdo_duckdb_appender_new(zend_class_entry *ce)
 {
 	pdo_duckdb_appender *a = zend_object_alloc(sizeof(pdo_duckdb_appender), ce);
 
-	zend_object_std_init(&a->std, ce);
-	object_properties_init(&a->std, ce);
-	a->std.handlers = &pdo_duckdb_appender_handlers;
 	a->appender = NULL;
 	a->closed = false;
 	a->ncols = 0;
@@ -259,48 +256,65 @@ static zend_object *pdo_duckdb_appender_new(zend_class_entry *ce)
 	a->col_num_bounds = NULL;
 	a->col_checks = NULL;
 	a->pdo = NULL;
+	a->H = NULL;
+	a->prev_live = NULL;
+	a->next_live = NULL;
+	zend_object_std_init(&a->std, ce);
+	object_properties_init(&a->std, ce);
+	a->std.handlers = &pdo_duckdb_appender_handlers;
 
 	return &a->std;
 }
 
-static void pdo_duckdb_appender_free(zend_object *obj)
+static void pdo_duckdb_appender_link(pdo_duckdb_appender *a, pdo_duckdb_db_handle *H)
 {
-	pdo_duckdb_appender *a = pdo_duckdb_appender_from_obj(obj);
+	a->H = H;
+	a->prev_live = NULL;
+	a->next_live = H->appenders;
+	if (H->appenders) {
+		H->appenders->prev_live = a;
+	}
+	H->appenders = a;
+}
 
+static void pdo_duckdb_appender_unlink(pdo_duckdb_appender *a)
+{
+	if (!a->H) {
+		return;
+	}
+	if (a->prev_live) {
+		a->prev_live->next_live = a->next_live;
+	} else {
+		a->H->appenders = a->next_live;
+	}
+	if (a->next_live) {
+		a->next_live->prev_live = a->prev_live;
+	}
+	a->prev_live = NULL;
+	a->next_live = NULL;
+	a->H = NULL;
+}
+
+/* Destroys the native objects bound to the connection. Flushing belongs to
+ * dtor_obj; an appender still open here skipped its destructor (fatal error,
+ * or a bailout during shutdown destructors), so its buffered rows are
+ * discarded instead of flushed into a connection that is being torn down. */
+static void pdo_duckdb_appender_release_native(pdo_duckdb_appender *a)
+{
+	pdo_duckdb_appender_unlink(a);
 	if (a->appender) {
-		duckdb_state close_state = DuckDBSuccess;
+		duckdb_appender ap = a->appender;
 		bool was_closed = a->closed;
-		/* destroy flushes outstanding rows; sandbox first so GC close cannot
-		 * write outside a mid-request open_basedir tighten. */
-		if (!a->closed) {
-			if (a->pdo) {
-				pdo_duckdb_db_handle *H = (pdo_duckdb_db_handle *)
-					php_pdo_dbh_fetch_inner(a->pdo)->driver_data;
-				if (H) {
-					(void)pdo_duckdb_enforce_sandbox(H);
-				}
-			}
-			close_state = duckdb_appender_close(a->appender);
-			if (close_state != DuckDBSuccess) {
-				pdo_duckdb_appender_warning(a->appender,
-					"Pdo\\Duckdb\\Appender close during destruction failed");
-			}
+
+		a->appender = NULL;
+		a->closed = true;
+		if (!was_closed) {
+			(void)duckdb_appender_clear(ap);
 		}
-		if (duckdb_appender_destroy(&a->appender) != DuckDBSuccess && !was_closed && close_state == DuckDBSuccess) {
+		if (duckdb_appender_destroy(&ap) != DuckDBSuccess && !was_closed) {
 			php_error_docref(NULL, E_WARNING,
 				"Pdo\\Duckdb\\Appender destroy during destruction failed");
 		}
-		a->appender = NULL;
-	}
-	/* Descriptors borrow col_types[i], so destroy them first. Probes need the
-	 * connection to still be reachable. */
-	if (a->col_desc) {
-		idx_t c;
-		for (c = 0; c < a->ncols; c++) {
-			pdo_duckdb_appender_desc_destroy(a->col_desc[c]);
-		}
-		efree(a->col_desc);
-		a->col_desc = NULL;
 	}
 	if (a->col_probes) {
 		idx_t c;
@@ -312,10 +326,58 @@ static void pdo_duckdb_appender_free(zend_object *obj)
 		efree(a->col_probes);
 		a->col_probes = NULL;
 	}
+}
+
+void pdo_duckdb_appenders_release(pdo_duckdb_db_handle *H)
+{
+	while (H->appenders) {
+		pdo_duckdb_appender_release_native(H->appenders);
+	}
+}
+
+/* Flush here rather than in free_obj: GC and request shutdown call every
+ * dtor_obj before any free_obj, so the connection is still open and an
+ * enclosing transaction has not yet been rolled back by PDO's free_obj. */
+static void pdo_duckdb_appender_dtor(zend_object *obj)
+{
+	pdo_duckdb_appender *a = pdo_duckdb_appender_from_obj(obj);
+
+	zend_objects_destroy_object(obj);
+	if (a->appender && !a->closed && a->H) {
+		/* Sandbox first so a destruction-time close cannot write outside a
+		 * mid-request open_basedir tighten. */
+		(void)pdo_duckdb_enforce_sandbox(a->H);
+		a->closed = true;
+		if (duckdb_appender_close(a->appender) != DuckDBSuccess) {
+			pdo_duckdb_appender_warning(a->appender,
+				"Pdo\\Duckdb\\Appender close during destruction failed");
+		}
+	}
+}
+
+static void pdo_duckdb_appender_free(zend_object *obj)
+{
+	pdo_duckdb_appender *a = pdo_duckdb_appender_from_obj(obj);
+
+	/* Never reach the PDO object's inner handle here: GC and request shutdown
+	 * may already have freed it. A still-linked a->H is live, because the
+	 * driver's closer unlinks every appender before freeing H. */
+	pdo_duckdb_appender_release_native(a);
+	/* Descriptors borrow col_types[i], so destroy them first. */
+	if (a->col_desc) {
+		idx_t c;
+		for (c = 0; c < a->ncols; c++) {
+			pdo_duckdb_appender_desc_destroy(a->col_desc[c]);
+		}
+		efree(a->col_desc);
+		a->col_desc = NULL;
+	}
 	if (a->col_types) {
 		idx_t c;
 		for (c = 0; c < a->ncols; c++) {
-			duckdb_destroy_logical_type(&a->col_types[c]);
+			if (a->col_types[c]) {
+				duckdb_destroy_logical_type(&a->col_types[c]);
+			}
 		}
 		efree(a->col_types);
 		a->col_types = NULL;
@@ -367,6 +429,7 @@ zend_result pdo_duckdb_appender_minit(void)
 
 	memcpy(&pdo_duckdb_appender_handlers, zend_get_std_object_handlers(), sizeof(zend_object_handlers));
 	pdo_duckdb_appender_handlers.offset = offsetof(pdo_duckdb_appender, std);
+	pdo_duckdb_appender_handlers.dtor_obj = pdo_duckdb_appender_dtor;
 	pdo_duckdb_appender_handlers.free_obj = pdo_duckdb_appender_free;
 	pdo_duckdb_appender_handlers.clone_obj = NULL;
 	pdo_duckdb_appender_handlers.get_gc = pdo_duckdb_appender_get_gc;
@@ -562,14 +625,17 @@ static void pdo_duckdb_appender_create_impl(INTERNAL_FUNCTION_PARAMETERS)
 	a = pdo_duckdb_appender_from_obj(Z_OBJ_P(return_value));
 	a->appender = ap;
 	a->closed = false;
+	pdo_duckdb_appender_link(a, H);
 	a->pdo = Z_OBJ_P(ZEND_THIS);
 	GC_ADDREF(a->pdo);
 
-	/* Cached so appendRow() doesn't allocate a logical type per cell. */
+	/* Cached so appendRow() doesn't allocate a logical type per cell. Zeroed:
+	 * free_obj walks ncols entries, and a memory_limit bailout in the
+	 * allocations below fires before the fill loop. */
 	a->ncols = duckdb_appender_column_count(ap);
 	if (a->ncols) {
 		idx_t c;
-		a->col_types = emalloc(sizeof(duckdb_logical_type) * a->ncols);
+		a->col_types = ecalloc(a->ncols, sizeof(duckdb_logical_type));
 		a->col_type_ids = emalloc(sizeof(duckdb_type) * a->ncols);
 		a->col_flags = ecalloc(a->ncols, sizeof(unsigned char));
 		a->col_num_bounds = ecalloc(a->ncols * 2, sizeof(double));
@@ -627,19 +693,15 @@ ZEND_METHOD(Pdo_Duckdb_Appender, __construct)
 static pdo_duckdb_appender *pdo_duckdb_appender_live(zval *zthis)
 {
 	pdo_duckdb_appender *a = pdo_duckdb_appender_from_obj(Z_OBJ_P(zthis));
-	pdo_duckdb_db_handle *H;
 
 	if (!a->appender || a->closed) {
 		zend_throw_error(NULL, "Pdo\\Duckdb\\Appender is closed");
 		return NULL;
 	}
-	if (a->pdo) {
-		H = (pdo_duckdb_db_handle *)php_pdo_dbh_fetch_inner(a->pdo)->driver_data;
-		if (H && !pdo_duckdb_enforce_sandbox(H)) {
-			zend_throw_exception_ex(php_pdo_get_exception(), PDO_DUCKDB_ERRCODE_SANDBOX,
-				"Pdo\\Duckdb\\Appender: unable to apply the open_basedir sandbox");
-			return NULL;
-		}
+	if (a->H && !pdo_duckdb_enforce_sandbox(a->H)) {
+		zend_throw_exception_ex(php_pdo_get_exception(), PDO_DUCKDB_ERRCODE_SANDBOX,
+			"Pdo\\Duckdb\\Appender: unable to apply the open_basedir sandbox");
+		return NULL;
 	}
 	return a;
 }
