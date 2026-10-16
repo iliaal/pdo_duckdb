@@ -1648,6 +1648,34 @@ static zend_string *pdo_duckdb_strip_table_alias(const char *s, size_t len)
 	return zend_string_init(s, cut, 0);
 }
 
+/* duckdb_get_table_names() binds the target of UPDATE, DELETE, and MERGE as a
+ * dummy scan that the statement binder then rejects as not a base table, so it
+ * returns NULL just as for a parse failure. A successful prepare() tells such a
+ * valid statement apart from a broken one. */
+static bool pdo_duckdb_is_dml_without_table_names(pdo_duckdb_db_handle *H, const char *query)
+{
+	duckdb_prepared_statement probe = NULL;
+	bool dml = false;
+
+	if (duckdb_prepare(H->conn, query, &probe) == DuckDBSuccess) {
+		switch (duckdb_prepared_statement_type(probe)) {
+			case DUCKDB_STATEMENT_TYPE_UPDATE:
+			case DUCKDB_STATEMENT_TYPE_DELETE:
+#if !defined(HAVE_DECL_DUCKDB_STATEMENT_TYPE_MERGE_INTO) || HAVE_DECL_DUCKDB_STATEMENT_TYPE_MERGE_INTO
+			case DUCKDB_STATEMENT_TYPE_MERGE_INTO:
+#endif
+				dml = true;
+				break;
+			default:
+				break;
+		}
+	}
+	if (probe) {
+		duckdb_destroy_prepare(&probe);
+	}
+	return dml;
+}
+
 static void pdo_duckdb_table_names_impl(INTERNAL_FUNCTION_PARAMETERS)
 {
 	zend_string *query;
@@ -1682,22 +1710,12 @@ static void pdo_duckdb_table_names_impl(INTERNAL_FUNCTION_PARAMETERS)
 
 	list = duckdb_get_table_names(H->conn, ZSTR_VAL(query), qualified);
 	if (!list) {
-		/* duckdb_get_table_names() returns NULL both for genuine parse/bind
-		 * failures and for statement types with no extractable table names
-		 * (e.g. UPDATE/DELETE/MERGE). Use prepare() as a discriminator: a
-		 * query that prepares fine is valid SQL with nothing to extract,
-		 * which the documented contract maps to []. */
-		duckdb_prepared_statement probe = NULL;
-		if (duckdb_prepare(H->conn, ZSTR_VAL(query), &probe) == DuckDBSuccess) {
-			duckdb_destroy_prepare(&probe);
+		if (pdo_duckdb_is_dml_without_table_names(H, ZSTR_VAL(query))) {
 			array_init(return_value);
 			return;
 		}
-		if (probe) {
-			duckdb_destroy_prepare(&probe);
-		}
-		/* NULL means the query did not parse. get_table_names exposes no error
-		 * detail; prepare() the query for the specific message. */
+		/* NULL means the query failed to parse or bind; get_table_names exposes
+		 * no error detail, so prepare() the query for the specific message. */
 		zend_throw_exception_ex(php_pdo_get_exception(), PDO_DUCKDB_ERRCODE_SYNTAX,
 			"PDO::duckdbTableNames(): could not parse the query");
 		RETURN_THROWS();

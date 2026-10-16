@@ -259,6 +259,8 @@ if test "$PHP_PDO_DUCKDB" != "no"; then
   AC_CHECK_DECLS([DUCKDB_TYPE_VARIANT], [],
     [pdo_duckdb_cleanup_staged_aliases; AC_MSG_ERROR([DuckDB 1.5.3 or newer headers are required (DUCKDB_TYPE_VARIANT is missing).])],
     [[#include <duckdb.h>]])
+  dnl DuckDB 1.5.3 through 1.5.5 report MERGE INTO as DUCKDB_STATEMENT_TYPE_INVALID.
+  AC_CHECK_DECLS([DUCKDB_STATEMENT_TYPE_MERGE_INTO], [], [], [[#include <duckdb.h>]])
   CPPFLAGS="$save_CPPFLAGS"
   if test -n "$DUCKDB_CONFIG_STATIC_FINAL"; then
     if ! pdo_duckdb_promote_alias "$DUCKDB_CONFIG_STATIC_STAGE" "$DUCKDB_CONFIG_STATIC_FINAL"; then

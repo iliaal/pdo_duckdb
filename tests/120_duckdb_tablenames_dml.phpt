@@ -36,6 +36,20 @@ try {
 } catch (PDOException $e) {
     echo "PDOException: ", $e->getMessage(), "\n";
 }
+
+// Statements that prepare but are not UPDATE/DELETE/MERGE keep throwing.
+foreach ([
+    "SELECT * FROM t WHERE a = ?",
+    "SELECT * FROM t WHERE a = $1",
+    "EXPLAIN UPDATE x SET a = 1",
+] as $sql) {
+    try {
+        $db->duckdbTableNames($sql);
+        echo "no throw: $sql\n";
+    } catch (PDOException $e) {
+        echo "PDOException: ", $e->getMessage(), "\n";
+    }
+}
 ?>
 --EXPECT--
 array(0) {
@@ -48,6 +62,9 @@ array(1) {
   [0]=>
   string(1) "t"
 }
+PDOException: PDO::duckdbTableNames(): could not parse the query
+PDOException: PDO::duckdbTableNames(): could not parse the query
+PDOException: PDO::duckdbTableNames(): could not parse the query
 PDOException: PDO::duckdbTableNames(): could not parse the query
 PDOException: PDO::duckdbTableNames(): could not parse the query
 --CLEAN--
