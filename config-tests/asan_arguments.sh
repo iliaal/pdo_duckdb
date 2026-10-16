@@ -98,7 +98,14 @@ RUNNER_STATUS=143 check 'preserve interrupted runner status' "$work/plain/module
 
 # Exercise the actual CI summary gate, including the old guard for reversion
 # testing. Replace only its fixed log path; keep the production predicate/body.
-ci_gate=$(sed -n '/^          bash scripts\/check-executed-tests.sh /p; /^          if ! grep -qP .Number of tests/,+3p' "$repo/.github/workflows/tests.yml")
+# Several jobs share the run-step shape, so read only the ASan step's script.
+asan_step=$(awk '
+    /^      - name: Run tests under ASAN$/ { in_step = 1; next }
+    in_step && (/^      - name: / || /^  [^ ]/) { exit }
+    in_step
+' "$repo/.github/workflows/tests.yml")
+[ -n "$asan_step" ]
+ci_gate=$(sed -n '/^          bash scripts\/check-executed-tests.sh /p; /^          if ! grep -qP .Number of tests/,+3p' <<< "$asan_step")
 [ -n "$ci_gate" ]
 ci_gate=${ci_gate//\/tmp\/test-output.txt/\"\$SUMMARY_LOG\"}
 summary_check() {
@@ -130,7 +137,7 @@ summary_check 'misleading prefix' 1 'not Number of tests : 100 1\n'
 summary_check 'no final newline' 0 'Number of tests : 1 1'
 
 # Feed a completed mock pipeline into the actual CI status and summary body.
-ci_body=$(sed -n '/^          test_status=/,$p' "$repo/.github/workflows/tests.yml")
+ci_body=$(sed -n '/^          test_status=/,$p' <<< "$asan_step")
 [ -n "$ci_body" ]
 ci_body=${ci_body//\/tmp\/test-output.txt/\"\$SUMMARY_LOG\"}
 ci_status_check() {
