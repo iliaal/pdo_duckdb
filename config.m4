@@ -261,7 +261,39 @@ if test "$PHP_PDO_DUCKDB" != "no"; then
     [[#include <duckdb.h>]])
   dnl DuckDB 1.5.3 through 1.5.5 report MERGE INTO as DUCKDB_STATEMENT_TYPE_INVALID.
   AC_CHECK_DECLS([DUCKDB_STATEMENT_TYPE_MERGE_INTO], [], [], [[#include <duckdb.h>]])
+  AC_CHECK_DECLS([DUCKDB_TYPE_TIMESTAMP_TZ_NS], [], [], [[#include <duckdb.h>]])
+
+  dnl DuckDB 2.0 keeps reporting DUCKDB_API_VERSION 1.5.6 in duckdb.h, so the
+  dnl generation is detected from the versioned v2 header it ships alongside.
+  AC_MSG_CHECKING([for the DuckDB 2.0 C API (duckdb_v2.h)])
+  AC_COMPILE_IFELSE([AC_LANG_PROGRAM([[
+#include <duckdb.h>
+#include <duckdb_v2.h>
+#if !defined(DUCKDB_V2_API_VERSION_MAJOR) || DUCKDB_V2_API_VERSION_MAJOR < 2
+#error DuckDB 2.0 C API not found
+#endif
+  ]], [[]])], [pdo_duckdb_have_v2=yes], [pdo_duckdb_have_v2=no])
+  AC_MSG_RESULT([$pdo_duckdb_have_v2])
   CPPFLAGS="$save_CPPFLAGS"
+
+  if test "$pdo_duckdb_have_v2" = "yes"; then
+    if test "$ac_cv_have_decl_DUCKDB_TYPE_TIMESTAMP_TZ_NS" != "yes"; then
+      pdo_duckdb_cleanup_staged_aliases
+      AC_MSG_ERROR([duckdb_v2.h is DuckDB 2.0 but duckdb.h lacks DUCKDB_TYPE_TIMESTAMP_TZ_NS; the DuckDB headers come from different releases.])
+    fi
+    if test -n "$DUCKDB_CONFIG_LIBDIR_STAGE"; then
+      save_CHECK_LDFLAGS="$LDFLAGS"
+      LDFLAGS="$LDFLAGS -L$DUCKDB_CONFIG_LIBDIR_STAGE"
+      PHP_CHECK_LIBRARY([duckdb], [duckdb_create_timestamp_tz_ns],
+        [],
+        [pdo_duckdb_cleanup_staged_aliases; AC_MSG_ERROR([The DuckDB headers are DuckDB 2.0 but libduckdb is older (no duckdb_create_timestamp_tz_ns). Point --with-pdo-duckdb at a matching header and library set.])],
+        [])
+      LDFLAGS="$save_CHECK_LDFLAGS"
+    fi
+    AC_DEFINE([HAVE_DUCKDB_V2], [1], [Whether the DuckDB 2.0 C API headers are available])
+  elif test "$ac_cv_have_decl_DUCKDB_TYPE_TIMESTAMP_TZ_NS" = "yes"; then
+    AC_MSG_WARN([duckdb.h declares DUCKDB_TYPE_TIMESTAMP_TZ_NS but duckdb_v2.h is not next to it. If this is DuckDB 2.0, install its full header set to enable the DuckDB 2.0 code paths.])
+  fi
   if test -n "$DUCKDB_CONFIG_STATIC_FINAL"; then
     if ! pdo_duckdb_promote_alias "$DUCKDB_CONFIG_STATIC_STAGE" "$DUCKDB_CONFIG_STATIC_FINAL"; then
       pdo_duckdb_cleanup_staged_aliases

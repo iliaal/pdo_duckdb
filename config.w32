@@ -18,6 +18,22 @@ if (PHP_PDO_DUCKDB != "no") {
 	if (CHECK_HEADER_ADD_INCLUDE("duckdb.h", "CFLAGS_PDO_DUCKDB", header_search) &&
 		version_header_ok &&
 		CHECK_LIB("duckdb.lib", "pdo_duckdb", lib_search)) {
+		var have_tz_ns = (PHP_PDO_DUCKDB == "yes")
+			? GREP_HEADER("duckdb.h", "DUCKDB_TYPE_TIMESTAMP_TZ_NS", null)
+			: GREP_HEADER("duckdb.h", "DUCKDB_TYPE_TIMESTAMP_TZ_NS", PHP_PDO_DUCKDB) ||
+				GREP_HEADER("duckdb.h", "DUCKDB_TYPE_TIMESTAMP_TZ_NS", PHP_PDO_DUCKDB + "\\include");
+		var v2_regex = "#define\\s+DUCKDB_V2_API_VERSION_MAJOR\\s+[2-9]";
+		var have_v2 = (PHP_PDO_DUCKDB == "yes")
+			? GREP_HEADER("duckdb_v2.h", v2_regex, null)
+			: GREP_HEADER("duckdb_v2.h", v2_regex, PHP_PDO_DUCKDB) ||
+				GREP_HEADER("duckdb_v2.h", v2_regex, PHP_PDO_DUCKDB + "\\include");
+		AC_DEFINE("HAVE_DECL_DUCKDB_TYPE_TIMESTAMP_TZ_NS", have_tz_ns ? 1 : 0);
+		if (have_v2) {
+			if (!have_tz_ns) {
+				ERROR("duckdb_v2.h is DuckDB 2.0 but duckdb.h lacks DUCKDB_TYPE_TIMESTAMP_TZ_NS; the DuckDB headers come from different releases");
+			}
+			AC_DEFINE("HAVE_DUCKDB_V2", 1, "Whether the DuckDB 2.0 C API headers are available");
+		}
 		EXTENSION("pdo_duckdb", "pdo_duckdb.c duckdb_driver.c duckdb_statement.c duckdb_appender.c");
 		ADD_EXTENSION_DEP("pdo_duckdb", "pdo");
 	} else {

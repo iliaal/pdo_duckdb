@@ -107,6 +107,9 @@ PHP_MINFO_FUNCTION(pdo_duckdb)
 	php_info_print_table_start();
 	php_info_print_table_row(2, "PDO Driver for DuckDB", "enabled");
 	php_info_print_table_row(2, "DuckDB Library", duckdb_library_version());
+#ifdef HAVE_DUCKDB_V2
+	php_info_print_table_row(2, "DuckDB 2.0 headers", "yes");
+#endif
 	php_info_print_table_end();
 }
 /* }}} */

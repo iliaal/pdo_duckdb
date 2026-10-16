@@ -364,6 +364,65 @@ jobs:
           export NO_INTERACTION=1
           php run-tests.php --show-diff -g FAIL,BORK,LEAK,XLEAK tests/
 
+  duckdb-preview:
+    name: DuckDB 2.0 preview - PHP 8.4
+    runs-on: ubuntu-latest
+    env:
+      # The staged/v2.0-cyanoptera pointer is mutable; pin the per-commit
+      # staging path and its hash, and fail closed on a mismatch.
+      DUCKDB_PREVIEW_URL: 'https://duckdb-staging.duckdb.org/b15358c371/v2.0.0-alpha46057/duckdb/duckdb/github_release/duckdb-shared-libs-linux-amd64.tar.gz'
+      DUCKDB_PREVIEW_SHA256: '09d74f9dc26b481c1a61db99d490d141cec037e01a6bb34b668e13e82184fcab'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
+        with:
+          php-version: '8.4'
+          tools: phpize, php-config
+          coverage: none
+
+      - name: Download DuckDB 2.0 preview
+        run: |
+          curl -fsSL -o /tmp/libduckdb.tar.gz "${DUCKDB_PREVIEW_URL}"
+          echo "${DUCKDB_PREVIEW_SHA256}  /tmp/libduckdb.tar.gz" | sha256sum --check --strict
+          mkdir -p duckdb/include duckdb/lib raw
+          tar -xzf /tmp/libduckdb.tar.gz -C raw
+          cp raw/*.h duckdb/include/
+          cp raw/libduckdb.so duckdb/lib/
+
+      - name: Build against DuckDB 2.0 preview
+        shell: bash
+        run: |
+          phpize
+          ./configure --with-pdo-duckdb="$PWD/duckdb" --enable-pdo-duckdb-dev
+          if ! grep -qx '#define HAVE_DUCKDB_V2 1' config.h; then
+            echo "::error::configure did not detect the DuckDB 2.0 headers"
+            exit 1
+          fi
+          make -j"$(nproc)" 2>&1 | tee "$RUNNER_TEMP/build.log"
+          if grep -q 'warning:' "$RUNNER_TEMP/build.log"; then
+            echo "::error::Build produced warnings"
+            exit 1
+          fi
+
+      - name: Run full suite against DuckDB 2.0 preview
+        run: |
+          export LD_LIBRARY_PATH="$PWD/duckdb/lib"
+          TEST_PHP_EXECUTABLE="$(command -v php)"
+          export TEST_PHP_EXECUTABLE
+          export TEST_PHP_ARGS="-d extension=$PWD/modules/pdo_duckdb.so"
+          export NO_INTERACTION=1
+          # shellcheck disable=SC2016
+          php -d "extension=$PWD/modules/pdo_duckdb.so" -r '
+            $v = (new PDO("duckdb::memory:"))->query("SELECT version()")->fetchColumn();
+            echo $v, "\n";
+            exit(str_starts_with($v, "v2.") ? 0 : 1);
+          '
+          php run-tests.php --show-diff -g FAIL,BORK,LEAK,XLEAK tests/
+
   portable-integers:
     name: Portable integer renderers - PHP 8.4
     runs-on: ubuntu-latest
