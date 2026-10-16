@@ -28,6 +28,7 @@ foreach ($stmt as $row) {
 - For a source build only: DuckDB 1.5.3 or newer (`libduckdb` + `duckdb.h`),
   available as a prebuilt bundle from the [DuckDB installation page](https://duckdb.org/docs/installation/)
   or via your package manager. Prebuilt installs (below) need nothing else.
+  Source builds against the DuckDB 2.0 preview also work; see [DuckDB 2.0](#duckdb-20).
 
 ## 🚀 Installation
 
@@ -62,6 +63,18 @@ Then enable it in `php.ini` (after `pdo`):
 ```ini
 extension=pdo_duckdb
 ```
+
+To build against the DuckDB 2.0 preview, see [DuckDB 2.0](#duckdb-20).
+
+### Other DuckDB PDO drivers
+
+[thomas-0816/pdo-duckdb-php](https://github.com/thomas-0816/pdo-duckdb-php) is
+a separate driver that uses the same extension name (`pdo_duckdb`), PDO driver
+name (`duckdb`), and constant names. Install only one of them. The constants
+have different values: this driver defines `PDO::DUCKDB_ATTR_CONFIG` as 1000
+and `PDO::DUCKDB_ATTR_UNBUFFERED` as 1001, and the other driver swaps them. If
+you switch drivers, refer to the attributes by constant name, never by integer
+value.
 
 ## DSN
 
@@ -214,7 +227,9 @@ $profile = $db->duckdbLastProfile();
 ```
 
 Profiling metric values are strings, or PHP `null` when DuckDB reports a SQL NULL
-for that metric; cast the numeric strings as needed.
+for that metric; cast the numeric strings as needed. DuckDB defines the metric
+names and the tree layout, and DuckDB 2.0 reshapes both (see
+[DuckDB 2.0](#duckdb-20)).
 
 ## 🧩 DuckDB extensions
 
@@ -361,14 +376,136 @@ through DuckDB's pending-result API:
 $db->setAttribute(PDO::DUCKDB_ATTR_UNBUFFERED, true);
 ```
 
-The driver doesn't limit you to one active stream. With the tested DuckDB C
-API, another statement can run while an unbuffered result is partially
-consumed, and the first result can continue afterward. To release the native
-result early, call `PDOStatement::closeCursor()`.
+An unbuffered result needs the connection to itself until you finish reading
+it. Preparing or running another statement on the same connection, including
+`prepare()`, `query()`, and `exec()`, makes DuckDB abort the partially read
+result. Rows from the chunk already fetched (up to 2048) stay readable, and the
+fetch after them throws a `PDOException` (driver code 5, `Attempting to execute
+an unsuccessful or closed ... result`), even when the result had no more rows.
+This applies to DuckDB 1.5 and 2.0. If you need to interleave queries, read the
+stream to the end first, use a buffered result, or open a second connection.
+After an abort, call `PDOStatement::closeCursor()` and `execute()` again to
+rerun the query. To release the native result early, call `closeCursor()`.
 
 Persistent connections reset `DUCKDB_ATTR_UNBUFFERED` to false on every
 checkout (`check_liveness`). Pass it again in the constructor options, or call
 `setAttribute` after each `new PDO(..., [PDO::ATTR_PERSISTENT => true])`.
+
+## DuckDB 2.0
+
+DuckDB 2.0 is in preview. The prebuilt binaries use DuckDB 1.5.x, and a build
+against DuckDB 1.5.x behaves as before. You can build the driver against the
+2.0 preview C library to test your application. The notes in this section were
+checked against `v2.0.0-alpha46057`, and later previews can change them.
+
+### Build against the preview
+
+Download the `duckdb-shared-libs-<platform>.tar.gz` bundle from the
+[DuckDB preview install page](https://duckdb.org/install/preview.html). Put
+every header from the bundle in `include/`, put the shared library in `lib/`,
+and point `configure` at that prefix:
+
+```sh
+./configure --with-pdo-duckdb=/opt/duckdb-2.0
+```
+
+DuckDB 2.0 still reports C API version 1.5.6 in `duckdb.h`, so `configure`
+detects 2.0 from `duckdb_v2.h` in the same directory as `duckdb.h`:
+
+- If `duckdb_v2.h` is missing, `configure` prints a warning and builds without
+  the DuckDB 2.0 code paths. Copy the full header set to fix it.
+- If the headers are 2.0 but `libduckdb` is older, `configure` stops with an
+  error.
+
+A 2.0 build reports `DuckDB 2.0 headers => yes` in `phpinfo()`.
+
+### Storage version
+
+By default DuckDB 2.0 writes database files that DuckDB 1.5 can't open:
+
+```text
+IO Error: Trying to read a database file with version number 69, but we can only read versions between 64 and 68.
+```
+
+If DuckDB 1.5 must also read a file, set `storage_compatibility_version` when
+you open it, in the DSN or in `PDO::DUCKDB_ATTR_CONFIG`:
+
+```php
+$db = new PDO('duckdb:/data/shared.duckdb;storage_compatibility_version=v1.5.6');
+
+$db = new PDO('duckdb:/data/shared.duckdb', null, null, [
+    PDO::DUCKDB_ATTR_CONFIG => ['storage_compatibility_version' => 'v1.5.6'],
+]);
+```
+
+To write one attached database in the older format, pass `STORAGE_VERSION` to
+`ATTACH`:
+
+```php
+$db->exec("ATTACH '/data/export.duckdb' AS export (STORAGE_VERSION 'v1.5.6')");
+```
+
+To check the format of an open database, read its `storage_version` tag. It
+reports `v2.0.0+` for the 2.0 format. DuckDB 1.5 can open a file with an older
+tag, such as `v1.5.0+`:
+
+```sql
+SELECT database_name, tags['storage_version'] FROM duckdb_databases();
+```
+
+### SQL behaviour changes
+
+These changes come from DuckDB itself. Each one has a setting that restores
+the 1.5 behaviour, which you can pass in the DSN tail or
+`PDO::DUCKDB_ATTR_CONFIG`. Under `open_basedir` the driver locks the
+configuration, so set them when you connect.
+
+- **Errors abort the transaction.** Inside `beginTransaction()`, any failed
+  statement, including a parser or catalog error, aborts the transaction.
+  Every later statement fails with `TransactionContext Error: Current
+  transaction is aborted (please ROLLBACK)`. DuckDB 1.5 keeps the transaction
+  open after parser and catalog errors, and aborts it on execution errors
+  such as a constraint violation. In both versions,
+  `commit()` on an aborted transaction returns `true` and keeps nothing, so
+  call `rollBack()` after a failed statement. To keep parser and catalog errors
+  from aborting, set
+  `default_transaction_invalidation_policy=SYNTACTIC_ERRORS_DO_NOT_INVALIDATE`.
+- **Integer division by zero throws.** `1 // 0` and `1 % 0` raise `Invalid
+  Input Error: Division by zero` instead of returning `NULL`. `1 / 0` still
+  returns `INF`. To return `NULL`, wrap the expression in `TRY(...)` or set
+  `error_on_division_by_zero=false`.
+- **Single-arrow lambdas are rejected.** `list_transform(l, x -> x + 1)` raises
+  `Binder Error: Deprecated lambda arrow (->) detected`. Write
+  `lambda x: x + 1`, which also works on 1.5, or set
+  `lambda_syntax=ENABLE_SINGLE_ARROW`. DuckDB plans to remove that setting.
+- **New default parser.** Parser error messages point at a different token, for
+  example `syntax error at or near "1"` instead of `"SELEC"` for `SELEC 1`. If
+  your code matches parser error text, set `enable_legacy_parser=true`. That
+  setting loads the downloadable `legacy_parser` extension, so it isn't
+  available under `open_basedir`.
+
+### New SQL features
+
+- **Triggers.** `CREATE TRIGGER` runs through `exec()`. `rowCount()` and the
+  `exec()` return value count only the rows of the statement you ran, not the
+  rows its triggers write. A `FOR EACH ROW` trigger body must reference `NEW` or
+  `OLD`.
+- **VARIANT and JSON.** `variant_*` and `json_*` functions work in plain SQL,
+  for example `variant_extract(v, 'a')::INTEGER`. Fetching a non-NULL `VARIANT`
+  value still reports a PDO error, as on 1.5; cast it to a concrete type in
+  the query.
+
+### Driver differences
+
+- **Profiling.** `duckdbLastProfile()` keeps its `['metrics' => …, 'children' =>
+  …]` shape, but DuckDB 2.0 fills it differently. The root `metrics` array is
+  empty, and the root has one child per category. The operator tree child has
+  lower-case keys (`type`, `timing`, `extra_info`), and the query text moves to
+  the `sql` key of another child. Find metrics by key instead of by position.
+- **Unbuffered errors.** With `PDO::DUCKDB_ATTR_UNBUFFERED`, DuckDB 2.0
+  reports some execution errors, such as a failed cast of a bound value, from
+  the first fetch instead of from `execute()`. Wrap the fetch loop, not only
+  `execute()`, in your error handling.
 
 ## Errors and exceptions
 
