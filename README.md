@@ -329,9 +329,12 @@ it first checks the loaded extensions. If any extension outside `autocomplete`,
 `sqlite_scanner`, or `postgres_scanner`), every later SQL call on that
 connection fails with driver code 4, and the message names the extensions. The
 driver also stops the connection's `quack` listeners. A reused persistent
-connection is replaced by a new connection that's sandboxed when it opens. If
-you need one of those extensions, load it only on connections that never run
-under a tightened `open_basedir`.
+connection is replaced by a new connection that's sandboxed when it opens. On
+PHP releases before 8.4.26 and 8.5.11 (including every 8.1–8.3 release), PDO
+core leaks the discarded persistent handle's bookkeeping (191 to 223 bytes in
+local leak-checked runs) on each replacement; the driver doesn't control that
+path. If you need one of those extensions, load it only on connections that
+never run under a tightened `open_basedir`.
 
 Locking the configuration blocks *every* later `SET`, including settings with
 no security impact (`threads`, `memory_limit`, `preserve_insertion_order`,

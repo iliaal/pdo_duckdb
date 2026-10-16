@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-10-16
+
 ### Security
 
 - Keep an unclosed `Pdo\Duckdb\Appender` from reading its PDO connection after
@@ -439,7 +441,8 @@ Initial release. A PDO driver for DuckDB.
   table/schema names are rejected, rather than silently truncating the statement
   or identifier at the NUL.
 
-[Unreleased]: https://github.com/iliaal/pdo_duckdb/compare/0.7.1...HEAD
+[Unreleased]: https://github.com/iliaal/pdo_duckdb/compare/0.8.0...HEAD
+[0.8.0]: https://github.com/iliaal/pdo_duckdb/releases/tag/0.8.0
 [0.7.1]: https://github.com/iliaal/pdo_duckdb/releases/tag/0.7.1
 [0.7.0]: https://github.com/iliaal/pdo_duckdb/releases/tag/0.7.0
 [0.6.0]: https://github.com/iliaal/pdo_duckdb/releases/tag/0.6.0

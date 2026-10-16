@@ -16,7 +16,7 @@
 extern zend_module_entry pdo_duckdb_module_entry;
 #define phpext_pdo_duckdb_ptr &pdo_duckdb_module_entry
 
-#define PHP_PDO_DUCKDB_VERSION "0.7.1"
+#define PHP_PDO_DUCKDB_VERSION "0.8.0"
 
 #ifdef ZTS
 #include "TSRM.h"
