@@ -595,7 +595,9 @@ example on a table column, it invalidates the whole database: every later
 statement, even `SELECT 1`, fails with `FATAL Error: Failed: database has been
 invalidated because of a previous fatal error` until you open the database
 again. The database stays usable only when DuckDB evaluates the cast before it
-runs the query, as it does when the input is a constant or a bound parameter.
+runs the query, which happens only when the cast's input is built from
+constants and bound parameters alone; any column reference in the input
+puts the database at risk.
 The driver's own fetch of these values is correct, so fetch the column instead
 of casting it.
 
