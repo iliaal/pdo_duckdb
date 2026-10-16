@@ -10,7 +10,7 @@ if (!pdo_duckdb_v2_headers()) die('skip needs a build against the DuckDB 2.0 hea
 ?>
 --FILE--
 <?php
-$dir = sys_get_temp_dir() . '/pdo_duckdb_121';
+$dir = sys_get_temp_dir() . '/pdo_duckdb_121_' . md5(__DIR__);
 foreach (glob("$dir/*") ?: [] as $f) {
     @unlink($f);
 }
@@ -62,7 +62,7 @@ try {
 ?>
 --CLEAN--
 <?php
-$dir = sys_get_temp_dir() . '/pdo_duckdb_121';
+$dir = sys_get_temp_dir() . '/pdo_duckdb_121_' . md5(__DIR__);
 foreach (glob("$dir/*") ?: [] as $f) {
     @unlink($f);
 }

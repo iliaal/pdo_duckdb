@@ -5,7 +5,7 @@ pdo
 pdo_duckdb
 --FILE--
 <?php
-// Bead pdd-roi (planned active-stream guard) will change this to an error at the second statement.
+// A planned active-stream guard will change this to an error at the second statement.
 $db = new PDO('duckdb::memory:', null, null, [
     PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
     PDO::DUCKDB_ATTR_UNBUFFERED => true,

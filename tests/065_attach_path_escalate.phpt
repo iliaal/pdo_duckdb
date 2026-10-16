@@ -5,7 +5,7 @@ pdo
 pdo_duckdb
 --FILE--
 <?php
-$dir = sys_get_temp_dir() . '/pdo_duckdb_065_oob';
+$dir = sys_get_temp_dir() . '/pdo_duckdb_065_oob_' . md5(__DIR__);
 foreach (glob("$dir/*") ?: [] as $f) {
     @unlink($f);
 }
@@ -40,7 +40,7 @@ var_dump((int)$db->query('SELECT 3')->fetchColumn());
 ?>
 --CLEAN--
 <?php
-$dir = sys_get_temp_dir() . '/pdo_duckdb_065_oob';
+$dir = sys_get_temp_dir() . '/pdo_duckdb_065_oob_' . md5(__DIR__);
 foreach (glob("$dir/*") ?: [] as $f) {
     @unlink($f);
 }

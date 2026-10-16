@@ -8,7 +8,7 @@ pdo_duckdb
 // DuckDB EnableExternalAccessSetting::OnSet re-adds temporary_directory to
 // allowed_directories when external access is turned off. The driver must
 // clear temp_directory (to empty, not the basedir root) before that flip.
-$outside = sys_get_temp_dir() . '/pdo_duckdb_063_oob';
+$outside = sys_get_temp_dir() . '/pdo_duckdb_063_oob_' . md5(__DIR__);
 foreach (glob("$outside/*") ?: [] as $f) {
     @unlink($f);
 }
@@ -41,7 +41,7 @@ var_dump((int)$db->query('SELECT 7')->fetchColumn());
 ?>
 --CLEAN--
 <?php
-$dir = sys_get_temp_dir() . '/pdo_duckdb_063_oob';
+$dir = sys_get_temp_dir() . '/pdo_duckdb_063_oob_' . md5(__DIR__);
 foreach (glob("$dir/*") ?: [] as $f) {
     @unlink($f);
 }
