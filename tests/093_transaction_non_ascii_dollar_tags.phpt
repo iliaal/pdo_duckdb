@@ -5,6 +5,7 @@ pdo
 pdo_duckdb
 --FILE--
 <?php
+require __DIR__ . '/duckdb_v2.inc';
 $db = new PDO('duckdb::memory:', null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
 $tag = "\x24\xc3\xa9\x24";
 $numericTag = "\x24tag1\x24";
@@ -19,8 +20,29 @@ foreach ([
 }
 
 $rawTag = "\x24\x80\x24";
-echo 'raw=', $db->exec("BEGIN;SELECT {$rawTag};{$rawTag};ROLLBACK"), "\n";
-echo 'raw state=', $db->inTransaction() ? 'active' : 'idle', "\n";
+if (pdo_duckdb_v2_headers()) {
+    // DuckDB 2.0 rejects invalid UTF-8 in the query text before running any
+    // statement of the batch, so no transaction may be left open.
+    try {
+        $db->exec("BEGIN;SELECT {$rawTag};{$rawTag};ROLLBACK");
+        echo "raw=BAD: invalid UTF-8 accepted\n";
+    } catch (PDOException $e) {
+        echo 'raw=', str_contains($e->getMessage(), 'Parser Error: Invalid UTF-8 in query') ? 'ok' : 'BAD: ' . $e->getMessage(), "\n";
+    }
+    echo 'raw state=', $db->inTransaction() ? 'active' : 'idle', "\n";
+    try {
+        $db->exec('COMMIT');
+        echo "BAD: DuckDB transaction left open\n";
+    } catch (PDOException $e) {
+        if (!str_contains($e->getMessage(), 'no transaction is active')) {
+            echo 'BAD: ', $e->getMessage(), "\n";
+        }
+    }
+} else {
+    $raw = $db->exec("BEGIN;SELECT {$rawTag};{$rawTag};ROLLBACK");
+    echo 'raw=', $raw === 0 ? 'ok' : var_export($raw, true), "\n";
+    echo 'raw state=', $db->inTransaction() ? 'active' : 'idle', "\n";
+}
 try {
     $db->exec('BEGIN;SELECT $1$;ROLLBACK');
     echo "digit_first=accepted\n";
@@ -36,7 +58,7 @@ body=0
 body state=idle
 numeric=0
 numeric state=idle
-raw=0
+raw=ok
 raw state=idle
 digit_first=parser
 single=value;body

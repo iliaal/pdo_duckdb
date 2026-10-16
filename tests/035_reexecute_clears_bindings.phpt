@@ -5,6 +5,7 @@ pdo
 pdo_duckdb
 --FILE--
 <?php
+require __DIR__ . '/duckdb_v2.inc';
 function connect() {
     return PHP_VERSION_ID >= 80400 ? PDO::connect('duckdb::memory:') : new PDO('duckdb::memory:');
 }
@@ -24,7 +25,10 @@ try {
     $st->execute([':a' => 'second']);
     echo "BAD: reused stale binding: " . $st->fetchColumn() . "\n";
 } catch (\PDOException $e) {
-    var_dump(str_contains($e->getMessage(), 'Values were not provided for the following prepared statement parameters: 2'));
+    // DuckDB 2.0 shortened the engine's message.
+    var_dump(str_contains($e->getMessage(), pdo_duckdb_v2_headers()
+        ? 'Values were not provided for the following parameters: 2'
+        : 'Values were not provided for the following prepared statement parameters: 2'));
 }
 
 // A failed re-execute leaves no row behind: fetch() is false, and the
