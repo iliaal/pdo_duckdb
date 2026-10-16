@@ -1078,6 +1078,10 @@ static const char *const pdo_duckdb_profile_post_detach[] = {
 	"SET allow_unsigned_extensions=false",
 	"SET enable_external_file_cache=false",
 	"SET enable_http_metadata_cache=false",
+#ifdef HAVE_DUCKDB_V2
+	/* 'forbidden' also distrusts repositories created before the tightening. */
+	"SET allow_extension_repositories='forbidden'",
+#endif
 	"SET enable_external_access=false",
 	"SET lock_configuration=true",
 };
@@ -1543,6 +1547,10 @@ static bool pdo_duckdb_sandbox_forbids_config_key(const char *key, size_t key_le
 		PDO_DUCKDB_CONFIG_KEY_MATCHES(key, key_len, "home_directory") ||
 		PDO_DUCKDB_CONFIG_KEY_MATCHES(key, key_len, "http_logging_output") ||
 		PDO_DUCKDB_CONFIG_KEY_MATCHES(key, key_len, "log_query_path") ||
+#ifdef HAVE_DUCKDB_V2
+		PDO_DUCKDB_CONFIG_KEY_MATCHES(key, key_len, "allow_extension_repositories") ||
+		PDO_DUCKDB_CONFIG_KEY_MATCHES(key, key_len, "extension_repository_directory") ||
+#endif
 		PDO_DUCKDB_CONFIG_KEY_MATCHES(key, key_len, "secret_directory");
 }
 
@@ -1582,6 +1590,9 @@ static bool pdo_duckdb_apply_sandbox_config(pdo_dbh_t *dbh, duckdb_config *confi
 		{"allow_unsigned_extensions", "false"},
 		{"enable_external_file_cache", "false"},
 		{"enable_http_metadata_cache", "false"},
+#ifdef HAVE_DUCKDB_V2
+		{"allow_extension_repositories", "forbidden"},
+#endif
 	};
 	size_t i;
 
