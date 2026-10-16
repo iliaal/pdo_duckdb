@@ -674,7 +674,7 @@ static zend_long pdo_duckdb_exec_transaction_multi(pdo_dbh_t *dbh,
 
 	for (i = 0; i < count; i++) {
 		duckdb_prepared_statement prepared = NULL;
-		duckdb_result result;
+		duckdb_result result = {0};
 
 		if (duckdb_prepare_extracted_statement(H->conn, extracted, i, &prepared) != DuckDBSuccess) {
 			pdo_duckdb_error_code(dbh, PDO_DUCKDB_ERRCODE_SYNTAX, prepared ? duckdb_prepare_error(prepared) : "Unable to prepare DuckDB statement");
@@ -699,7 +699,7 @@ static zend_long pdo_duckdb_exec_transaction_multi(pdo_dbh_t *dbh,
 static zend_long duckdb_handle_doer(pdo_dbh_t *dbh, const zend_string *sql)
 {
 	pdo_duckdb_db_handle *H = (pdo_duckdb_db_handle *)dbh->driver_data;
-	duckdb_result result;
+	duckdb_result result = {0};
 	zend_long changed;
 	unsigned int transaction_flags;
 	pdo_duckdb_transaction_effect transaction_effect = PDO_DUCKDB_TRANSACTION_NONE;
@@ -804,7 +804,7 @@ static zend_string *duckdb_handle_quoter(pdo_dbh_t *dbh, const zend_string *unqu
 static bool duckdb_simple_exec(pdo_dbh_t *dbh, const char *sql)
 {
 	pdo_duckdb_db_handle *H = (pdo_duckdb_db_handle *)dbh->driver_data;
-	duckdb_result result;
+	duckdb_result result = {0};
 
 	if (!pdo_duckdb_enforce_sandbox(H)) {
 		pdo_duckdb_error_code(dbh, PDO_DUCKDB_ERRCODE_SANDBOX, "Unable to apply the open_basedir sandbox profile to DuckDB");
@@ -896,7 +896,7 @@ static bool pdo_duckdb_set_attr(pdo_dbh_t *dbh, zend_long attr, zval *val)
 
 static bool pdo_duckdb_query_ok(duckdb_connection conn, const char *sql)
 {
-	duckdb_result res;
+	duckdb_result res = {0};
 
 	if (duckdb_query(conn, sql, &res) != DuckDBSuccess) {
 		duckdb_destroy_result(&res);
@@ -911,7 +911,7 @@ static bool pdo_duckdb_query_ok(duckdb_connection conn, const char *sql)
  * disabled; those entries cannot be cleared afterward. */
 static bool pdo_duckdb_detach_out_of_basedir(pdo_duckdb_db_handle *H)
 {
-	duckdb_result res;
+	duckdb_result res = {0};
 	idx_t rows, i;
 	bool ok = true;
 
@@ -1061,7 +1061,7 @@ static const char *const pdo_duckdb_liveness_httpfs_resets[] = {
  * itself failed (a sick connection, not an unloaded extension). */
 static int pdo_duckdb_httpfs_loaded_state(duckdb_connection conn)
 {
-	duckdb_result res;
+	duckdb_result res = {0};
 	idx_t rows;
 
 	if (duckdb_query(conn,

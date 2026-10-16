@@ -208,7 +208,7 @@ static duckdb_prepared_statement pdo_duckdb_appender_prepare_probe(duckdb_connec
 /* On failure stores an emalloc'd detail in *errp. */
 static bool pdo_duckdb_appender_probe_value(duckdb_prepared_statement probe, zval *v, char **errp)
 {
-	duckdb_result res;
+	duckdb_result res = {0};
 	duckdb_state bst;
 
 	*errp = NULL;
