@@ -2495,7 +2495,9 @@ static int pdo_duckdb_stmt_param_hook(pdo_stmt_t *stmt, struct pdo_bound_param_d
 		S->binds_cleared = true;
 	}
 
-	idx = (idx_t)(param->paramno + 1);
+	/* paramno is in [0, ZEND_LONG_MAX] here; widen before the increment so
+	 * ZEND_LONG_MAX maps to an index DuckDB rejects instead of overflowing. */
+	idx = (idx_t)param->paramno + 1;
 
 	if (Z_ISREF(param->parameter)) {
 		parameter = Z_REFVAL(param->parameter);
