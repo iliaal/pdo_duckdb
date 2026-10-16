@@ -1682,6 +1682,20 @@ static void pdo_duckdb_table_names_impl(INTERNAL_FUNCTION_PARAMETERS)
 
 	list = duckdb_get_table_names(H->conn, ZSTR_VAL(query), qualified);
 	if (!list) {
+		/* duckdb_get_table_names() returns NULL both for genuine parse/bind
+		 * failures and for statement types with no extractable table names
+		 * (e.g. UPDATE/DELETE/MERGE). Use prepare() as a discriminator: a
+		 * query that prepares fine is valid SQL with nothing to extract,
+		 * which the documented contract maps to []. */
+		duckdb_prepared_statement probe = NULL;
+		if (duckdb_prepare(H->conn, ZSTR_VAL(query), &probe) == DuckDBSuccess) {
+			duckdb_destroy_prepare(&probe);
+			array_init(return_value);
+			return;
+		}
+		if (probe) {
+			duckdb_destroy_prepare(&probe);
+		}
 		/* NULL means the query did not parse. get_table_names exposes no error
 		 * detail; prepare() the query for the specific message. */
 		zend_throw_exception_ex(php_pdo_get_exception(), PDO_DUCKDB_ERRCODE_SYNTAX,
