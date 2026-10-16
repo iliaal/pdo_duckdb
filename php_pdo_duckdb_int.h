@@ -77,6 +77,11 @@ typedef struct {
 	/* Mirrors dbh->is_persistent for sandbox_basedir allocation; the sandbox
 	 * helpers only see H. */
 	bool persistent;
+	/* Latched when the sandbox profile cannot contain this instance (a loaded
+	 * extension it does not govern, or no extension list). Every later SQL
+	 * entry point refuses, with sandbox_refusal as the reason. */
+	bool sandbox_refused;
+	char sandbox_refusal[256];
 	/* PDO::DUCKDB_ATTR_UNBUFFERED */
 	bool unbuffered;
 	/* PDO core re-applies constructor driver_options through set_attribute()
@@ -182,6 +187,9 @@ void pdo_duckdb_tls_caches_shutdown(void);
  * opened before open_basedir was tightened. Returns false if the sandbox is
  * required but could not be applied. */
 bool pdo_duckdb_enforce_sandbox(pdo_duckdb_db_handle *H);
+
+/* Error text for a failed pdo_duckdb_enforce_sandbox(). */
+const char *pdo_duckdb_sandbox_error(const pdo_duckdb_db_handle *H);
 
 /* Keep PDO's transaction flag aligned when SQL executes transaction control
  * outside beginTransaction()/commit()/rollBack(). */

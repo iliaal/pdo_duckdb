@@ -217,7 +217,7 @@ static bool duckdb_handle_preparer(pdo_dbh_t *dbh, zend_string *sql, pdo_stmt_t 
 		ZSTR_VAL(sql), ZSTR_LEN(sql));
 
 	if (!pdo_duckdb_enforce_sandbox(H)) {
-		pdo_duckdb_error_code(dbh, PDO_DUCKDB_ERRCODE_SANDBOX, "Unable to apply the open_basedir sandbox profile to DuckDB");
+		pdo_duckdb_error_code(dbh, PDO_DUCKDB_ERRCODE_SANDBOX, pdo_duckdb_sandbox_error(H));
 		return false;
 	}
 
@@ -722,7 +722,7 @@ static zend_long duckdb_handle_doer(pdo_dbh_t *dbh, const zend_string *sql)
 	}
 
 	if (!pdo_duckdb_enforce_sandbox(H)) {
-		pdo_duckdb_error_code(dbh, PDO_DUCKDB_ERRCODE_SANDBOX, "Unable to apply the open_basedir sandbox profile to DuckDB");
+		pdo_duckdb_error_code(dbh, PDO_DUCKDB_ERRCODE_SANDBOX, pdo_duckdb_sandbox_error(H));
 		return -1;
 	}
 
@@ -808,7 +808,7 @@ static bool duckdb_simple_exec(pdo_dbh_t *dbh, const char *sql)
 	duckdb_result result = {0};
 
 	if (!pdo_duckdb_enforce_sandbox(H)) {
-		pdo_duckdb_error_code(dbh, PDO_DUCKDB_ERRCODE_SANDBOX, "Unable to apply the open_basedir sandbox profile to DuckDB");
+		pdo_duckdb_error_code(dbh, PDO_DUCKDB_ERRCODE_SANDBOX, pdo_duckdb_sandbox_error(H));
 		return false;
 	}
 
@@ -973,8 +973,179 @@ static bool pdo_duckdb_detach_out_of_basedir(pdo_duckdb_db_handle *H)
 	return ok;
 }
 
+/* Empty temp before the flip: a non-empty temp_directory is re-allowlisted by
+ * DuckDB OnSet and cannot be cleared afterward (do not seed basedir root). */
+static const char *const pdo_duckdb_profile_pre_detach[] = {
+	"SET log_query_path=''",
+	"SET profiling_output=''",
+	"SET allowed_configs = []",
+	"SET temp_directory=''",
+};
+
+static const char *const pdo_duckdb_profile_post_detach[] = {
+	"SET allowed_directories = []",
+	"SET allowed_paths = []",
+	"SET autoinstall_known_extensions=false",
+	"SET autoload_known_extensions=false",
+	"SET allow_community_extensions=false",
+	"SET allow_extensions_metadata_mismatch=false",
+	"SET allow_persistent_secrets=false",
+	"SET allow_unredacted_secrets=false",
+	"SET allow_unsigned_extensions=false",
+	"SET enable_external_file_cache=false",
+	"SET enable_http_metadata_cache=false",
+	"SET enable_external_access=false",
+	"SET lock_configuration=true",
+};
+
+/* Extensions whose file and network access goes through DuckDB's file system
+ * layer, which enable_external_access=false denies (httpfs, spatial), or that do
+ * no I/O of their own (the libduckdb built-ins). Any other loaded extension may
+ * open sockets or listeners directly: quack serves and attaches remote DuckDBs
+ * regardless of the profile. Unknown extensions are refused, not trusted. */
+#define PDO_DUCKDB_SANDBOX_CONTAINED_EXTENSIONS \
+	"'autocomplete', 'core_functions', 'httpfs', 'icu', 'json', 'parquet', 'spatial'"
+
+static void pdo_duckdb_refuse_sandbox(pdo_duckdb_db_handle *H, const char *reason)
+{
+	H->sandbox_refused = true;
+	snprintf(H->sandbox_refusal, sizeof(H->sandbox_refusal),
+		"Unable to apply the open_basedir sandbox profile to DuckDB: %s; "
+		"the connection refuses further SQL", reason);
+}
+
+/* Must run while external access is still on: duckdb_extensions() lists the
+ * extension directory, which the profile denies. Returns false (refusal
+ * latched) if an uncontained extension is loaded or the list is unavailable;
+ * *quack_loaded reports whether listeners may need stopping. */
+static bool pdo_duckdb_check_loaded_extensions(pdo_duckdb_db_handle *H, duckdb_connection conn, bool *quack_loaded)
+{
+	duckdb_result res = {0};
+	smart_str names = {0};
+	idx_t rows, i;
+
+	*quack_loaded = false;
+	if (duckdb_query(conn,
+			"SELECT extension_name FROM duckdb_extensions() WHERE loaded "
+			"AND extension_name NOT IN (" PDO_DUCKDB_SANDBOX_CONTAINED_EXTENSIONS ") "
+			"ORDER BY extension_name",
+			&res) != DuckDBSuccess) {
+		duckdb_destroy_result(&res);
+		pdo_duckdb_refuse_sandbox(H, "the loaded DuckDB extensions could not be listed");
+		return false;
+	}
+
+	rows = duckdb_row_count(&res);
+	for (i = 0; i < rows; i++) {
+		char *name = duckdb_value_varchar(&res, 0, i);
+
+		if (!name) {
+			continue;
+		}
+		if (strcmp(name, "quack") == 0) {
+			*quack_loaded = true;
+		}
+		if (names.s) {
+			smart_str_appends(&names, ", ");
+		}
+		smart_str_appends(&names, name);
+		duckdb_free(name);
+	}
+	duckdb_destroy_result(&res);
+
+	if (rows == 0) {
+		return true;
+	}
+	smart_str_0(&names);
+	{
+		char reason[200];
+
+		snprintf(reason, sizeof(reason),
+			"loaded DuckDB extensions are not contained by it (%s)",
+			names.s ? ZSTR_VAL(names.s) : "unnamed");
+		pdo_duckdb_refuse_sandbox(H, reason);
+	}
+	smart_str_free(&names);
+	return false;
+}
+
+static void pdo_duckdb_stop_quack_listeners(duckdb_connection conn)
+{
+	duckdb_result res = {0};
+	idx_t rows, i;
+
+	if (duckdb_query(conn, "SELECT * FROM quack_server_list()", &res) != DuckDBSuccess) {
+		duckdb_destroy_result(&res);
+		return;
+	}
+	rows = duckdb_row_count(&res);
+	for (i = 0; i < rows; i++) {
+		char *uri = duckdb_value_varchar(&res, 0, i);
+		smart_str sql = {0};
+		const char *p;
+
+		if (!uri) {
+			continue;
+		}
+		smart_str_appends(&sql, "SELECT * FROM quack_stop('");
+		for (p = uri; *p; p++) {
+			if (*p == '\'') {
+				smart_str_appendc(&sql, '\'');
+			}
+			smart_str_appendc(&sql, *p);
+		}
+		smart_str_appends(&sql, "')");
+		smart_str_0(&sql);
+		(void)pdo_duckdb_query_ok(conn, ZSTR_VAL(sql.s));
+		smart_str_free(&sql);
+		duckdb_free(uri);
+	}
+	duckdb_destroy_result(&res);
+}
+
+/* The refused handle never runs user SQL again, but remote clients of a quack
+ * listener on the same instance still can: stop the listeners and lock down
+ * what the profile does govern, ignoring failures. */
+static void pdo_duckdb_contain_refused(duckdb_connection conn, bool quack_loaded)
+{
+	size_t i;
+
+	if (quack_loaded) {
+		pdo_duckdb_stop_quack_listeners(conn);
+	}
+	for (i = 0; i < sizeof(pdo_duckdb_profile_pre_detach) / sizeof(pdo_duckdb_profile_pre_detach[0]); i++) {
+		(void)pdo_duckdb_query_ok(conn, pdo_duckdb_profile_pre_detach[i]);
+	}
+	for (i = 0; i < sizeof(pdo_duckdb_profile_post_detach) / sizeof(pdo_duckdb_profile_post_detach[0]); i++) {
+		(void)pdo_duckdb_query_ok(conn, pdo_duckdb_profile_post_detach[i]);
+	}
+}
+
+/* Runs on a fresh connection to the same instance: loaded extensions and quack
+ * listeners are instance-wide, and a DuckDB 2.0 CONNECT on H->conn would send
+ * H->conn's SQL to the remote database instead. */
+static bool pdo_duckdb_admit_loaded_extensions(pdo_duckdb_db_handle *H)
+{
+	duckdb_connection inspect = NULL;
+	bool quack_loaded = false;
+	bool ok;
+
+	if (duckdb_connect(H->db, &inspect) != DuckDBSuccess) {
+		pdo_duckdb_refuse_sandbox(H, "the loaded DuckDB extensions could not be listed");
+		return false;
+	}
+	ok = pdo_duckdb_check_loaded_extensions(H, inspect, &quack_loaded);
+	if (!ok) {
+		pdo_duckdb_contain_refused(inspect, quack_loaded);
+	}
+	duckdb_disconnect(&inspect);
+	return ok;
+}
+
 /* Disable DuckDB external access (read_csv/COPY/ATTACH/httpfs) on the live
  * connection. Order matters:
+ * 0. Refuse first if a loaded extension escapes the profile; it cannot be
+ *    unloaded, so the profile alone would leave its network access open.
  * 1. Neutralize sticky writers and OnSet re-allowlist inputs (empty temp,
  *    out-of-basedir ATTACHes) while external access is still on.
  * 2. Clear allowlists before flipping enable_external_access: DuckDB refuses
@@ -984,41 +1155,21 @@ static bool pdo_duckdb_detach_out_of_basedir(pdo_duckdb_db_handle *H)
  * 4. lock_configuration last so none of the above can be undone. */
 static bool pdo_duckdb_disable_external_access(pdo_duckdb_db_handle *H)
 {
-	/* Empty temp before the flip: a non-empty temp_directory is re-allowlisted by
-	 * DuckDB OnSet and cannot be cleared afterward (do not seed basedir root). */
-	static const char *const pre_detach[] = {
-		"SET log_query_path=''",
-		"SET profiling_output=''",
-		"SET allowed_configs = []",
-		"SET temp_directory=''",
-	};
-	static const char *const post_detach[] = {
-		"SET allowed_directories = []",
-		"SET allowed_paths = []",
-		"SET autoinstall_known_extensions=false",
-		"SET autoload_known_extensions=false",
-		"SET allow_community_extensions=false",
-		"SET allow_extensions_metadata_mismatch=false",
-		"SET allow_persistent_secrets=false",
-		"SET allow_unredacted_secrets=false",
-		"SET allow_unsigned_extensions=false",
-		"SET enable_external_file_cache=false",
-		"SET enable_http_metadata_cache=false",
-		"SET enable_external_access=false",
-		"SET lock_configuration=true",
-	};
 	size_t i;
 
-	for (i = 0; i < sizeof(pre_detach) / sizeof(pre_detach[0]); i++) {
-		if (!pdo_duckdb_query_ok(H->conn, pre_detach[i])) {
+	if (!pdo_duckdb_admit_loaded_extensions(H)) {
+		return false;
+	}
+	for (i = 0; i < sizeof(pdo_duckdb_profile_pre_detach) / sizeof(pdo_duckdb_profile_pre_detach[0]); i++) {
+		if (!pdo_duckdb_query_ok(H->conn, pdo_duckdb_profile_pre_detach[i])) {
 			return false;
 		}
 	}
 	if (!pdo_duckdb_detach_out_of_basedir(H)) {
 		return false;
 	}
-	for (i = 0; i < sizeof(post_detach) / sizeof(post_detach[0]); i++) {
-		if (!pdo_duckdb_query_ok(H->conn, post_detach[i])) {
+	for (i = 0; i < sizeof(pdo_duckdb_profile_post_detach) / sizeof(pdo_duckdb_profile_post_detach[0]); i++) {
+		if (!pdo_duckdb_query_ok(H->conn, pdo_duckdb_profile_post_detach[i])) {
 			return false;
 		}
 	}
@@ -1031,6 +1182,9 @@ static bool pdo_duckdb_disable_external_access(pdo_duckdb_db_handle *H)
 
 bool pdo_duckdb_enforce_sandbox(pdo_duckdb_db_handle *H)
 {
+	if (H->sandbox_refused) {
+		return false;
+	}
 	if (!(PG(open_basedir) && *PG(open_basedir))) {
 		return true;
 	}
@@ -1040,6 +1194,12 @@ bool pdo_duckdb_enforce_sandbox(pdo_duckdb_db_handle *H)
 	/* Already sandboxed: DuckDB's allowlists are frozen, so they cannot track a
 	 * re-narrowed basedir. Anything but the recorded value fails closed. */
 	return H->sandbox_basedir != NULL && strcmp(PG(open_basedir), H->sandbox_basedir) == 0;
+}
+
+const char *pdo_duckdb_sandbox_error(const pdo_duckdb_db_handle *H)
+{
+	return H->sandbox_refused ? H->sandbox_refusal
+		: "Unable to apply the open_basedir sandbox profile to DuckDB";
 }
 
 /* Persistent handles skip handle_factory on reuse, so PDO calls check_liveness
@@ -1618,7 +1778,7 @@ static int pdo_duckdb_handle_factory(pdo_dbh_t *dbh, zval *driver_options) /* {{
 	/* Full SQL sandbox after connect so allowlists seeded at open (e.g. default
 	 * temp for file DBs) can still be cleared before external access is locked. */
 	if (!pdo_duckdb_enforce_sandbox(H)) {
-		pdo_duckdb_error_code(dbh, PDO_DUCKDB_ERRCODE_SANDBOX, "Unable to apply the open_basedir sandbox profile to DuckDB");
+		pdo_duckdb_error_code(dbh, PDO_DUCKDB_ERRCODE_SANDBOX, pdo_duckdb_sandbox_error(H));
 		goto cleanup;
 	}
 
@@ -1713,7 +1873,8 @@ static void pdo_duckdb_table_names_impl(INTERNAL_FUNCTION_PARAMETERS)
 	/* Catalog binding can touch files even without execution. */
 	if (!pdo_duckdb_enforce_sandbox(H)) {
 		zend_throw_exception_ex(php_pdo_get_exception(), PDO_DUCKDB_ERRCODE_SANDBOX,
-			"PDO::duckdbTableNames(): unable to apply the open_basedir sandbox");
+			"PDO::duckdbTableNames(): %s",
+			H->sandbox_refused ? H->sandbox_refusal : "unable to apply the open_basedir sandbox");
 		RETURN_THROWS();
 	}
 

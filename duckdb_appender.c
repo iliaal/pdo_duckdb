@@ -607,7 +607,8 @@ static void pdo_duckdb_appender_create_impl(INTERNAL_FUNCTION_PARAMETERS)
 
 	if (!pdo_duckdb_enforce_sandbox(H)) {
 		zend_throw_exception_ex(php_pdo_get_exception(), PDO_DUCKDB_ERRCODE_SANDBOX,
-			"PDO::duckdbAppender(): unable to apply the open_basedir sandbox");
+			"PDO::duckdbAppender(): %s",
+			H->sandbox_refused ? H->sandbox_refusal : "unable to apply the open_basedir sandbox");
 		RETURN_THROWS();
 	}
 
@@ -746,7 +747,8 @@ static pdo_duckdb_appender *pdo_duckdb_appender_live(zval *zthis)
 	}
 	if (a->H && !pdo_duckdb_enforce_sandbox(a->H)) {
 		zend_throw_exception_ex(php_pdo_get_exception(), PDO_DUCKDB_ERRCODE_SANDBOX,
-			"Pdo\\Duckdb\\Appender: unable to apply the open_basedir sandbox");
+			"Pdo\\Duckdb\\Appender: %s",
+			a->H->sandbox_refused ? a->H->sandbox_refusal : "unable to apply the open_basedir sandbox");
 		return NULL;
 	}
 	return a;

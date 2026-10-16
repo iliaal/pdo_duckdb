@@ -313,7 +313,7 @@ static int pdo_duckdb_stmt_execute(pdo_stmt_t *stmt)
 	 * duckdb_clear_bindings. */
 	if (!pdo_duckdb_enforce_sandbox(S->H)) {
 		S->binds_cleared = false;
-		pdo_duckdb_error_stmt_code(stmt, PDO_DUCKDB_ERRCODE_SANDBOX, "Unable to apply the open_basedir sandbox profile to DuckDB");
+		pdo_duckdb_error_stmt_code(stmt, PDO_DUCKDB_ERRCODE_SANDBOX, pdo_duckdb_sandbox_error(S->H));
 		return 0;
 	}
 
@@ -2106,7 +2106,7 @@ static int pdo_duckdb_stmt_fetch(pdo_stmt_t *stmt,
 	 * have tightened since execute. Rows served from a loaded chunk touch no
 	 * filesystem, so checking per chunk is enough. */
 	if (!pdo_duckdb_enforce_sandbox(S->H)) {
-		pdo_duckdb_error_stmt_code(stmt, PDO_DUCKDB_ERRCODE_SANDBOX, "Unable to apply the open_basedir sandbox profile to DuckDB");
+		pdo_duckdb_error_stmt_code(stmt, PDO_DUCKDB_ERRCODE_SANDBOX, pdo_duckdb_sandbox_error(S->H));
 		pdo_duckdb_stmt_reset_result_full(stmt);
 		S->done = true;
 		return 0;
