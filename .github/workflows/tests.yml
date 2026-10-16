@@ -542,7 +542,11 @@ jobs:
         run: |
           CFLAGS="-g -O2 -DPDO_DUCKDB_TEST_UNDECODABLE_TYPE=13" \
             ./configure --with-pdo-duckdb="$PWD/duckdb" --enable-pdo-duckdb-dev
+          # phpize's `make clean` deletes every *.so under the source tree,
+          # including the in-tree prefix's libduckdb.so (and the cached copy).
+          mv duckdb "$RUNNER_TEMP/duckdb-preview"
           make clean
+          mv "$RUNNER_TEMP/duckdb-preview" duckdb
           make -j"$(nproc)" 2>&1 | tee "$RUNNER_TEMP/build-hook.log"
           if grep -q 'warning:' "$RUNNER_TEMP/build-hook.log"; then
             echo "::error::Build produced warnings"
