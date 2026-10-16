@@ -5,6 +5,8 @@ pdo
 pdo_duckdb
 --FILE--
 <?php
+require __DIR__ . '/duckdb_v2.inc';
+$v2 = pdo_duckdb_v2_headers();
 // A path under a regular file is unwritable for every user, root included.
 $blocker = __DIR__ . '/113_log_sink.notadir';
 file_put_contents($blocker, '');
@@ -38,8 +40,22 @@ $db = null;
 echo "closed unbuffered\n";
 
 $db = open_logging($sink);
-$stmt = $db->prepare('SELECT ?');
-attempt('prepared execute', fn() => $stmt->execute([1]));
+$stmt = null;
+if ($v2) {
+    // DuckDB 2.0 hits the log sink while preparing, so the IO error must
+    // surface at prepare() and execute() is never reached.
+    try {
+        $stmt = $db->prepare('SELECT ?');
+        echo "prepared execute: BAD: prepare succeeded\n";
+    } catch (PDOException $e) {
+        $msg = $e->getMessage();
+        $want = 'IO Error: Failed to create directory "' . $blocker . '": File exists';
+        echo 'prepared execute: ', str_contains($msg, $want) ? 'PDOException IO Error' : 'BAD: ' . $msg, "\n";
+    }
+} else {
+    $stmt = $db->prepare('SELECT ?');
+    attempt('prepared execute', fn() => $stmt->execute([1]));
+}
 $stmt = null;
 $db = null;
 echo "closed prepared\n";

@@ -5,6 +5,8 @@ pdo
 pdo_duckdb
 --FILE--
 <?php
+require __DIR__ . '/duckdb_v2.inc';
+$v2 = pdo_duckdb_v2_headers();
 $db = new PDO('duckdb::memory:', null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
 
 $tags = [
@@ -15,12 +17,47 @@ $tags = [
     'empty' => '',
 ];
 
+$wantHex = '783b424547494e3b524f4c4c4241434b3b24696e6e657224793b7a24696e6e65722420656e64';
+
+// DuckDB 2.0 rejects non-UTF-8 query text up front; each rejection must be the
+// exact parser error, leave no transaction open, and leave the handle usable.
+function expect_utf8_rejection(PDO $db, callable $fn): bool
+{
+    try {
+        $fn();
+        echo "BAD: invalid UTF-8 accepted\n";
+        return false;
+    } catch (PDOException $e) {
+        if (!str_contains($e->getMessage(), 'Parser Error: Invalid UTF-8 in query')) {
+            echo 'BAD: ', $e->getMessage(), "\n";
+            return false;
+        }
+    }
+    if ($db->inTransaction()) {
+        echo "BAD: transaction left open\n";
+        return false;
+    }
+    if ($db->query('SELECT 42')->fetchColumn() != 42) {
+        echo "BAD: handle unusable after rejection\n";
+        return false;
+    }
+    return true;
+}
+
 foreach ($tags as $label => $name) {
     $tag = '$' . $name . '$';
     $inner = '$inner$';
     $body = "x;BEGIN;ROLLBACK;{$inner}y;z{$inner} end";
-    echo "$label plain=", bin2hex($db->query("SELECT {$tag}{$body}{$tag}")->fetchColumn()), "\n";
-    echo "$label batch=", $db->exec("BEGIN;SELECT {$tag}{$body}{$tag};SELECT {$tag};{$tag};ROLLBACK"), "\n";
+    $plainSql = "SELECT {$tag}{$body}{$tag}";
+    $batchSql = "BEGIN;SELECT {$tag}{$body}{$tag};SELECT {$tag};{$tag};ROLLBACK";
+    $invalid = preg_match('//u', $name) !== 1;
+    if ($v2 && $invalid) {
+        echo "$label plain=", expect_utf8_rejection($db, fn() => $db->query($plainSql)) ? $wantHex : 'BAD', "\n";
+        echo "$label batch=", expect_utf8_rejection($db, fn() => $db->exec($batchSql)) ? '0' : 'BAD', "\n";
+    } else {
+        echo "$label plain=", bin2hex($db->query($plainSql)->fetchColumn()), "\n";
+        echo "$label batch=", $db->exec($batchSql), "\n";
+    }
     echo "$label state=", $db->inTransaction() ? 'active' : 'idle', "\n";
 }
 
