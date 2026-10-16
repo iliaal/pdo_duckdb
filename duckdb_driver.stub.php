@@ -25,8 +25,8 @@ class PdoDuckDb_Ext
     public function duckdbAppender(string $table, ?string $schema = null, ?array $columns = null): \Pdo\Duckdb\Appender {}
 
     /**
-     * Return the tables a query references, using DuckDB's parser. Read queries
-     * only; DML yields an empty array, DDL behavior is unspecified. With
+     * Return the tables a query references, using DuckDB's parser. UPDATE,
+     * DELETE, and MERGE yield an empty array; DDL behavior is unspecified. With
      * $qualified, a non-default schema is included (e.g. "s.orders"). A NUL
      * byte in $query throws ValueError; a query that cannot be parsed throws
      * PDOException with a detail-free message (prepare the query for specifics).

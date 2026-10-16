@@ -187,8 +187,8 @@ prefer `PDO::connect()`.
 Two driver-specific methods, available on the same object as `duckdbAppender()`:
 
 ```php
-// Tables a query references, resolved by DuckDB's parser (read queries only;
-// DML returns []). Pass true to include a non-default schema.
+// Tables a query references, resolved by DuckDB's parser (UPDATE, DELETE, and
+// MERGE return []). Pass true to include a non-default schema.
 $db->duckdbTableNames('SELECT * FROM users u JOIN s.orders o ON u.id = o.id');
 // ['orders', 'users']
 $db->duckdbTableNames('SELECT * FROM s.orders', true);   // ['s.orders']
@@ -394,8 +394,8 @@ Other contracts:
   `PDO::ATTR_AUTOCOMMIT` are not gettable.
 - **`duckdbTableNames()`.** An unparseable query throws `PDOException` with a
   detail-free message (`could not parse the query`); `prepare()` the query
-  for the engine's specific error. DML statements yield `[]`; DDL behavior is
-  unspecified.
+  for the engine's specific error. `UPDATE`, `DELETE`, and `MERGE` yield `[]`;
+  `INSERT ... SELECT` lists the tables it reads. DDL behavior is unspecified.
 
 ## Status
 
