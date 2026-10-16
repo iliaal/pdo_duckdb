@@ -38,6 +38,68 @@ static void pdo_duckdb_nested_render_type_destroy(pdo_duckdb_nested_render_type 
 #define PDO_DUCKDB_VARIANT_ERRMSG \
 	"DuckDB VARIANT values are not supported by the C result API; cast the value to VARCHAR in SQL"
 
+#ifdef HAVE_DUCKDB_V2
+/* Type ids cell_to_value_typed can decode. Anything else (a type newer than
+ * these headers) has an unknown vector layout, so the fetcher rejects its
+ * non-NULL cells like VARIANT instead of reading the memory. */
+static bool pdo_duckdb_type_decodable(duckdb_type tid)
+{
+#ifdef PDO_DUCKDB_TEST_UNDECODABLE_TYPE
+	if (tid == PDO_DUCKDB_TEST_UNDECODABLE_TYPE) {
+		return false;
+	}
+#endif
+	switch (tid) {
+		case DUCKDB_TYPE_BOOLEAN:
+		case DUCKDB_TYPE_TINYINT:
+		case DUCKDB_TYPE_SMALLINT:
+		case DUCKDB_TYPE_INTEGER:
+		case DUCKDB_TYPE_BIGINT:
+		case DUCKDB_TYPE_UTINYINT:
+		case DUCKDB_TYPE_USMALLINT:
+		case DUCKDB_TYPE_UINTEGER:
+		case DUCKDB_TYPE_UBIGINT:
+		case DUCKDB_TYPE_HUGEINT:
+		case DUCKDB_TYPE_UHUGEINT:
+		case DUCKDB_TYPE_FLOAT:
+		case DUCKDB_TYPE_DOUBLE:
+		case DUCKDB_TYPE_DATE:
+		case DUCKDB_TYPE_TIME:
+		case DUCKDB_TYPE_TIME_TZ:
+		case DUCKDB_TYPE_TIME_NS:
+		case DUCKDB_TYPE_TIMESTAMP:
+		case DUCKDB_TYPE_TIMESTAMP_TZ:
+		case DUCKDB_TYPE_TIMESTAMP_S:
+		case DUCKDB_TYPE_TIMESTAMP_MS:
+		case DUCKDB_TYPE_TIMESTAMP_NS:
+		case DUCKDB_TYPE_TIMESTAMP_TZ_NS:
+		case DUCKDB_TYPE_INTERVAL:
+		case DUCKDB_TYPE_UUID:
+		case DUCKDB_TYPE_DECIMAL:
+		case DUCKDB_TYPE_ENUM:
+		case DUCKDB_TYPE_VARCHAR:
+		case DUCKDB_TYPE_BLOB:
+		case DUCKDB_TYPE_BIT:
+		case DUCKDB_TYPE_BIGNUM:
+		case DUCKDB_TYPE_GEOMETRY:
+		case DUCKDB_TYPE_LIST:
+		case DUCKDB_TYPE_ARRAY:
+		case DUCKDB_TYPE_STRUCT:
+		case DUCKDB_TYPE_MAP:
+		case DUCKDB_TYPE_UNION:
+		/* Only ever NULL cells. */
+		case DUCKDB_TYPE_SQLNULL:
+			return true;
+		default:
+			return false;
+	}
+}
+
+# define PDO_DUCKDB_TYPE_OPAQUE(tid) ((tid) == DUCKDB_TYPE_VARIANT || !pdo_duckdb_type_decodable(tid))
+#else
+# define PDO_DUCKDB_TYPE_OPAQUE(tid) ((tid) == DUCKDB_TYPE_VARIANT)
+#endif
+
 /* Avoid per-cell vector lookups. Publish only complete entries; invalidate on
  * chunk destruction because DuckDB can reuse addresses. Readers check S->chunk,
  * and fetch repopulates on every load. TLS buffers use malloc and grow on demand. */
@@ -258,7 +320,7 @@ static bool pdo_duckdb_type_has_variant(duckdb_logical_type lt)
 	duckdb_type tid = duckdb_get_type_id(lt);
 	idx_t n = pdo_duckdb_variant_probe_arity(tid, lt), i;
 
-	if (tid == DUCKDB_TYPE_VARIANT) {
+	if (PDO_DUCKDB_TYPE_OPAQUE(tid)) {
 		return true;
 	}
 	for (i = 0; i < n; i++) {
@@ -273,6 +335,29 @@ static bool pdo_duckdb_type_has_variant(duckdb_logical_type lt)
 	return false;
 }
 
+#ifdef HAVE_DUCKDB_V2
+static bool pdo_duckdb_type_find_undecodable(duckdb_logical_type lt, duckdb_type *out)
+{
+	duckdb_type tid = duckdb_get_type_id(lt);
+	idx_t n = pdo_duckdb_variant_probe_arity(tid, lt), i;
+
+	if (tid != DUCKDB_TYPE_VARIANT && !pdo_duckdb_type_decodable(tid)) {
+		*out = tid;
+		return true;
+	}
+	for (i = 0; i < n; i++) {
+		duckdb_logical_type child = pdo_duckdb_variant_probe_child(tid, lt, i);
+		bool hit = pdo_duckdb_type_find_undecodable(child, out);
+
+		duckdb_destroy_logical_type(&child);
+		if (hit) {
+			return true;
+		}
+	}
+	return false;
+}
+#endif
+
 static pdo_duckdb_variant_probe *pdo_duckdb_variant_probe_build(duckdb_logical_type lt)
 {
 	duckdb_type tid = duckdb_get_type_id(lt);
@@ -280,12 +365,16 @@ static pdo_duckdb_variant_probe *pdo_duckdb_variant_probe_build(duckdb_logical_t
 	idx_t n, i;
 	bool any = false;
 
-	if (tid == DUCKDB_TYPE_VARIANT) {
+	if (PDO_DUCKDB_TYPE_OPAQUE(tid)) {
 		p = calloc(1, sizeof(*p));
 		if (!p) {
 			return &pdo_duckdb_variant_probe_any;
 		}
+#ifdef HAVE_DUCKDB_V2
+		p->type = DUCKDB_TYPE_VARIANT;
+#else
 		p->type = tid;
+#endif
 		return p;
 	}
 	n = pdo_duckdb_variant_probe_arity(tid, lt);
@@ -2080,6 +2169,12 @@ static duckdb_value pdo_duckdb_cell_to_value_typed(duckdb_vector vec, idx_t row,
 			duckdb_time_ns t; t.nanos = ((int64_t *)data)[row];
 			ret = duckdb_create_time_ns(t); break;
 		}
+#ifdef HAVE_DUCKDB_V2
+		case DUCKDB_TYPE_TIMESTAMP_TZ_NS: {
+			duckdb_timestamp_ns t; t.nanos = ((int64_t *)data)[row];
+			ret = duckdb_create_timestamp_tz_ns(t); break;
+		}
+#endif
 		case DUCKDB_TYPE_UUID: {
 			/* DuckDB stores UUIDs as int128 with the sign bit flipped so they
 			 * sort correctly; duckdb_create_uuid() wants the logical value. */
@@ -2243,7 +2338,13 @@ static duckdb_value pdo_duckdb_cell_to_value_typed(duckdb_vector vec, idx_t row,
 		}
 		case DUCKDB_TYPE_STRUCT: {
 			idx_t n = duckdb_struct_type_child_count(lt);
+#ifdef HAVE_DUCKDB_V2
+			/* create_struct_value() returns NULL for a NULL values pointer, which
+			 * a zero-field STRUCT would otherwise pass. */
+			duckdb_value *vals = emalloc(sizeof(duckdb_value) * (n ? n : 1));
+#else
 			duckdb_value *vals = n ? emalloc(sizeof(duckdb_value) * n) : NULL;
+#endif
 			idx_t i;
 			for (i = 0; i < n; i++) {
 				duckdb_vector child = duckdb_struct_vector_get_child(vec, i);
@@ -2369,7 +2470,29 @@ static int pdo_duckdb_stmt_fetched_row(pdo_stmt_t *stmt)
 	if (EXPECTED(S->variant_col_count == 0) || !pdo_duckdb_stmt_row_has_variant(S)) {
 		return 1;
 	}
+#ifdef HAVE_DUCKDB_V2
+	{
+		duckdb_type unknown = DUCKDB_TYPE_INVALID;
+		idx_t i;
+
+		for (i = 0; i < S->variant_col_count; i++) {
+			if (pdo_duckdb_type_find_undecodable(S->col_logical_types[S->variant_cols[i]], &unknown)) {
+				break;
+			}
+		}
+		if (i < S->variant_col_count) {
+			char msg[192];
+
+			snprintf(msg, sizeof(msg), "DuckDB type id %d is not supported by this pdo_duckdb build;"
+				" cast the value to VARCHAR in SQL", (int)unknown);
+			pdo_duckdb_error_stmt_code(stmt, PDO_DUCKDB_ERRCODE_STREAMING, msg);
+		} else {
+			pdo_duckdb_error_stmt_code(stmt, PDO_DUCKDB_ERRCODE_STREAMING, PDO_DUCKDB_VARIANT_ERRMSG);
+		}
+	}
+#else
 	pdo_duckdb_error_stmt_code(stmt, PDO_DUCKDB_ERRCODE_STREAMING, PDO_DUCKDB_VARIANT_ERRMSG);
+#endif
 	/* PHP < 8.5 fetchAll() only reports a failure of its first row, so a
 	 * later rejected row would end the result silently. Throwing runs no
 	 * userland and nothing is mid-row yet; warning mode is left to PDO core,
@@ -2646,6 +2769,9 @@ static const char *pdo_duckdb_type_name(duckdb_type t)
 		case DUCKDB_TYPE_TIMESTAMP_MS: return "TIMESTAMP_MS";
 		case DUCKDB_TYPE_TIMESTAMP_NS: return "TIMESTAMP_NS";
 		case DUCKDB_TYPE_TIMESTAMP_TZ: return "TIMESTAMP_TZ";
+#ifdef HAVE_DUCKDB_V2
+		case DUCKDB_TYPE_TIMESTAMP_TZ_NS: return "TIMESTAMP_TZ_NS";
+#endif
 		case DUCKDB_TYPE_INTERVAL:     return "INTERVAL";
 		case DUCKDB_TYPE_UUID:         return "UUID";
 		case DUCKDB_TYPE_ENUM:         return "ENUM";
@@ -2697,6 +2823,12 @@ static int pdo_duckdb_stmt_col_meta(pdo_stmt_t *stmt, zend_long colno, zval *ret
 		case DUCKDB_TYPE_BLOB:
 			pdo_type = PDO_PARAM_LOB;
 			break;
+#ifdef HAVE_DUCKDB_V2
+		/* DuckDB 2.0 lets the NULL type leave the binder (bare SELECT NULL). */
+		case DUCKDB_TYPE_SQLNULL:
+			pdo_type = PDO_PARAM_NULL;
+			break;
+#endif
 		default:
 			pdo_type = PDO_PARAM_STR;
 			break;

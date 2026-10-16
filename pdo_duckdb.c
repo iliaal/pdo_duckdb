@@ -110,6 +110,9 @@ PHP_MINFO_FUNCTION(pdo_duckdb)
 #ifdef HAVE_DUCKDB_V2
 	php_info_print_table_row(2, "DuckDB 2.0 headers", "yes");
 #endif
+#if defined(HAVE_DUCKDB_V2) && defined(PDO_DUCKDB_TEST_UNDECODABLE_TYPE)
+	php_info_print_table_row(2, "Test-only undecodable type id", ZEND_TOSTR(PDO_DUCKDB_TEST_UNDECODABLE_TYPE));
+#endif
 	php_info_print_table_end();
 }
 /* }}} */

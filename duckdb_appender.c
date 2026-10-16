@@ -198,6 +198,9 @@ static bool pdo_duckdb_appender_probe_sql(duckdb_type tid, duckdb_logical_type l
 		case DUCKDB_TYPE_TIMESTAMP_MS: kw = "TIMESTAMP_MS"; break;
 		case DUCKDB_TYPE_TIMESTAMP_NS: kw = "TIMESTAMP_NS"; break;
 		case DUCKDB_TYPE_TIMESTAMP_TZ: kw = "TIMESTAMPTZ"; break;
+#ifdef HAVE_DUCKDB_V2
+		case DUCKDB_TYPE_TIMESTAMP_TZ_NS: kw = "TIMESTAMPTZ_NS"; break;
+#endif
 		case DUCKDB_TYPE_INTERVAL: kw = "INTERVAL"; break;
 		case DUCKDB_TYPE_UUID: kw = "UUID"; break;
 		case DUCKDB_TYPE_BIT: kw = "BIT"; break;
@@ -949,7 +952,13 @@ static duckdb_value pdo_duckdb_build_value(zval *z, const pdo_duckdb_nested_rend
 					argpos, (uint32_t)cnt, (uint32_t)zend_hash_num_elements(ht));
 				return NULL;
 			}
+#ifdef HAVE_DUCKDB_V2
+			/* create_struct_value() returns NULL for a NULL values pointer, which
+			 * a zero-field STRUCT would otherwise pass. */
+			vals = emalloc(sizeof(duckdb_value) * (cnt ? cnt : 1));
+#else
 			vals = cnt ? emalloc(sizeof(duckdb_value) * cnt) : NULL;
+#endif
 
 			for (i = 0; i < cnt; i++) {
 				const char *fname = (t->child_names && t->child_names[i]) ? t->child_names[i] : NULL;
