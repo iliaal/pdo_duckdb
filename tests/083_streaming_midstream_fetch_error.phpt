@@ -11,7 +11,7 @@ $db = new PDO('duckdb::memory:', null, null, [
 ]);
 
 // VARIANT has no safe C-API extractor: the query itself executes (the value
-// computes fine), the error surfaces per-cell at fetch, not at execute.
+// computes fine), the error surfaces when the row is fetched, not at execute.
 $stmt = $db->query('SELECT CAST(42 AS VARIANT) AS v');
 try {
     $stmt->fetchColumn();
@@ -40,7 +40,7 @@ echo 'count=', $db->query('SELECT count(*) FROM t')->fetchColumn(), "\n";
 ?>
 --EXPECT--
 fetch_raised
-NULL
+bool(false)
 fetch_sqlstate=HY000
 fetch_driver=5
 7

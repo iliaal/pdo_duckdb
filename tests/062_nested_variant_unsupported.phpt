@@ -39,5 +39,5 @@ map: VARIANT error
 union: VARIANT error
 string(6) "[NULL]"
 string(5) "00000"
-NULL
+bool(false)
 string(5) "HY000"

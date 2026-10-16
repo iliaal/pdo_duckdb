@@ -106,6 +106,15 @@ typedef struct _pdo_duckdb_nested_render_type {
 	idx_t array_size;
 } pdo_duckdb_nested_render_type;
 
+/* Where a column's type tree can hold a VARIANT; children whose subtree has
+ * none are NULL. */
+typedef struct _pdo_duckdb_variant_probe {
+	duckdb_type type;
+	idx_t array_size;
+	idx_t child_count;
+	struct _pdo_duckdb_variant_probe **children;
+} pdo_duckdb_variant_probe;
+
 typedef enum {
 	PDO_DUCKDB_TRANSACTION_NONE,
 	PDO_DUCKDB_TRANSACTION_OPEN,
@@ -128,6 +137,9 @@ typedef struct {
 	duckdb_logical_type *col_logical_types; /* cached result logical types */
 	pdo_duckdb_nested_render_type **col_nested_renderers; /* immutable type/name
 									 * descriptors for direct nested rendering */
+	pdo_duckdb_variant_probe **col_variant_probes; /* per column, NULL without VARIANT */
+	idx_t *variant_cols;		/* columns with a probe, checked on every row */
+	idx_t variant_col_count;
 	bool started;				/* has the first chunk been fetched? */
 	bool done;					/* all chunks consumed */
 	/* Explicit effect for transaction control wrapped by EXPLAIN ANALYZE (whose
@@ -137,8 +149,6 @@ typedef struct {
 	/* Clear DuckDB's retained bindings once per execute, including execute([]),
 	 * so omitted parameters cannot reuse stale values. */
 	bool binds_cleared;
-	/* Nonzero while get_col reports a cell error through pdo_handle_error. */
-	uint32_t reporting_cell_error;
 } pdo_duckdb_stmt;
 
 extern const pdo_driver_t pdo_duckdb_driver;

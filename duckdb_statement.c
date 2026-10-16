@@ -35,6 +35,8 @@ static pdo_duckdb_nested_render_type *pdo_duckdb_nested_render_type_build(
 	duckdb_type tid, duckdb_logical_type lt, bool owns_lt);
 static void pdo_duckdb_nested_render_type_destroy(pdo_duckdb_nested_render_type *type);
 #define PDO_DUCKDB_LOB_MAX_BYTES ((size_t)67108864)
+#define PDO_DUCKDB_VARIANT_ERRMSG \
+	"DuckDB VARIANT values are not supported by the C result API; cast the value to VARCHAR in SQL"
 
 /* Avoid per-cell vector lookups. Publish only complete entries; invalidate on
  * chunk destruction because DuckDB can reuse addresses. Readers check S->chunk,
@@ -202,21 +204,238 @@ void pdo_duckdb_tls_caches_shutdown(void)
 static void pdo_duckdb_stmt_cache_col_aux(pdo_duckdb_stmt *S);
 static int pdo_duckdb_stmt_bind_failure(pdo_stmt_t *stmt);
 
-static bool pdo_duckdb_stmt_reentry_refused(pdo_stmt_t *stmt)
-{
-	pdo_duckdb_stmt *S = (pdo_duckdb_stmt *)stmt->driver_data;
+/* {{{ VARIANT probes
+ *
+ * The C result API cannot read a non-NULL VARIANT. get_col runs inside PDO
+ * core's column loop, where reporting the error can run userland while core
+ * still holds fetch state, so the fetcher rejects such a row before any
+ * column is read. Probes mirror the cell_to_value_typed traversal and use
+ * malloc, so building them cannot bail out on memory_limit. */
 
-	if (EXPECTED(!S->reporting_cell_error)) {
+/* Stands in for a subtree whose probe could not be allocated: any non-NULL
+ * cell is treated as holding a VARIANT. */
+static pdo_duckdb_variant_probe pdo_duckdb_variant_probe_any = { DUCKDB_TYPE_VARIANT, 0, 0, NULL };
+
+static void pdo_duckdb_variant_probe_destroy(pdo_duckdb_variant_probe *p)
+{
+	idx_t i;
+
+	if (!p || p == &pdo_duckdb_variant_probe_any) {
+		return;
+	}
+	for (i = 0; i < p->child_count; i++) {
+		pdo_duckdb_variant_probe_destroy(p->children[i]);
+	}
+	free(p->children);
+	free(p);
+}
+
+static duckdb_logical_type pdo_duckdb_variant_probe_child(duckdb_type tid, duckdb_logical_type lt, idx_t i)
+{
+	switch (tid) {
+		case DUCKDB_TYPE_LIST:   return duckdb_list_type_child_type(lt);
+		case DUCKDB_TYPE_ARRAY:  return duckdb_array_type_child_type(lt);
+		case DUCKDB_TYPE_MAP:    return i == 0 ? duckdb_map_type_key_type(lt) : duckdb_map_type_value_type(lt);
+		case DUCKDB_TYPE_STRUCT: return duckdb_struct_type_child_type(lt, i);
+		default:                 return duckdb_union_type_member_type(lt, i);
+	}
+}
+
+static idx_t pdo_duckdb_variant_probe_arity(duckdb_type tid, duckdb_logical_type lt)
+{
+	switch (tid) {
+		case DUCKDB_TYPE_LIST:
+		case DUCKDB_TYPE_ARRAY:  return 1;
+		case DUCKDB_TYPE_MAP:    return 2;
+		case DUCKDB_TYPE_STRUCT: return duckdb_struct_type_child_count(lt);
+		case DUCKDB_TYPE_UNION:  return duckdb_union_type_member_count(lt);
+		default:                 return 0;
+	}
+}
+
+static bool pdo_duckdb_type_has_variant(duckdb_logical_type lt)
+{
+	duckdb_type tid = duckdb_get_type_id(lt);
+	idx_t n = pdo_duckdb_variant_probe_arity(tid, lt), i;
+
+	if (tid == DUCKDB_TYPE_VARIANT) {
+		return true;
+	}
+	for (i = 0; i < n; i++) {
+		duckdb_logical_type child = pdo_duckdb_variant_probe_child(tid, lt, i);
+		bool hit = pdo_duckdb_type_has_variant(child);
+
+		duckdb_destroy_logical_type(&child);
+		if (hit) {
+			return true;
+		}
+	}
+	return false;
+}
+
+static pdo_duckdb_variant_probe *pdo_duckdb_variant_probe_build(duckdb_logical_type lt)
+{
+	duckdb_type tid = duckdb_get_type_id(lt);
+	pdo_duckdb_variant_probe *p, **children;
+	idx_t n, i;
+	bool any = false;
+
+	if (tid == DUCKDB_TYPE_VARIANT) {
+		p = calloc(1, sizeof(*p));
+		if (!p) {
+			return &pdo_duckdb_variant_probe_any;
+		}
+		p->type = tid;
+		return p;
+	}
+	n = pdo_duckdb_variant_probe_arity(tid, lt);
+	if (n == 0) {
+		return NULL;
+	}
+
+	children = calloc(n, sizeof(*children));
+	if (!children) {
+		return pdo_duckdb_type_has_variant(lt) ? &pdo_duckdb_variant_probe_any : NULL;
+	}
+	for (i = 0; i < n; i++) {
+		duckdb_logical_type child = pdo_duckdb_variant_probe_child(tid, lt, i);
+
+		children[i] = pdo_duckdb_variant_probe_build(child);
+		duckdb_destroy_logical_type(&child);
+		any = any || children[i] != NULL;
+	}
+	if (!any) {
+		free(children);
+		return NULL;
+	}
+
+	p = calloc(1, sizeof(*p));
+	if (!p) {
+		for (i = 0; i < n; i++) {
+			pdo_duckdb_variant_probe_destroy(children[i]);
+		}
+		free(children);
+		return &pdo_duckdb_variant_probe_any;
+	}
+	p->type = tid;
+	p->array_size = tid == DUCKDB_TYPE_ARRAY ? duckdb_array_type_array_size(lt) : 0;
+	p->child_count = n;
+	p->children = children;
+	return p;
+}
+
+static bool pdo_duckdb_variant_probe_hit(duckdb_vector vec, idx_t row, const pdo_duckdb_variant_probe *p)
+{
+	uint64_t *validity = duckdb_vector_get_validity(vec);
+	idx_t i;
+
+	if (validity && !duckdb_validity_row_is_valid(validity, row)) {
 		return false;
 	}
-	if (!EG(exception)) {
-		zend_throw_error(NULL, "Cannot use a PDOStatement while it is reporting a column fetch error");
+
+	switch (p->type) {
+		case DUCKDB_TYPE_VARIANT:
+			return true;
+
+		case DUCKDB_TYPE_LIST:
+		case DUCKDB_TYPE_MAP: {
+			duckdb_list_entry e = ((duckdb_list_entry *)duckdb_vector_get_data(vec))[row];
+			idx_t size = duckdb_list_vector_get_size(vec);
+			duckdb_vector child = duckdb_list_vector_get_child(vec);
+
+			if (e.offset > size || e.length > size - e.offset) {
+				return false;
+			}
+			for (i = 0; i < e.length; i++) {
+				if (p->type == DUCKDB_TYPE_LIST) {
+					if (pdo_duckdb_variant_probe_hit(child, e.offset + i, p->children[0])) {
+						return true;
+					}
+					continue;
+				}
+				if (p->children[0] && pdo_duckdb_variant_probe_hit(
+						duckdb_struct_vector_get_child(child, 0), e.offset + i, p->children[0])) {
+					return true;
+				}
+				if (p->children[1] && pdo_duckdb_variant_probe_hit(
+						duckdb_struct_vector_get_child(child, 1), e.offset + i, p->children[1])) {
+					return true;
+				}
+			}
+			return false;
+		}
+
+		case DUCKDB_TYPE_ARRAY: {
+			duckdb_vector child = duckdb_array_vector_get_child(vec);
+			idx_t n = p->array_size;
+
+			if (n && row > (idx_t)-1 / n) {
+				return false;
+			}
+			for (i = 0; i < n; i++) {
+				if (pdo_duckdb_variant_probe_hit(child, row * n + i, p->children[0])) {
+					return true;
+				}
+			}
+			return false;
+		}
+
+		case DUCKDB_TYPE_STRUCT:
+			for (i = 0; i < p->child_count; i++) {
+				if (p->children[i] && pdo_duckdb_variant_probe_hit(
+						duckdb_struct_vector_get_child(vec, i), row, p->children[i])) {
+					return true;
+				}
+			}
+			return false;
+
+		case DUCKDB_TYPE_UNION: {
+			idx_t tag = (idx_t)((uint8_t *)duckdb_vector_get_data(
+				duckdb_struct_vector_get_child(vec, 0)))[row];
+
+			return tag < p->child_count && p->children[tag]
+				&& pdo_duckdb_variant_probe_hit(
+					duckdb_struct_vector_get_child(vec, tag + 1), row, p->children[tag]);
+		}
+
+		default:
+			return false;
 	}
-	return true;
 }
+
+static bool pdo_duckdb_stmt_row_has_variant(pdo_duckdb_stmt *S)
+{
+	pdo_duckdb_chunk_cache *cc = &pdo_duckdb_tls_chunk_cache;
+	idx_t i;
+
+	for (i = 0; i < S->variant_col_count; i++) {
+		idx_t col = S->variant_cols[i];
+		duckdb_vector vec = cc->chunk == S->chunk && col < cc->ncols
+			? cc->vecs[col] : duckdb_data_chunk_get_vector(S->chunk, col);
+
+		if (vec && pdo_duckdb_variant_probe_hit(vec, S->cur, S->col_variant_probes[col])) {
+			return true;
+		}
+	}
+	return false;
+}
+/* }}} */
 
 static void pdo_duckdb_stmt_reset_result(pdo_duckdb_stmt *S)
 {
+	if (S->variant_cols) {
+		efree(S->variant_cols);
+		S->variant_cols = NULL;
+	}
+	S->variant_col_count = 0;
+	if (S->col_variant_probes) {
+		idx_t c;
+		for (c = 0; c < S->col_count; c++) {
+			pdo_duckdb_variant_probe_destroy(S->col_variant_probes[c]);
+		}
+		efree(S->col_variant_probes);
+		S->col_variant_probes = NULL;
+	}
 	if (S->col_nested_renderers) {
 		idx_t c;
 		for (c = 0; c < S->col_count; c++) {
@@ -270,7 +489,7 @@ static zend_long pdo_duckdb_stmt_rows_changed(duckdb_result *result)
 
 static void pdo_duckdb_stmt_cache_columns(pdo_duckdb_stmt *S)
 {
-	idx_t c, n;
+	idx_t c, n, flagged = 0;
 
 	n = duckdb_column_count(&S->result);
 	if (n == 0) {
@@ -282,10 +501,15 @@ static void pdo_duckdb_stmt_cache_columns(pdo_duckdb_stmt *S)
 	S->col_types = safe_emalloc(n, sizeof(duckdb_type), 0);
 	S->col_logical_types = safe_emalloc(n, sizeof(duckdb_logical_type), 0);
 	S->col_nested_renderers = ecalloc(n, sizeof(pdo_duckdb_nested_render_type *));
+	S->col_variant_probes = ecalloc(n, sizeof(pdo_duckdb_variant_probe *));
 	for (c = 0; c < n; c++) {
 		S->col_types[c] = duckdb_column_type(&S->result, c);
 		S->col_logical_types[c] = duckdb_column_logical_type(&S->result, c);
 		S->col_count = c + 1;
+		S->col_variant_probes[c] = pdo_duckdb_variant_probe_build(S->col_logical_types[c]);
+		if (S->col_variant_probes[c]) {
+			flagged++;
+		}
 		switch (S->col_types[c]) {
 			case DUCKDB_TYPE_LIST:
 			case DUCKDB_TYPE_ARRAY:
@@ -297,6 +521,14 @@ static void pdo_duckdb_stmt_cache_columns(pdo_duckdb_stmt *S)
 				break;
 			default:
 				break;
+		}
+	}
+	if (flagged) {
+		S->variant_cols = safe_emalloc(flagged, sizeof(idx_t), 0);
+		for (c = 0; c < n; c++) {
+			if (S->col_variant_probes[c]) {
+				S->variant_cols[S->variant_col_count++] = c;
+			}
 		}
 	}
 	pdo_duckdb_stmt_cache_col_aux(S);
@@ -320,9 +552,6 @@ static int pdo_duckdb_stmt_execute(pdo_stmt_t *stmt)
 {
 	pdo_duckdb_stmt *S = (pdo_duckdb_stmt *)stmt->driver_data;
 
-	if (pdo_duckdb_stmt_reentry_refused(stmt)) {
-		return 0;
-	}
 	pdo_duckdb_stmt_reset_result_full(stmt);
 	/* Zero before any failure return so re-execute errors do not leave a stale rowCount. */
 	stmt->row_count = 0;
@@ -2133,14 +2362,29 @@ static duckdb_value pdo_duckdb_cell_to_value_typed(duckdb_vector vec, idx_t row,
 }
 /* }}} */
 
+static int pdo_duckdb_stmt_fetched_row(pdo_stmt_t *stmt)
+{
+	pdo_duckdb_stmt *S = (pdo_duckdb_stmt *)stmt->driver_data;
+
+	if (EXPECTED(S->variant_col_count == 0) || !pdo_duckdb_stmt_row_has_variant(S)) {
+		return 1;
+	}
+	pdo_duckdb_error_stmt_code(stmt, PDO_DUCKDB_ERRCODE_STREAMING, PDO_DUCKDB_VARIANT_ERRMSG);
+	/* PHP < 8.5 fetchAll() only reports a failure of its first row, so a
+	 * later rejected row would end the result silently. Throwing runs no
+	 * userland and nothing is mid-row yet; warning mode is left to PDO core,
+	 * which reports it once the fetch has unwound. */
+	if (stmt->dbh->error_mode == PDO_ERRMODE_EXCEPTION) {
+		pdo_handle_error(stmt->dbh, stmt);
+	}
+	return 0;
+}
+
 static int pdo_duckdb_stmt_fetch(pdo_stmt_t *stmt,
 	enum pdo_fetch_orientation ori, zend_long offset)
 {
 	pdo_duckdb_stmt *S = (pdo_duckdb_stmt *)stmt->driver_data;
 
-	if (pdo_duckdb_stmt_reentry_refused(stmt)) {
-		return 0;
-	}
 	if (!S->has_result || S->done) {
 		return 0;
 	}
@@ -2152,7 +2396,7 @@ static int pdo_duckdb_stmt_fetch(pdo_stmt_t *stmt,
 	if (!S->started) {
 		S->started = true;
 	} else if (++S->cur < S->chunk_size) {
-		return 1;
+		return pdo_duckdb_stmt_fetched_row(stmt);
 	}
 
 	/* Unbuffered scans can open files during a chunk pull, and open_basedir may
@@ -2189,7 +2433,7 @@ static int pdo_duckdb_stmt_fetch(pdo_stmt_t *stmt,
 		S->chunk_size = duckdb_data_chunk_get_size(S->chunk);
 		S->cur = 0;
 		if (S->chunk_size > 0) {
-			return 1;
+			return pdo_duckdb_stmt_fetched_row(stmt);
 		}
 	}
 }
@@ -2247,21 +2491,6 @@ static bool pdo_duckdb_col_to_string(duckdb_vector vec, idx_t row,
 	}
 	duckdb_destroy_value(&v);
 	return true;
-}
-
-/* PDO core keeps reading stmt->columns after get_col returns, but a
- * warning-mode report can run userland (an error handler or an output
- * callback). Refuse every statement operation that could free or rebuild
- * that state until the report returns. */
-static void pdo_duckdb_stmt_report_variant(pdo_stmt_t *stmt)
-{
-	pdo_duckdb_stmt *S = (pdo_duckdb_stmt *)stmt->driver_data;
-
-	pdo_duckdb_error_stmt_code(stmt, PDO_DUCKDB_ERRCODE_STREAMING,
-		"DuckDB VARIANT values are not supported by the C result API; cast the value to VARCHAR in SQL");
-	S->reporting_cell_error++;
-	pdo_handle_error(stmt->dbh, stmt);
-	S->reporting_cell_error--;
 }
 
 static int pdo_duckdb_stmt_get_col(
@@ -2353,8 +2582,9 @@ static int pdo_duckdb_stmt_get_col(
 		}
 
 		case DUCKDB_TYPE_VARIANT:
+			/* Non-NULL cells are rejected by the fetcher; never report from
+			 * here, PDO core is mid-row. */
 			ZVAL_NULL(result);
-			pdo_duckdb_stmt_report_variant(stmt);
 			return 1;
 
 		default: {
@@ -2381,10 +2611,7 @@ static int pdo_duckdb_stmt_get_col(
 					tid, S->col_logical_types[colno], data, row, result)) {
 				return 1;
 			}
-			if (!pdo_duckdb_col_to_string(
-					vec, row, S->col_logical_types[colno], result)) {
-				pdo_duckdb_stmt_report_variant(stmt);
-			}
+			(void)pdo_duckdb_col_to_string(vec, row, S->col_logical_types[colno], result);
 			return 1;
 		}
 	}
@@ -2520,12 +2747,6 @@ static int pdo_duckdb_stmt_param_hook(pdo_stmt_t *stmt, struct pdo_bound_param_d
 	zval *parameter;
 	idx_t idx;
 
-	/* Bound-column registration during a report would mutate the
-	 * bound_columns table PDO core may be iterating. FREE only runs from
-	 * table destruction and has nothing to refuse. */
-	if (event_type != PDO_PARAM_EVT_FREE && pdo_duckdb_stmt_reentry_refused(stmt)) {
-		return 0;
-	}
 	if (!param->is_param) {
 		return 1;
 	}
@@ -2725,9 +2946,6 @@ static int pdo_duckdb_stmt_param_hook(pdo_stmt_t *stmt, struct pdo_bound_param_d
 
 static int pdo_duckdb_stmt_cursor_closer(pdo_stmt_t *stmt)
 {
-	if (pdo_duckdb_stmt_reentry_refused(stmt)) {
-		return 0;
-	}
 	pdo_duckdb_stmt_reset_result_full(stmt);
 	return 1;
 }

@@ -395,8 +395,8 @@ level and as a nested leaf. For DuckDB's session-`TimeZone` rendering, select
 `CAST(col AS VARCHAR)`.
 
 DuckDB's C result API can't extract non-NULL `VARIANT` cells safely, so
-fetching one reports a PDO error; cast it to `VARCHAR` (or another concrete SQL
-type) in the query.
+fetching a row that holds one reports a PDO error; cast it to `VARCHAR` (or
+another concrete SQL type) in the query.
 
 ### Streaming results
 
@@ -585,11 +585,15 @@ Other contracts:
   use throws `Error`); rows already flushed survive, but unflushed buffered
   rows are lost. Probe rejections (`Failed to append value: …`) and soft
   validation failures don't poison.
-- **`VARIANT`.** Fetching a non-NULL `VARIANT` cell is ERRMODE-gated: under
-  `ERRMODE_EXCEPTION` it throws, otherwise the cell reads back as PHP `null`.
-  A real SQL NULL also reads back as `null`; `errorInfo()` tells them apart,
-  since it's set after a `VARIANT` failure and clear for a real NULL.
-  Cast to `VARCHAR` in SQL to fetch the value.
+- **`VARIANT`.** A row holding a non-NULL `VARIANT` value, at any nesting
+  depth, fails the fetch before any of its columns are read: under
+  `ERRMODE_EXCEPTION` the fetch throws, otherwise it returns `false` with the
+  error in `errorInfo()`, and the next fetch continues with the following row.
+  SQL NULL `VARIANT` cells read back as `null`. Before PHP 8.5, `fetchAll()`
+  reports a failure only when it happens on its first row, so under
+  `ERRMODE_WARNING` or `ERRMODE_SILENT` a later `VARIANT` row ends the result
+  early with no warning; check `errorInfo()`. Cast to `VARCHAR` in SQL to fetch
+  the value.
 - **`getAttribute()`.** Returns the library version for
   `ATTR_CLIENT_VERSION`/`ATTR_SERVER_VERSION`, `"duckdb"` for
   `ATTR_DRIVER_NAME`, and the streaming flag for
