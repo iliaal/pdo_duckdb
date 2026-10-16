@@ -69,12 +69,12 @@ To build against the DuckDB 2.0 preview, see [DuckDB 2.0](#duckdb-20).
 ### Other DuckDB PDO drivers
 
 [thomas-0816/pdo-duckdb-php](https://github.com/thomas-0816/pdo-duckdb-php) is
-a separate driver that uses the same extension name (`pdo_duckdb`), PDO driver
-name (`duckdb`), and constant names. Install only one of them. The constants
-have different values: this driver defines `PDO::DUCKDB_ATTR_CONFIG` as 1000
-and `PDO::DUCKDB_ATTR_UNBUFFERED` as 1001, and the other driver swaps them. If
-you switch drivers, refer to the attributes by constant name, never by integer
-value.
+a separate driver that uses the same extension name (`pdo_duckdb`) and PDO
+driver name (`duckdb`). Install only one of them. Both drivers define
+`PDO::DUCKDB_ATTR_CONFIG` and `PDO::DUCKDB_ATTR_UNBUFFERED`, with the values
+swapped: this driver uses 1000 and 1001, and the other driver uses 1001 and
+1000. If you switch drivers, refer to these attributes by constant name, never
+by integer value.
 
 ## DSN
 
@@ -387,6 +387,11 @@ stream to the end first, use a buffered result, or open a second connection.
 After an abort, call `PDOStatement::closeCursor()` and `execute()` again to
 rerun the query. To release the native result early, call `closeCursor()`.
 
+Under `PDO::ERRMODE_SILENT` or `PDO::ERRMODE_WARNING`, the aborted fetch returns
+`false`, so a fetch loop ends as if the result were complete. Check
+`errorCode()` right after the loop: it's `HY000` after an abort, and
+`errorInfo()[1]` is 5. Another fetch resets `errorCode()` to `00000`.
+
 Persistent connections reset `DUCKDB_ATTR_UNBUFFERED` to false on every
 checkout (`check_liveness`). Pass it again in the constructor options, or call
 `setAttribute` after each `new PDO(..., [PDO::ATTR_PERSISTENT => true])`.
@@ -395,8 +400,8 @@ checkout (`check_liveness`). Pass it again in the constructor options, or call
 
 DuckDB 2.0 is in preview. The prebuilt binaries use DuckDB 1.5.x, and a build
 against DuckDB 1.5.x behaves as before. You can build the driver against the
-2.0 preview C library to test your application. The notes in this section were
-checked against `v2.0.0-alpha46057`, and later previews can change them.
+2.0 preview C library to test your application. This section describes
+`v2.0.0-alpha46057`; later previews can change what it covers.
 
 ### Build against the preview
 
@@ -413,7 +418,7 @@ DuckDB 2.0 still reports C API version 1.5.6 in `duckdb.h`, so `configure`
 detects 2.0 from `duckdb_v2.h` in the same directory as `duckdb.h`:
 
 - If `duckdb_v2.h` is missing, `configure` prints a warning and builds without
-  the DuckDB 2.0 code paths. Copy the full header set to fix it.
+  the DuckDB 2.0 code paths. To fix it, copy the full header set.
 - If the headers are 2.0 but `libduckdb` is older, `configure` stops with an
   error.
 
@@ -453,12 +458,15 @@ tag, such as `v1.5.0+`:
 SELECT database_name, tags['storage_version'] FROM duckdb_databases();
 ```
 
-### SQL behaviour changes
+### SQL behavior changes
 
 These changes come from DuckDB itself. Each one has a setting that restores
-the 1.5 behaviour, which you can pass in the DSN tail or
+the 1.5 behavior, which you can pass in the DSN tail or
 `PDO::DUCKDB_ATTR_CONFIG`. Under `open_basedir` the driver locks the
-configuration, so set them when you connect.
+configuration, so set them when you connect. DuckDB 1.5 refuses the connection
+for `default_transaction_invalidation_policy`, `error_on_division_by_zero`, and
+`enable_legacy_parser` (`The following options were not recognized`), so pass
+those only to a 2.0 build. DuckDB 1.5 accepts `lambda_syntax`.
 
 - **Errors abort the transaction.** Inside `beginTransaction()`, any failed
   statement, including a parser or catalog error, aborts the transaction.
