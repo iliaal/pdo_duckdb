@@ -355,9 +355,16 @@ generated keys, use a sequence and `currval()`.
 | `FLOAT`, `DOUBLE` | `float` | Same |
 | `BLOB` | binary string | Same |
 | everything else (`VARCHAR`, `DATE`/`TIME`/`TIMESTAMP`, `DECIMAL`, `HUGEINT`/`UBIGINT`/`UHUGEINT`, nested types) | canonical string form (exceptions for `VARIANT`, `GEOMETRY`, and `TIMESTAMPTZ` below) | Same, including the zero-field `STRUCT` (`{}`) that only DuckDB 2.0 can build |
-| `TIMESTAMPTZ_NS` | Not available: DuckDB 1.5 has no such type | canonical string form of the UTC instant, like `TIMESTAMPTZ` |
-| A type newer than the DuckDB headers the driver was built with | Not applicable | `null` when NULL; any other value reports a PDO error, like `VARIANT` |
+| `TIMESTAMPTZ_NS` | DuckDB 1.5 has no such type. If the build loads a DuckDB 2.0 `libduckdb`, every value fetches as `null` (see the warning below) | canonical string form of the UTC instant, like `TIMESTAMPTZ` |
+| A type newer than the DuckDB headers the driver was built with | `null`, even for non-NULL values (see the warning below) | `null` when NULL; any other value reports a PDO error, like `VARIANT` |
 | SQL NULL | `null` | Same |
+
+**Warning:** Build the driver against the headers of the `libduckdb` it loads.
+The library's file name carries no version, so a build against the DuckDB 1.5
+headers can load a DuckDB 2.0 library. That build doesn't know the types
+DuckDB 2.0 adds, and it loses their data without an error: a `TIMESTAMPTZ_NS`
+value fetches as `null`, `[ts]` fetches as `[NULL]`, and `getColumnMeta()`
+reports `UNKNOWN`.
 
 `getColumnMeta()` reports the real DuckDB type name per column and a `pdo_type`
 that matches the fetch shape: `PDO::PARAM_INT` for exactly `BOOLEAN`,
@@ -397,7 +404,10 @@ call `ST_AsText()` from the spatial extension.
 
 `TIMESTAMPTZ` native fetches render the instant in UTC (`+00`), both at the top
 level and as a nested leaf. For DuckDB's session-`TimeZone` rendering, select
-`CAST(col AS VARCHAR)`. `TIMESTAMPTZ_NS` on DuckDB 2.0 follows the same rule.
+`CAST(col AS VARCHAR)`. `TIMESTAMPTZ_NS` on DuckDB 2.0 follows the same rule,
+but don't cast `TIMESTAMPTZ_NS` columns to `VARCHAR` on the DuckDB 2.0 preview:
+a DuckDB defect in that cast can invalidate the whole database. See
+[Types](#types) in the DuckDB 2.0 section.
 
 DuckDB's C result API can't extract non-NULL `VARIANT` cells safely, so
 fetching a row that holds one reports a PDO error; cast it to `VARCHAR` (or
@@ -568,13 +578,26 @@ or changes. The [type mapping](#type-mapping) table lists the PHP values.
   It fetches as `{}`, and the appender accepts an empty PHP array for it.
 - **Newer types.** If DuckDB returns a type that the driver's headers don't
   define, a non-NULL value reports `DuckDB type id N is not supported by this
-  pdo_duckdb build; cast the value to VARCHAR in SQL`.
+  pdo_duckdb build; cast the value to VARCHAR in SQL`, and a NULL value fetches
+  as `null`. The driver can't turn such a value into a string: DuckDB's C API
+  reads a cell only through the memory layout of its type, and the driver has
+  no layout for a type its headers don't define. Reporting an error is safer
+  than reading memory it can't interpret or returning a wrong `null`.
 
-DuckDB's own `CAST(x AS VARCHAR)` misrenders a `TIMESTAMPTZ_NS` instant before
-1970 that falls less than one microsecond before a whole second, or raises an
-`INTERNAL Error` for it. For example, it renders `make_timestamp_ns(-1)` as
-`1970-01-01 00:00:00.00000000/+00`. The driver's own fetch of the same value is
-correct: `1969-12-31 23:59:59.999999999+00`.
+**Warning:** DuckDB's own `CAST(x AS VARCHAR)` mishandles a `TIMESTAMPTZ_NS`
+instant before 1970 that falls less than one microsecond before a whole
+second. In a session with `SET TimeZone='UTC'`, it renders
+`make_timestamp_ns(-1)` as `1970-01-01 00:00:00.00000000/+00` instead of
+`1969-12-31 23:59:59.999999999+00`, and for other values, such as
+`make_timestamp_ns(-500)`, it raises `INTERNAL Error: Information loss on
+integer cast`. If DuckDB raises that error while it runs the query, for
+example on a table column, it invalidates the whole database: every later
+statement, even `SELECT 1`, fails with `FATAL Error: Failed: database has been
+invalidated because of a previous fatal error` until you open the database
+again. The database stays usable only when DuckDB evaluates the cast before it
+runs the query, as it does when the input is a constant or a bound parameter.
+The driver's own fetch of these values is correct, so fetch the column instead
+of casting it.
 
 ### `CONNECT`
 
@@ -587,6 +610,14 @@ still inserts the row. `exec()` works. This is a DuckDB 2.0 preview defect in
 `exec()` for statements while connected, or `ATTACH` the remote database and
 query it with qualified names instead of `CONNECT`. `DISCONNECT` restores
 normal behavior.
+
+The `ATTACH` workaround has its own limits on a quack remote. `prepare()` of a
+statement with a placeholder fails with `Invalid Input Error: Values were not
+provided for the following parameters: 1`, so statements on the remote can't
+use bound parameters. With both `CONNECT` and `ATTACH`, `exec()` returns `0`
+and `rowCount()` reports `0` for an `INSERT`, `UPDATE`, or `DELETE` on the
+remote, however many rows it changed, because DuckDB reports no changed rows
+for it. Count the rows in SQL if you need the number.
 
 ### Driver differences
 
