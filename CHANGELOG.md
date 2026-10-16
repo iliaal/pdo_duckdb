@@ -7,8 +7,97 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- Keep an unclosed `Pdo\Duckdb\Appender` from reading its PDO connection after
+  garbage collection or request shutdown has freed it; the appender's native
+  state is now released before the connection closes.
+- Initialize DuckDB type handles before publishing them, so running out of
+  `memory_limit` while creating an appender or caching result columns no longer
+  frees uninitialized handles.
+- Reject a row that holds a non-NULL `VARIANT` value before any of its columns
+  are read, so a warning-mode error handler or output callback can no longer
+  run while PDO is still reading the row.
+- Under `open_basedir`, refuse a connection that is sandboxed after it opened
+  (the limit was tightened at runtime, or a persistent connection is reused)
+  when a DuckDB extension the sandbox can't govern is loaded, and stop that
+  instance's quack listeners. The trusted extensions are autocomplete,
+  core_functions, excel, fts, httpfs, icu, inet, json, parquet, spatial, tpcds,
+  tpch, and vss. A refused persistent connection is replaced with a freshly
+  sandboxed one.
+- Under `open_basedir`, stop writing to a DuckDB file log sink that was enabled
+  before the sandbox applied, and keep `CALL enable_logging()` from re-arming it.
+- On DuckDB 2.0 builds under `open_basedir`, reject the
+  `allow_extension_repositories` and `extension_repository_directory` options
+  and forbid extension repositories.
+
+### Added
+
+- Build against the DuckDB 2.0 preview. Configure detects `duckdb_v2.h` next to
+  the selected `duckdb.h`, defines `HAVE_DUCKDB_V2`, and stops when the headers
+  and library come from different releases. Builds against DuckDB 1.5.x are
+  unchanged.
+- Run the test suite in a blocking CI lane against a DuckDB 2.0 preview pinned
+  by URL and SHA-256.
+- On DuckDB 2.0 builds, fetch `TIMESTAMPTZ_NS` values at the top level and inside
+  nested values as their UTC string instead of `null`, report `TIMESTAMP_TZ_NS`
+  from `getColumnMeta()`, and check `TIMESTAMPTZ_NS` values before appending
+  them.
+- Document DuckDB 2.0 behavior that affects PDO users: storage-version interop
+  (`storage_compatibility_version`, `ATTACH ... (STORAGE_VERSION ...)`),
+  transaction invalidation after errors, division by zero, lambda syntax, the
+  profiling layout, unbuffered error timing, and a DuckDB 2.0 defect that makes
+  `query()` and `prepare()` fail while a connection is `CONNECT`ed.
+
+### Changed
+
+- Build, test, and ship against DuckDB 1.5.6 (was 1.5.5). Source builds still
+  accept DuckDB 1.5.3 or newer.
+- A row holding a non-NULL `VARIANT` value now fails the fetch: `fetch()`
+  returns `false`, or throws under `ERRMODE_EXCEPTION`, instead of returning the
+  cell as `null`. A `while ($row = $stmt->fetch())` loop stops at that row, so
+  cast `VARIANT` columns to `VARCHAR` in SQL or check `errorInfo()` after the
+  loop.
+- An unclosed `Pdo\Duckdb\Appender` flushes its buffered rows when it or its
+  connection is torn down, including after a fatal error. When PDO rolls back
+  an open transaction at teardown, the appender's buffered rows are discarded
+  with it, whichever object PHP frees first. Rows left buffered by a failed
+  append, flush, or close are discarded instead of being flushed later.
+- On DuckDB 2.0 builds, report `PDO::PARAM_NULL` for columns of DuckDB's `NULL`
+  type, and raise a PDO error instead of returning `null` for a non-NULL value
+  of a type the build doesn't recognize.
+
 ### Fixed
 
+- Closing a connection no longer aborts the PHP process when a DuckDB file log
+  sink can't write its files; the failed query still raises a `PDOException`.
+- Compute bind positions without signed overflow for `execute()` array keys at
+  `PHP_INT_MAX`; such keys still fail as out-of-range parameters.
+- Quote nested `TIME` and `TIMESTAMP` values in `LIST`, `STRUCT`, and `MAP`
+  exactly as `CAST(... AS VARCHAR)` does, for example
+  `['2020-01-01 10:00:00']`.
+- Report invalid UTF-8 in a nested appender string as
+  `contains a string that is not valid UTF-8` instead of
+  `is of unsupported type string`.
+- Don't leak nested-type render descriptors when `memory_limit` runs out while
+  caching result columns.
+- On DuckDB 2.0 builds, fetch an empty `STRUCT` nested next to other fields
+  instead of returning the whole value as `null`, and accept `[]` for it in the
+  appender.
+- Read the open_basedir sandbox helpers' query results through DuckDB's
+  data-chunk API, which avoids a crash with DuckDB 2.0 libraries.
+- On DuckDB 2.0 builds, discard a reused persistent connection that is still
+  `CONNECT`ed to a remote database instead of sending its reset statements to
+  the remote.
+- Stop every quack listener of a refused connection, including one whose URI
+  contains a NUL byte, and name the reason when an attached database name or
+  path containing a NUL byte blocks the sandbox.
+- Correct the streaming notes: another statement on the connection aborts a
+  partially read unbuffered result. Under `ERRMODE_SILENT` and `ERRMODE_WARNING`,
+  check `errorCode()` right after the fetch loop ends.
+- Document that NUL bytes truncate nested `VARCHAR` members and how the
+  appender handles invalid UTF-8, including the top-level `VARCHAR` case that
+  loses the whole buffered batch.
 - Return an empty array from `PDO::duckdbTableNames()` for valid `UPDATE`,
   `DELETE`, and `MERGE` statements instead of throwing.
 - Check the complete PHP module listing before loading shared PDO in the common
