@@ -29,6 +29,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sandboxed one.
 - Under `open_basedir`, stop writing to a DuckDB file log sink that was enabled
   before the sandbox applied, and keep `CALL enable_logging()` from re-arming it.
+  Tightening `open_basedir` on an open handle now sets
+  `logging_storage='memory'` on all DuckDB versions, so a file log silently
+  stops receiving entries; read `duckdb_logs` instead.
 - On DuckDB 2.0 builds under `open_basedir`, reject the
   `allow_extension_repositories` and `extension_repository_directory` options
   and forbid extension repositories.

@@ -320,6 +320,14 @@ external access and locks the connection configuration. You can still load an
 extension compiled into DuckDB, such as `LOAD json`; the sandbox blocks
 extension files and downloads.
 
+Tightening `open_basedir` on an open handle also switches DuckDB logging to
+in-memory storage (`logging_storage='memory'`), on every DuckDB version. If the
+connection was logging to a file (`CALL enable_logging(storage='file', ...)`),
+that file gets no new lines from then on, and neither the driver nor DuckDB
+reports the switch. `CALL enable_logging()` doesn't restore the file sink. Read
+later entries from `duckdb_logs`, or open the connection with the final
+`open_basedir` already in place if you need a file log outside the sandbox.
+
 Disabling external access doesn't stop an extension that opens files, sockets,
 or listeners itself. So when the driver sandboxes a connection after it opens
 (you tighten `open_basedir` mid-request, or a persistent connection is reused),
