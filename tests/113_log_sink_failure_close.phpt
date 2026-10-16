@@ -44,13 +44,15 @@ $stmt = null;
 $db = null;
 echo "closed prepared\n";
 
+// No-regression check only: with a transaction open, PDO core rolls back
+// before the closer runs, and that ROLLBACK already ends the stale query.
 $db = new PDO('duckdb::memory:', null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
 $db->beginTransaction();
 $db->exec('CREATE TABLE t (i INTEGER)');
 $db->exec("CALL enable_logging(storage='file', storage_path='$sink')");
-attempt('query in transaction', fn() => $db->query('SELECT 1'));
+attempt('rollback-first close', fn() => $db->query('SELECT 1'));
 $db = null;
-echo "closed transaction\n";
+echo "closed after rollback-first path\n";
 
 $db = open_logging($sink, [PDO::ATTR_PERSISTENT => true]);
 attempt('persistent query', fn() => $db->query('SELECT 1'));
@@ -68,7 +70,7 @@ unbuffered query: PDOException IO Error
 closed unbuffered
 prepared execute: PDOException IO Error
 closed prepared
-query in transaction: PDOException IO Error
-closed transaction
+rollback-first close: PDOException IO Error
+closed after rollback-first path
 persistent query: PDOException IO Error
 released persistent
