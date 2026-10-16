@@ -908,14 +908,137 @@ static bool pdo_duckdb_query_ok(duckdb_connection conn, const char *sql)
 	return true;
 }
 
+#define PDO_DUCKDB_HELPER_MAX_COLUMNS 2
+
+/* cells[i] is a NUL-terminated copy of column i, or NULL for SQL NULL. Return
+ * false to stop the walk. */
+typedef bool (*pdo_duckdb_varchar_row_cb)(void *ctx, char **cells);
+
+/* Walk a materialized result of ncols VARCHAR columns through the data-chunk
+ * API; the duckdb_value_* row API misreads and crashes on DuckDB 2.0 results
+ * with a NULL-typed column. Returns false, after *rows_out rows, on a column
+ * shape mismatch, a cell holding a NUL byte (the callers need C strings), a
+ * fetch error, or a callback stop. */
+static bool pdo_duckdb_each_varchar_row(duckdb_result *res, idx_t ncols,
+		pdo_duckdb_varchar_row_cb cb, void *ctx, idx_t *rows_out)
+{
+	duckdb_data_chunk chunk;
+	idx_t col;
+	bool ok = true;
+
+	*rows_out = 0;
+	if (ncols == 0 || ncols > PDO_DUCKDB_HELPER_MAX_COLUMNS || duckdb_column_count(res) != ncols) {
+		return false;
+	}
+	for (col = 0; col < ncols; col++) {
+		if (duckdb_column_type(res, col) != DUCKDB_TYPE_VARCHAR) {
+			return false;
+		}
+	}
+
+	while (ok && (chunk = duckdb_fetch_chunk(*res)) != NULL) {
+		idx_t size = duckdb_data_chunk_get_size(chunk);
+		duckdb_string_t *data[PDO_DUCKDB_HELPER_MAX_COLUMNS];
+		uint64_t *validity[PDO_DUCKDB_HELPER_MAX_COLUMNS];
+		idx_t row;
+
+		for (col = 0; col < ncols; col++) {
+			duckdb_vector vec = duckdb_data_chunk_get_vector(chunk, col);
+
+			data[col] = (duckdb_string_t *)duckdb_vector_get_data(vec);
+			validity[col] = duckdb_vector_get_validity(vec);
+		}
+		for (row = 0; ok && row < size; row++) {
+			char *cells[PDO_DUCKDB_HELPER_MAX_COLUMNS] = {NULL};
+
+			for (col = 0; col < ncols; col++) {
+				const char *p;
+				size_t len;
+
+				if (validity[col] && !duckdb_validity_row_is_valid(validity[col], row)) {
+					continue;
+				}
+				p = duckdb_string_t_data(&data[col][row]);
+				len = (size_t)duckdb_string_t_length(data[col][row]);
+				if (memchr(p, '\0', len)) {
+					ok = false;
+					break;
+				}
+				cells[col] = estrndup(p, len);
+			}
+			if (ok) {
+				(*rows_out)++;
+				ok = cb(ctx, cells);
+			}
+			for (col = 0; col < ncols; col++) {
+				if (cells[col]) {
+					efree(cells[col]);
+				}
+			}
+		}
+		duckdb_destroy_data_chunk(&chunk);
+	}
+	return ok && duckdb_result_error(res) == NULL;
+}
+
+static bool pdo_duckdb_result_has_rows(duckdb_result *res)
+{
+	duckdb_data_chunk chunk;
+
+	while ((chunk = duckdb_fetch_chunk(*res)) != NULL) {
+		idx_t size = duckdb_data_chunk_get_size(chunk);
+
+		duckdb_destroy_data_chunk(&chunk);
+		if (size > 0) {
+			return true;
+		}
+	}
+	return false;
+}
+
+static void pdo_duckdb_append_quoted(smart_str *sql, const char *s, char quote)
+{
+	smart_str_appendc(sql, quote);
+	for (; *s; s++) {
+		if (*s == quote) {
+			smart_str_appendc(sql, quote);
+		}
+		smart_str_appendc(sql, *s);
+	}
+	smart_str_appendc(sql, quote);
+}
+
+static bool pdo_duckdb_detach_row(void *ctx, char **cells)
+{
+	pdo_duckdb_db_handle *H = (pdo_duckdb_db_handle *)ctx;
+	const char *name = cells[0], *path = cells[1];
+	smart_str sql = {0};
+	bool ok;
+
+	if (!name || !path || !*path) {
+		return true;
+	}
+	/* Quiet check: denied attachments are detached, not user-facing warnings. */
+	if (php_check_open_basedir_ex(path, 0) == 0) {
+		return true;
+	}
+
+	smart_str_appends(&sql, "DETACH ");
+	pdo_duckdb_append_quoted(&sql, name, '"');
+	smart_str_0(&sql);
+	ok = pdo_duckdb_query_ok(H->conn, ZSTR_VAL(sql.s));
+	smart_str_free(&sql);
+	return ok;
+}
+
 /* DETACH user-attached databases whose paths fall outside open_basedir.
  * OnSet re-adds every attached path to allowed_paths when external access is
  * disabled; those entries cannot be cleared afterward. */
 static bool pdo_duckdb_detach_out_of_basedir(pdo_duckdb_db_handle *H)
 {
 	duckdb_result res = {0};
-	idx_t rows, i;
-	bool ok = true;
+	idx_t rows;
+	bool ok;
 
 	if (duckdb_query(H->conn,
 			"SELECT database_name, path FROM duckdb_databases() "
@@ -925,50 +1048,7 @@ static bool pdo_duckdb_detach_out_of_basedir(pdo_duckdb_db_handle *H)
 		return false;
 	}
 
-	rows = duckdb_row_count(&res);
-	for (i = 0; i < rows; i++) {
-		char *name = duckdb_value_varchar(&res, 0, i);
-		char *path = duckdb_value_varchar(&res, 1, i);
-		smart_str sql = {0};
-		const char *p;
-
-		if (!name || !path || !*path) {
-			if (name) {
-				duckdb_free(name);
-			}
-			if (path) {
-				duckdb_free(path);
-			}
-			continue;
-		}
-
-		/* Quiet check: denied attachments are detached, not user-facing warnings. */
-		if (php_check_open_basedir_ex(path, 0) == 0) {
-			duckdb_free(name);
-			duckdb_free(path);
-			continue;
-		}
-
-		smart_str_appends(&sql, "DETACH \"");
-		for (p = name; *p; p++) {
-			if (*p == '"') {
-				smart_str_appendc(&sql, '"');
-			}
-			smart_str_appendc(&sql, *p);
-		}
-		smart_str_appends(&sql, "\"");
-		smart_str_0(&sql);
-		if (!pdo_duckdb_query_ok(H->conn, ZSTR_VAL(sql.s))) {
-			ok = false;
-		}
-		smart_str_free(&sql);
-		duckdb_free(name);
-		duckdb_free(path);
-		if (!ok) {
-			break;
-		}
-	}
-
+	ok = pdo_duckdb_each_varchar_row(&res, 2, pdo_duckdb_detach_row, H, &rows);
 	duckdb_destroy_result(&res);
 	return ok;
 }
@@ -1020,6 +1100,28 @@ static void pdo_duckdb_refuse_sandbox(pdo_duckdb_db_handle *H, const char *reaso
 		"the connection refuses further SQL", reason);
 }
 
+typedef struct {
+	smart_str names;
+	bool quack_loaded;
+} pdo_duckdb_loaded_extensions;
+
+static bool pdo_duckdb_loaded_extension_row(void *ctx, char **cells)
+{
+	pdo_duckdb_loaded_extensions *loaded = (pdo_duckdb_loaded_extensions *)ctx;
+
+	if (!cells[0]) {
+		return true;
+	}
+	if (strcmp(cells[0], "quack") == 0) {
+		loaded->quack_loaded = true;
+	}
+	if (loaded->names.s) {
+		smart_str_appends(&loaded->names, ", ");
+	}
+	smart_str_appends(&loaded->names, cells[0]);
+	return true;
+}
+
 /* Must run while external access is still on: duckdb_extensions() lists the
  * extension directory, which the profile denies. Returns false (refusal
  * latched) if an uncontained extension is loaded or the list is unavailable;
@@ -1027,8 +1129,10 @@ static void pdo_duckdb_refuse_sandbox(pdo_duckdb_db_handle *H, const char *reaso
 static bool pdo_duckdb_check_loaded_extensions(pdo_duckdb_db_handle *H, duckdb_connection conn, bool *quack_loaded)
 {
 	duckdb_result res = {0};
-	smart_str names = {0};
-	idx_t rows, i;
+	pdo_duckdb_loaded_extensions loaded = {{0}, false};
+	smart_str names;
+	idx_t rows;
+	bool listed;
 
 	*quack_loaded = false;
 	if (duckdb_query(conn,
@@ -1041,23 +1145,15 @@ static bool pdo_duckdb_check_loaded_extensions(pdo_duckdb_db_handle *H, duckdb_c
 		return false;
 	}
 
-	rows = duckdb_row_count(&res);
-	for (i = 0; i < rows; i++) {
-		char *name = duckdb_value_varchar(&res, 0, i);
-
-		if (!name) {
-			continue;
-		}
-		if (strcmp(name, "quack") == 0) {
-			*quack_loaded = true;
-		}
-		if (names.s) {
-			smart_str_appends(&names, ", ");
-		}
-		smart_str_appends(&names, name);
-		duckdb_free(name);
-	}
+	listed = pdo_duckdb_each_varchar_row(&res, 1, pdo_duckdb_loaded_extension_row, &loaded, &rows);
 	duckdb_destroy_result(&res);
+	*quack_loaded = loaded.quack_loaded;
+	names = loaded.names;
+	if (!listed) {
+		smart_str_free(&names);
+		pdo_duckdb_refuse_sandbox(H, "the loaded DuckDB extensions could not be listed");
+		return false;
+	}
 
 	if (rows == 0) {
 		return true;
@@ -1075,37 +1171,33 @@ static bool pdo_duckdb_check_loaded_extensions(pdo_duckdb_db_handle *H, duckdb_c
 	return false;
 }
 
+static bool pdo_duckdb_stop_quack_listener_row(void *ctx, char **cells)
+{
+	duckdb_connection conn = (duckdb_connection)ctx;
+	smart_str sql = {0};
+
+	if (!cells[0]) {
+		return true;
+	}
+	smart_str_appends(&sql, "SELECT * FROM quack_stop(");
+	pdo_duckdb_append_quoted(&sql, cells[0], '\'');
+	smart_str_appendc(&sql, ')');
+	smart_str_0(&sql);
+	(void)pdo_duckdb_query_ok(conn, ZSTR_VAL(sql.s));
+	smart_str_free(&sql);
+	return true;
+}
+
 static void pdo_duckdb_stop_quack_listeners(duckdb_connection conn)
 {
 	duckdb_result res = {0};
-	idx_t rows, i;
+	idx_t rows;
 
-	if (duckdb_query(conn, "SELECT * FROM quack_server_list()", &res) != DuckDBSuccess) {
+	if (duckdb_query(conn, "SELECT #1 FROM quack_server_list()", &res) != DuckDBSuccess) {
 		duckdb_destroy_result(&res);
 		return;
 	}
-	rows = duckdb_row_count(&res);
-	for (i = 0; i < rows; i++) {
-		char *uri = duckdb_value_varchar(&res, 0, i);
-		smart_str sql = {0};
-		const char *p;
-
-		if (!uri) {
-			continue;
-		}
-		smart_str_appends(&sql, "SELECT * FROM quack_stop('");
-		for (p = uri; *p; p++) {
-			if (*p == '\'') {
-				smart_str_appendc(&sql, '\'');
-			}
-			smart_str_appendc(&sql, *p);
-		}
-		smart_str_appends(&sql, "')");
-		smart_str_0(&sql);
-		(void)pdo_duckdb_query_ok(conn, ZSTR_VAL(sql.s));
-		smart_str_free(&sql);
-		duckdb_free(uri);
-	}
+	(void)pdo_duckdb_each_varchar_row(&res, 1, pdo_duckdb_stop_quack_listener_row, conn, &rows);
 	duckdb_destroy_result(&res);
 }
 
@@ -1230,7 +1322,7 @@ static const char *const pdo_duckdb_liveness_httpfs_resets[] = {
 static int pdo_duckdb_httpfs_loaded_state(duckdb_connection conn)
 {
 	duckdb_result res = {0};
-	idx_t rows;
+	int state;
 
 	if (duckdb_query(conn,
 			"SELECT 1 FROM duckdb_extensions() "
@@ -1239,9 +1331,12 @@ static int pdo_duckdb_httpfs_loaded_state(duckdb_connection conn)
 		duckdb_destroy_result(&res);
 		return -1;
 	}
-	rows = duckdb_row_count(&res);
+	state = pdo_duckdb_result_has_rows(&res) ? 1 : 0;
+	if (duckdb_result_error(&res) != NULL) {
+		state = -1;
+	}
 	duckdb_destroy_result(&res);
-	return rows > 0 ? 1 : 0;
+	return state;
 }
 
 static void pdo_duckdb_liveness_discard(pdo_dbh_t *dbh)
