@@ -11,6 +11,9 @@ if (!pdo_duckdb_v2_headers()) die('skip needs a build against the DuckDB 2.0 hea
 --FILE--
 <?php
 $dir = sys_get_temp_dir() . '/pdo_duckdb_121';
+foreach (glob("$dir/*") ?: [] as $f) {
+    @unlink($f);
+}
 @mkdir($dir);
 $opts = [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION];
 
@@ -52,7 +55,9 @@ try {
     new PDO("duckdb:$dir/bad.db;storage_compatibility_version=v9.9.9", null, null, $opts);
     echo "BAD: unknown storage version accepted\n";
 } catch (PDOException $e) {
-    echo "unknown version rejected\n";
+    echo str_contains($e->getMessage(), 'storage_compatibility_version')
+        ? "unknown version rejected\n"
+        : "BAD: unexpected error " . $e->getMessage() . "\n";
 }
 ?>
 --CLEAN--
