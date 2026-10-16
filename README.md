@@ -320,6 +320,19 @@ external access and locks the connection configuration. You can still load an
 extension compiled into DuckDB, such as `LOAD json`; the sandbox blocks
 extension files and downloads.
 
+Disabling external access doesn't stop an extension that opens files, sockets,
+or listeners itself. So when the driver sandboxes a connection after it opens
+(you tighten `open_basedir` mid-request, or a persistent connection is reused),
+it first checks the loaded extensions. If any extension outside `autocomplete`,
+`core_functions`, `excel`, `fts`, `httpfs`, `icu`, `inet`, `json`, `parquet`,
+`spatial`, `tpcds`, `tpch`, and `vss` is loaded (for example `quack`,
+`sqlite_scanner`, or `postgres_scanner`), every later SQL call on that
+connection fails with driver code 4, and the message names the extensions. The
+driver also stops the connection's `quack` listeners. A reused persistent
+connection is replaced by a new connection that's sandboxed when it opens. If
+you need one of those extensions, load it only on connections that never run
+under a tightened `open_basedir`.
+
 Locking the configuration blocks *every* later `SET`, including settings with
 no security impact (`threads`, `memory_limit`, `preserve_insertion_order`,
 `default_null_order`, …). Pass those at connect time instead, in the DSN tail
@@ -548,10 +561,10 @@ SQLSTATE (`errorInfo()[0]`):
 | 4           | `HY000`  | `open_basedir` sandbox denials (the denial message text is unchanged)  |
 | 5           | `HY000`  | streaming / fetch errors                                               |
 
-Code 4 covers the driver's own sandbox refusals (fail-closed re-narrowing and
-rejected sandbox-bypass options). When DuckDB itself refuses the work because
-the sandbox disabled external access (e.g. `read_csv()` failing at prepare
-with an access error), the failure carries the code of the phase that reported
+Code 4 covers the driver's own sandbox refusals (fail-closed re-narrowing,
+rejected sandbox-bypass options, and connections refused for a loaded
+extension). When DuckDB itself refuses the work because the sandbox disabled
+external access (e.g. `read_csv()` failing at prepare with an access error), the failure carries the code of the phase that reported
 it (3 for prepare failures) and the engine's message intact.
 
 Whether a failure throws depends on the entry point and `PDO::ATTR_ERRMODE`:

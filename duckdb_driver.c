@@ -998,16 +998,19 @@ static const char *const pdo_duckdb_profile_post_detach[] = {
 	"SET lock_configuration=true",
 };
 
-/* Extensions the profile is known to contain. httpfs does its I/O through
- * DuckDB's file system layer, which enable_external_access=false denies. The
- * built-ins do no I/O of their own. spatial's bundled GDAL opens its own HTTP
- * connections (/vsicurl/, WFS:, OAPIF:, ...); trusting it relies on spatial
- * checking enable_external_access against its own VSI and driver prefix list.
- * Any other loaded extension may open sockets or listeners directly: quack
- * serves and attaches remote DuckDBs regardless of the profile. Unknown
- * extensions are refused, not trusted. */
+/* Extensions the profile is known to contain. httpfs and excel do their I/O
+ * through DuckDB's file system layer, which enable_external_access=false
+ * denies. The built-ins, fts, inet, tpch, tpcds and vss do no file or network
+ * I/O of their own. spatial's bundled GDAL opens its own HTTP connections
+ * (/vsicurl/, WFS:, OAPIF:, ...); trusting it relies on spatial checking
+ * enable_external_access against its own VSI and driver prefix list. Any other
+ * loaded extension may open sockets, files or listeners directly: quack serves
+ * and attaches remote DuckDBs regardless of the profile, and the scanners,
+ * cloud and lakehouse extensions carry their own clients and credentials.
+ * Unknown extensions are refused, not trusted. */
 #define PDO_DUCKDB_SANDBOX_CONTAINED_EXTENSIONS \
-	"'autocomplete', 'core_functions', 'httpfs', 'icu', 'json', 'parquet', 'spatial'"
+	"'autocomplete', 'core_functions', 'excel', 'fts', 'httpfs', 'icu', 'inet', 'json', " \
+	"'parquet', 'spatial', 'tpcds', 'tpch', 'vss'"
 
 static void pdo_duckdb_refuse_sandbox(pdo_duckdb_db_handle *H, const char *reason)
 {

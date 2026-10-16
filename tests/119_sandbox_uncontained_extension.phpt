@@ -1,5 +1,5 @@
 --TEST--
-pdo_duckdb: tightening open_basedir refuses a handle with any extension outside the contained set, not one with httpfs or spatial
+pdo_duckdb: tightening open_basedir refuses a handle with any extension outside the contained set, not one with httpfs, spatial or inet
 --EXTENSIONS--
 pdo
 pdo_duckdb
@@ -10,9 +10,9 @@ try {
     if ($dir = getenv('PDO_DUCKDB_TEST_EXTENSION_DIR')) {
         $db->exec('SET extension_directory=' . $db->quote($dir));
     }
-    $db->exec('INSTALL httpfs; INSTALL inet; INSTALL spatial; LOAD httpfs; LOAD inet; LOAD spatial');
+    $db->exec('INSTALL httpfs; INSTALL inet; INSTALL spatial; INSTALL sqlite_scanner; LOAD httpfs; LOAD inet; LOAD spatial; LOAD sqlite_scanner');
 } catch (PDOException $e) {
-    die('skip httpfs/inet/spatial extensions not available: ' . strtok($e->getMessage(), "\n"));
+    die('skip httpfs/inet/spatial/sqlite_scanner extensions not available: ' . strtok($e->getMessage(), "\n"));
 }
 ?>
 --FILE--
@@ -29,7 +29,7 @@ function open_with(string $ext): PDO {
 $httpfs = open_with('httpfs');
 $spatial = open_with('spatial');
 $inet = open_with('inet');
-var_dump($inet->query("SELECT host('192.168.1.5/24'::INET)")->fetchColumn());
+$sqlite = open_with('sqlite_scanner');
 
 ini_set('open_basedir', __DIR__);
 
@@ -57,23 +57,26 @@ try {
 var_dump(@stream_socket_accept($listener, 0) === false);
 fclose($listener);
 
-// inet does no network I/O, but it is not in the vetted set: unknown
-// extensions are refused rather than trusted.
+// inet does no I/O of its own and stays usable.
+var_dump($inet->query("SELECT host('192.168.1.5/24'::INET)")->fetchColumn());
+
+// sqlite_scanner opens database files itself, outside the vetted set: the
+// handle is refused, and stays refused.
 for ($i = 0; $i < 2; $i++) {
     try {
-        $inet->query('SELECT 1')->fetchAll();
-        echo "inet handle: ALLOWED\n";
+        $sqlite->query('SELECT 1')->fetchAll();
+        echo "sqlite_scanner handle: ALLOWED\n";
     } catch (PDOException $e) {
         echo $e->getMessage(), "\n";
     }
 }
 ?>
 --EXPECT--
+int(42)
+bool(true)
+int(42)
+bool(true)
+bool(true)
 string(11) "192.168.1.5"
-int(42)
-bool(true)
-int(42)
-bool(true)
-bool(true)
-SQLSTATE[HY000]: General error: 4 Unable to apply the open_basedir sandbox profile to DuckDB: loaded DuckDB extensions are not contained by it (inet); the connection refuses further SQL
-SQLSTATE[HY000]: General error: 4 Unable to apply the open_basedir sandbox profile to DuckDB: loaded DuckDB extensions are not contained by it (inet); the connection refuses further SQL
+SQLSTATE[HY000]: General error: 4 Unable to apply the open_basedir sandbox profile to DuckDB: loaded DuckDB extensions are not contained by it (sqlite_scanner); the connection refuses further SQL
+SQLSTATE[HY000]: General error: 4 Unable to apply the open_basedir sandbox profile to DuckDB: loaded DuckDB extensions are not contained by it (sqlite_scanner); the connection refuses further SQL
