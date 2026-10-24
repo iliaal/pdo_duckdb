@@ -81,7 +81,7 @@ typedef struct {
 	 * extension it does not govern, or no extension list). Every later SQL
 	 * entry point refuses, with sandbox_refusal as the reason. */
 	bool sandbox_refused;
-	char sandbox_refusal[512];
+	char sandbox_refusal[256];
 	/* PDO::DUCKDB_ATTR_UNBUFFERED */
 	bool unbuffered;
 	/* PDO core re-applies constructor driver_options through set_attribute()

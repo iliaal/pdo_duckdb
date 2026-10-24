@@ -12,8 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Under `open_basedir`, stop refusing a connection that is sandboxed after it
   opened just because another process was installing a DuckDB extension into
   the same extension directory at that moment. Listing the loaded extensions
-  now retries DuckDB IO errors for up to half a second before refusing, and a
-  refusal for an unlistable extension set now includes DuckDB's error.
+  now retries DuckDB IO errors for up to half a second before refusing.
 
 ## [0.8.0] - 2026-10-16
 

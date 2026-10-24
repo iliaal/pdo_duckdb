@@ -1133,7 +1133,7 @@ static void pdo_duckdb_refuse_sandbox(pdo_duckdb_db_handle *H, const char *reaso
  * collides with it fails with an IO error although nothing is wrong. Retry
  * IO errors for up to half a second (the attempt cap covers a platform without
  * a monotonic clock); any other error, or one that outlasts the budget, is
- * returned with *res holding it. */
+ * returned. */
 #define PDO_DUCKDB_EXTENSIONS_IO_BUDGET_NS ((uint64_t)500 * 1000 * 1000)
 #define PDO_DUCKDB_EXTENSIONS_IO_MAX_RETRIES 1000
 #define PDO_DUCKDB_EXTENSIONS_IO_RETRY_USEC 1000
@@ -1154,20 +1154,6 @@ static duckdb_state pdo_duckdb_query_extensions(duckdb_connection conn, const ch
 		usleep(PDO_DUCKDB_EXTENSIONS_IO_RETRY_USEC);
 	}
 	return DuckDBSuccess;
-}
-
-static void pdo_duckdb_refuse_unlisted_extensions(pdo_duckdb_db_handle *H, duckdb_result *res)
-{
-	const char *err = duckdb_result_error(res);
-	char reason[sizeof(H->sandbox_refusal)];
-
-	if (!err || !*err) {
-		pdo_duckdb_refuse_sandbox(H, "the loaded DuckDB extensions could not be listed");
-		return;
-	}
-	snprintf(reason, sizeof(reason), "the loaded DuckDB extensions could not be listed (%.*s)",
-		(int)MIN(strcspn(err, "\r\n"), 200), err);
-	pdo_duckdb_refuse_sandbox(H, reason);
 }
 
 typedef struct {
@@ -1210,21 +1196,20 @@ static bool pdo_duckdb_check_loaded_extensions(pdo_duckdb_db_handle *H, duckdb_c
 			"AND extension_name NOT IN (" PDO_DUCKDB_SANDBOX_CONTAINED_EXTENSIONS ") "
 			"ORDER BY extension_name",
 			&res) != DuckDBSuccess) {
-		pdo_duckdb_refuse_unlisted_extensions(H, &res);
 		duckdb_destroy_result(&res);
+		pdo_duckdb_refuse_sandbox(H, "the loaded DuckDB extensions could not be listed");
 		return false;
 	}
 
 	listed = pdo_duckdb_each_varchar_row(&res, 1, pdo_duckdb_loaded_extension_row, &loaded, &rows, &nul_cell);
+	duckdb_destroy_result(&res);
 	*quack_loaded = loaded.quack_loaded;
 	names = loaded.names;
 	if (!listed) {
 		smart_str_free(&names);
-		pdo_duckdb_refuse_unlisted_extensions(H, &res);
-		duckdb_destroy_result(&res);
+		pdo_duckdb_refuse_sandbox(H, "the loaded DuckDB extensions could not be listed");
 		return false;
 	}
-	duckdb_destroy_result(&res);
 
 	if (rows == 0) {
 		return true;
