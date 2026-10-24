@@ -35,6 +35,10 @@ touch($ready);
 $installs = 1;
 $deadline = microtime(true) + 60;
 while (!file_exists($stop) && microtime(true) < $deadline) {
+    // Pause so each install holds its lock for a fraction of the time, as a
+    // real INSTALL does; a retrying listing then finds a gap well within its
+    // budget, while a single listing still collides often.
+    usleep(5000);
     $db->exec($install);
     $installs++;
 }
