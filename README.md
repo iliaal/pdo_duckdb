@@ -344,6 +344,17 @@ local leak-checked runs) on each replacement; the driver doesn't control that
 path. If you need one of those extensions, load it only on connections that
 never run under a tightened `open_basedir`.
 
+The same check also runs when a connection opens under `open_basedir`. It lists
+extensions with DuckDB's `duckdb_extensions()`, which reads the `.info` file of
+every extension in the extension directory. If that listing fails, the
+connection is refused the same way, and an already running connection also has
+its `quack` listeners stopped. One failure is transient: while another process
+runs `INSTALL` into the same extension directory, the listing can collide with
+that install's temporary `.info` file. The driver retries that error every
+millisecond for up to 500 ms. If the collisions outlast that, the connection
+is still refused; any other listing error (for example, a corrupt `.info`
+file) refuses it without waiting.
+
 Locking the configuration blocks *every* later `SET`, including settings with
 no security impact (`threads`, `memory_limit`, `preserve_insertion_order`,
 `default_null_order`, …). Pass those at connect time instead, in the DSN tail

@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- Under `open_basedir`, stop the `quack` listeners of a connection that is
+  refused because its loaded extensions can't be listed, for example when the
+  extension directory holds a corrupt `.info` file. The failed listing used to
+  hide a loaded `quack`, so its listeners kept serving.
+
+### Fixed
+
+- Under `open_basedir`, a connection is no longer refused, at open or when an
+  open connection is sandboxed later, just because another process was
+  installing a DuckDB extension into the same extension directory while the
+  driver listed the loaded extensions. The driver retries the listing error
+  that names the install's temporary `.info` file every millisecond for up to
+  500 ms; an install that keeps colliding past that, and every other listing
+  error, still refuses.
+
 ## [0.8.0] - 2026-10-16
 
 ### Security
