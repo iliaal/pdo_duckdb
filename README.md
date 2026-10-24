@@ -335,9 +335,13 @@ it first checks the loaded extensions. If any extension outside `autocomplete`,
 `core_functions`, `excel`, `fts`, `httpfs`, `icu`, `inet`, `json`, `parquet`,
 `spatial`, `tpcds`, `tpch`, and `vss` is loaded (for example `quack`,
 `sqlite_scanner`, or `postgres_scanner`), every later SQL call on that
-connection fails with driver code 4, and the message names the extensions. The
-driver also stops the connection's `quack` listeners. A reused persistent
-connection is replaced by a new connection that's sandboxed when it opens. On
+connection fails with driver code 4, and the message names the extensions. If
+DuckDB can't list the loaded extensions, the connection is refused the same way
+and the message carries DuckDB's error. Because the listing reads every
+extension's `.info` file in the extension directory, an `INSTALL` running in
+another process can make it fail briefly; the driver retries DuckDB IO errors
+for up to half a second first. The driver also stops the connection's `quack`
+listeners. A reused persistent connection is replaced by a new connection that's sandboxed when it opens. On
 PHP releases before 8.4.26 and 8.5.11 (including every 8.1–8.3 release), PDO
 core leaks the discarded persistent handle's bookkeeping (191 to 223 bytes in
 local leak-checked runs) on each replacement; the driver doesn't control that
