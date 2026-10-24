@@ -6,6 +6,10 @@ pdo_duckdb
 --SKIPIF--
 <?php
 if (!function_exists('proc_open')) die('skip proc_open() unavailable');
+require __DIR__ . '/_bailout_shutdown.inc';
+if (!pdo_duckdb_oom_runs_shutdown()) {
+    die("skip memory_limit exhaustion exits without running shutdown functions\n");
+}
 ?>
 --FILE--
 <?php
