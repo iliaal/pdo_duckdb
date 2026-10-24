@@ -335,18 +335,25 @@ it first checks the loaded extensions. If any extension outside `autocomplete`,
 `core_functions`, `excel`, `fts`, `httpfs`, `icu`, `inet`, `json`, `parquet`,
 `spatial`, `tpcds`, `tpch`, and `vss` is loaded (for example `quack`,
 `sqlite_scanner`, or `postgres_scanner`), every later SQL call on that
-connection fails with driver code 4, and the message names the extensions. If
-DuckDB can't list the loaded extensions, the connection is refused the same way.
-Because the listing reads every extension's `.info` file in the extension
-directory, an `INSTALL` running in another process can make it fail briefly;
-the driver retries DuckDB IO errors for up to half a second first. The driver
-also stops the connection's `quack` listeners. A reused persistent connection
-is replaced by a new connection that's sandboxed when it opens. On
+connection fails with driver code 4, and the message names the extensions. The
+driver also stops the connection's `quack` listeners. A reused persistent
+connection is replaced by a new connection that's sandboxed when it opens. On
 PHP releases before 8.4.26 and 8.5.11 (including every 8.1–8.3 release), PDO
 core leaks the discarded persistent handle's bookkeeping (191 to 223 bytes in
 local leak-checked runs) on each replacement; the driver doesn't control that
 path. If you need one of those extensions, load it only on connections that
 never run under a tightened `open_basedir`.
+
+The same check also runs when a connection opens under `open_basedir`. It lists
+extensions with DuckDB's `duckdb_extensions()`, which reads the `.info` file of
+every extension in the extension directory. If that listing fails, the
+connection is refused the same way, and an already running connection also has
+its `quack` listeners stopped. One failure is transient: while another process
+runs `INSTALL` into the same extension directory, the listing can collide with
+that install's temporary `.info` file. The driver retries that error every
+millisecond for up to 500 ms. If the collisions outlast that, the connection
+is still refused; any other listing error (for example, a corrupt `.info`
+file) refuses it without waiting.
 
 Locking the configuration blocks *every* later `SET`, including settings with
 no security impact (`threads`, `memory_limit`, `preserve_insertion_order`,
