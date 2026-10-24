@@ -1128,15 +1128,27 @@ static void pdo_duckdb_refuse_sandbox(pdo_duckdb_db_handle *H, const char *reaso
 }
 
 /* duckdb_extensions() reads the .info file of every extension in the extension
- * directory. An INSTALL in another process holds a lock on its temporary .info
- * file while writing and syncing it, then renames it away, so a listing that
- * collides with it fails with an IO error although nothing is wrong. Retry
- * IO errors for up to half a second (the attempt cap covers a platform without
- * a monotonic clock); any other error, or one that outlasts the budget, is
- * returned. */
-#define PDO_DUCKDB_EXTENSIONS_IO_BUDGET_NS ((uint64_t)500 * 1000 * 1000)
-#define PDO_DUCKDB_EXTENSIONS_IO_MAX_RETRIES 1000
-#define PDO_DUCKDB_EXTENSIONS_IO_RETRY_USEC 1000
+ * directory. An INSTALL in another process writes its .info under a temporary
+ * "<name>.duckdb_extension.tmp-<uuid>.duckdb_extension.info" name, locked while
+ * it is written and synced, then renames it away; the listing picks that file
+ * up because of its suffix. A collision fails with an IO error naming the
+ * temporary file. Retry only that error, for up to half a second (the attempt
+ * cap covers a platform without a monotonic clock): a permanent error, such as
+ * a corrupt .info under a regular name, must refuse without the wait. */
+#define PDO_DUCKDB_EXTENSIONS_RETRY_BUDGET_NS ((uint64_t)500 * 1000 * 1000)
+#define PDO_DUCKDB_EXTENSIONS_MAX_RETRIES 1000
+#define PDO_DUCKDB_EXTENSIONS_RETRY_USEC 1000
+
+static bool pdo_duckdb_extensions_install_race(duckdb_result *res)
+{
+	const char *err;
+
+	if (duckdb_result_error_type(res) != DUCKDB_ERROR_IO) {
+		return false;
+	}
+	err = duckdb_result_error(res);
+	return err != NULL && strstr(err, ".duckdb_extension.tmp-") != NULL;
+}
 
 static duckdb_state pdo_duckdb_query_extensions(duckdb_connection conn, const char *sql, duckdb_result *res)
 {
@@ -1144,17 +1156,24 @@ static duckdb_state pdo_duckdb_query_extensions(duckdb_connection conn, const ch
 	int retries = 0;
 
 	while (duckdb_query(conn, sql, res) != DuckDBSuccess) {
-		if (duckdb_result_error_type(res) != DUCKDB_ERROR_IO
-				|| ++retries > PDO_DUCKDB_EXTENSIONS_IO_MAX_RETRIES
-				|| pdo_duckdb_hrtime_ns() - start >= PDO_DUCKDB_EXTENSIONS_IO_BUDGET_NS) {
+		if (!pdo_duckdb_extensions_install_race(res)
+				|| ++retries > PDO_DUCKDB_EXTENSIONS_MAX_RETRIES
+				|| pdo_duckdb_hrtime_ns() - start >= PDO_DUCKDB_EXTENSIONS_RETRY_BUDGET_NS) {
 			return DuckDBError;
 		}
 		duckdb_destroy_result(res);
 		memset(res, 0, sizeof(*res));
-		usleep(PDO_DUCKDB_EXTENSIONS_IO_RETRY_USEC);
+		usleep(PDO_DUCKDB_EXTENSIONS_RETRY_USEC);
 	}
 	return DuckDBSuccess;
 }
+
+typedef enum {
+	PDO_DUCKDB_QUACK_ABSENT,
+	PDO_DUCKDB_QUACK_LOADED,
+	/* The extension list was unavailable, so quack may be loaded. */
+	PDO_DUCKDB_QUACK_UNKNOWN
+} pdo_duckdb_quack_state;
 
 typedef struct {
 	smart_str names;
@@ -1181,8 +1200,8 @@ static bool pdo_duckdb_loaded_extension_row(void *ctx, char **cells)
 /* Must run while external access is still on: duckdb_extensions() lists the
  * extension directory, which the profile denies. Returns false (refusal
  * latched) if an uncontained extension is loaded or the list is unavailable;
- * *quack_loaded reports whether listeners may need stopping. */
-static bool pdo_duckdb_check_loaded_extensions(pdo_duckdb_db_handle *H, duckdb_connection conn, bool *quack_loaded)
+ * *quack reports whether listeners may need stopping. */
+static bool pdo_duckdb_check_loaded_extensions(pdo_duckdb_db_handle *H, duckdb_connection conn, pdo_duckdb_quack_state *quack)
 {
 	duckdb_result res = {0};
 	pdo_duckdb_loaded_extensions loaded = {{0}, false};
@@ -1190,23 +1209,27 @@ static bool pdo_duckdb_check_loaded_extensions(pdo_duckdb_db_handle *H, duckdb_c
 	idx_t rows;
 	bool listed, nul_cell;
 
-	*quack_loaded = false;
+	*quack = PDO_DUCKDB_QUACK_ABSENT;
 	if (pdo_duckdb_query_extensions(conn,
 			"SELECT extension_name FROM duckdb_extensions() WHERE loaded "
 			"AND extension_name NOT IN (" PDO_DUCKDB_SANDBOX_CONTAINED_EXTENSIONS ") "
 			"ORDER BY extension_name",
 			&res) != DuckDBSuccess) {
 		duckdb_destroy_result(&res);
+		*quack = PDO_DUCKDB_QUACK_UNKNOWN;
 		pdo_duckdb_refuse_sandbox(H, "the loaded DuckDB extensions could not be listed");
 		return false;
 	}
 
 	listed = pdo_duckdb_each_varchar_row(&res, 1, pdo_duckdb_loaded_extension_row, &loaded, &rows, &nul_cell);
 	duckdb_destroy_result(&res);
-	*quack_loaded = loaded.quack_loaded;
+	*quack = loaded.quack_loaded ? PDO_DUCKDB_QUACK_LOADED : PDO_DUCKDB_QUACK_ABSENT;
 	names = loaded.names;
 	if (!listed) {
 		smart_str_free(&names);
+		if (!loaded.quack_loaded) {
+			*quack = PDO_DUCKDB_QUACK_UNKNOWN;
+		}
 		pdo_duckdb_refuse_sandbox(H, "the loaded DuckDB extensions could not be listed");
 		return false;
 	}
@@ -1273,12 +1296,19 @@ static void pdo_duckdb_stop_quack_listeners(duckdb_connection conn)
 
 /* The refused handle never runs user SQL again, but remote clients of a quack
  * listener on the same instance still can: stop the listeners and lock down
- * what the profile does govern, ignoring failures. */
-static void pdo_duckdb_contain_refused(duckdb_connection conn, bool quack_loaded)
+ * what the profile does govern, ignoring failures. An unreadable .info planted
+ * in the extension directory fails the list, so an unknown state still stops
+ * listeners; autoloading goes off first (the profile turns it off anyway), so
+ * calling quack_server_list() cannot install or load quack, and without quack
+ * the call fails at bind and stops nothing. */
+static void pdo_duckdb_contain_refused(duckdb_connection conn, pdo_duckdb_quack_state quack)
 {
 	size_t i;
 
-	if (quack_loaded) {
+	if (quack == PDO_DUCKDB_QUACK_LOADED
+			|| (quack == PDO_DUCKDB_QUACK_UNKNOWN
+				&& pdo_duckdb_query_ok(conn, "SET autoinstall_known_extensions=false")
+				&& pdo_duckdb_query_ok(conn, "SET autoload_known_extensions=false"))) {
 		pdo_duckdb_stop_quack_listeners(conn);
 	}
 	for (i = 0; i < sizeof(pdo_duckdb_profile_pre_detach) / sizeof(pdo_duckdb_profile_pre_detach[0]); i++) {
@@ -1295,16 +1325,16 @@ static void pdo_duckdb_contain_refused(duckdb_connection conn, bool quack_loaded
 static bool pdo_duckdb_admit_loaded_extensions(pdo_duckdb_db_handle *H)
 {
 	duckdb_connection inspect = NULL;
-	bool quack_loaded = false;
+	pdo_duckdb_quack_state quack = PDO_DUCKDB_QUACK_ABSENT;
 	bool ok;
 
 	if (duckdb_connect(H->db, &inspect) != DuckDBSuccess) {
 		pdo_duckdb_refuse_sandbox(H, "the loaded DuckDB extensions could not be listed");
 		return false;
 	}
-	ok = pdo_duckdb_check_loaded_extensions(H, inspect, &quack_loaded);
+	ok = pdo_duckdb_check_loaded_extensions(H, inspect, &quack);
 	if (!ok) {
-		pdo_duckdb_contain_refused(inspect, quack_loaded);
+		pdo_duckdb_contain_refused(inspect, quack);
 	}
 	duckdb_disconnect(&inspect);
 	return ok;
@@ -1394,7 +1424,7 @@ static int pdo_duckdb_httpfs_loaded_state(duckdb_connection conn)
 	duckdb_result res = {0};
 	int state;
 
-	if (pdo_duckdb_query_extensions(conn,
+	if (duckdb_query(conn,
 			"SELECT 1 FROM duckdb_extensions() "
 			"WHERE extension_name = 'httpfs' AND loaded",
 			&res) != DuckDBSuccess) {
