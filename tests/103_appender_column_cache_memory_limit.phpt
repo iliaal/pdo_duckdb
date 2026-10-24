@@ -7,6 +7,10 @@ pdo_duckdb
 <?php
 if (!function_exists('proc_open')) die('skip proc_open() unavailable');
 if (getenv('TEST_PHP_EXTRA_ARGS') === false) die('skip needs run-tests.php child arguments');
+require __DIR__ . '/_bailout_shutdown.inc';
+if (!pdo_duckdb_oom_runs_shutdown()) {
+    die("skip memory_limit exhaustion exits without running shutdown functions\n");
+}
 $env = getenv();
 $env['USE_ZEND_ALLOC'] = '0';
 $env['USE_TRACKED_ALLOC'] = '1';
