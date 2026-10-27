@@ -8,7 +8,7 @@ shopt -s inherit_errexit
 repo="$(cd "$(dirname "$0")/.." && pwd)"
 prefix="$("${PHP_CONFIG}" --prefix)"
 work="$(mktemp -d)"
-trap 'LD_PRELOAD= rm -rf "${work}"' EXIT
+trap 'LD_PRELOAD="" rm -rf "${work}"' EXIT
 mkdir "${work}/inside" "${work}/outside"
 libasan="$(ldd "${prefix}/bin/php" | awk '/libasan|libclang_rt.asan/ && !found {print $3; found = 1}')"
 if [[ -z "${libasan}" || ! -f "${libasan}" ]]; then
@@ -30,7 +30,7 @@ read -r -a flags <<<"${CFLAGS:-${default_flags}}"
 	-Wl,-rpath,"${prefix}/lib" -lphp -lpthread -o "${work}/zts-instance-threads"
 libstdcpp="$(ldd "${DUCKDB_PREFIX}/lib/libduckdb.so" | awk '/libstdc\+\+/ && !found {print $3; found = 1}')"
 export LD_LIBRARY_PATH="${DUCKDB_PREFIX}/lib:${prefix}/lib:${LD_LIBRARY_PATH:-}"
-export LD_PRELOAD="${libasan}${libstdcpp:+ ${libstdcpp}}"
+preload="${libasan}${libstdcpp:+ ${libstdcpp}}"
 export ASAN_OPTIONS="${ASAN_OPTIONS:-detect_leaks=1:abort_on_error=1}"
 export UBSAN_OPTIONS="${UBSAN_OPTIONS:-halt_on_error=1:print_stacktrace=1}"
 export LSAN_OPTIONS="${LSAN_OPTIONS:-suppressions=${repo}/.github/lsan-suppressions.txt:print_suppressions=0}"
@@ -41,7 +41,8 @@ export ZEND_DONT_UNLOAD_MODULES=1
 export PDO_DUCKDB_ZTS_DIR="${work}"
 export PDO_DUCKDB_ZTS_SCRIPT="${repo}/config-tests/zts_instance_threads.php"
 status=0
-timeout -k 5s 90s "${work}/zts-instance-threads" "${EXT}" >"${work}/output" 2>&1 || status=$?
+LD_PRELOAD='' timeout -k 5s 90s env LD_PRELOAD="${preload}" \
+	"${work}/zts-instance-threads" "${EXT}" >"${work}/output" 2>&1 || status=$?
 output="$(<"${work}/output")"
 printf '%s\n' "${output}"
 if [[ "${status}" -ne 0 ]]; then
