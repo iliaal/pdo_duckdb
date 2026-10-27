@@ -18,6 +18,7 @@
 # error "pdo_duckdb requires the verified exact-source DuckDB bridge"
 #endif
 #include "php_ini.h"
+#include "main/php_main.h"
 #include "ext/standard/info.h"
 #include "ext/pdo/php_pdo.h"
 #include "ext/pdo/php_pdo_driver.h"
@@ -59,6 +60,18 @@ PHP_MINIT_FUNCTION(pdo_duckdb)
 {
 	zend_class_entry *pdo_ce;
 	pdd_bridge_error error = {0};
+
+#if PHP_VERSION_ID >= 80300
+	/* Newer patch headers can reference symbols an older runtime lacks;
+	 * reject the mismatch before a lazy symbol lookup aborts the process. */
+	if (php_version_id() < PHP_VERSION_ID) {
+		php_error_docref(NULL, E_CORE_WARNING,
+			"pdo_duckdb was built for PHP " PHP_VERSION " and cannot run on PHP %s; "
+			"install a build for this PHP version or build from source",
+			php_version());
+		return FAILURE;
+	}
+#endif
 
 	if (pdd_bridge_check(&error) != PDD_BRIDGE_OK) {
 		char message[256];
