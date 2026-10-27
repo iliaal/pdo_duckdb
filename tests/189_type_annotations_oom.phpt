@@ -15,16 +15,35 @@ if (!pdo_duckdb_oom_runs_shutdown()) die('skip memory_limit exhaustion exits wit
 $child = <<<'PHP'
 $reserve = str_repeat('r', 1024 * 1024);
 $db = new PDO('duckdb::memory:;threads=1', null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
-if ((int)$argv[1] === 0) {
-    $fields = [];
-    for ($i = 0; $i < 16000; $i++) {
-        $fields[] = 'field' . $i . " := 'Ab' COLLATE nocase";
+if ((int)$argv[1] !== 1) {
+    $groups = [];
+    for ($group = 0; $group < 160; $group++) {
+        $fields = [];
+        for ($offset = 0; $offset < 100; $offset++) {
+            $i = $group * 100 + $offset;
+            $fields[] = 'field' . $i . " := 'Ab' COLLATE nocase";
+        }
+        $groups[] = 'group' . $group . ' := struct_pack(' . implode(', ', $fields) . ')';
     }
-    $st = $db->query('SELECT struct_pack(' . implode(', ', $fields) . ') AS value');
-    unset($fields);
+    $st = $db->query('SELECT struct_pack(' . implode(', ', $groups) . ') AS value');
+    unset($fields, $groups);
 } else {
     $db->exec("CREATE TYPE large_label AS ENUM (SELECT repeat('x', 20*1024*1024))");
     $st = $db->query('SELECT NULL::large_label AS value');
+}
+if ((int)$argv[1] === 2) {
+    $metadata = $st->getColumnMeta(0);
+    $annotations = $metadata['duckdb:type_annotations'];
+    if (count($annotations) !== 16000 || substr_count($metadata['duckdb:decl_type'], 'VARCHAR') !== 16000) {
+        throw new RuntimeException('wrong number of collated VARCHAR leaves');
+    }
+    foreach ($annotations as $i => $annotation) {
+        if ($annotation !== ['path' => [intdiv($i, 100), $i % 100], 'collation' => 'nocase']) {
+            throw new RuntimeException('wrong annotation at ordinal ' . $i);
+        }
+    }
+    echo "16000 annotation paths verified\n";
+    exit(0);
 }
 $metadata = 'unassigned';
 register_shutdown_function(function () {
@@ -51,12 +70,19 @@ $env = getenv();
 if (($env['USE_ZEND_ALLOC'] ?? '') !== '0' || ($env['USE_TRACKED_ALLOC'] ?? '') !== '1') {
     $env['USE_ZEND_ALLOC'] = '1';
 }
-foreach (['annotations', 'declaration'] as $kind => $name) {
+foreach ([2 => 'fixture', 0 => 'annotations', 1 => 'declaration'] as $kind => $name) {
     $cmd = $php . ' -d memory_limit=128M -d display_errors=1 -r ' . escapeshellarg($child) . ' -- ' . $kind;
     $proc = proc_open($cmd, [1 => ['pipe', 'w'], 2 => ['redirect', 1]], $pipes, null, $env);
     $output = stream_get_contents($pipes[1]);
     fclose($pipes[1]);
     $status = proc_close($proc);
+    if ($kind === 2) {
+        if ($status !== 0 || trim($output) !== '16000 annotation paths verified') {
+            throw new Exception("metadata fixture exit $status: $output");
+        }
+        echo "PASS: all 16000 annotation paths verified\n";
+        continue;
+    }
     if ($status !== 255 || !str_contains($output, "reading metadata\n")
             || !str_contains($output, 'Allowed memory size') || !str_contains($output, "clean shutdown\n")
             || str_contains($output, 'unexpected success')) {
@@ -66,5 +92,6 @@ foreach (['annotations', 'declaration'] as $kind => $name) {
 }
 ?>
 --EXPECT--
+PASS: all 16000 annotation paths verified
 PASS: annotations allocation failure and native cleanup
 PASS: declaration allocation failure and native cleanup
