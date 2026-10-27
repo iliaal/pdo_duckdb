@@ -798,6 +798,11 @@ readable. `DISCONNECT` restores local execution.
 
 ### Driver differences
 
+- **Background threads.** DuckDB 2.0 adds a separate `async_threads` pool for
+  work such as I/O. Setting `threads=1` does not limit that pool. If you open
+  many independent databases, configure both, for example
+  `duckdb::memory:;threads=1;async_threads=1`. The driver preserves the engine's
+  defaults. Pass `async_threads` only to 2.0; DuckDB 1.5 rejects that setting.
 - **Profiling.** `duckdbLastProfile()` keeps its `['metrics' => …, 'children' =>
   …]` shape, but DuckDB 2.0 fills it differently. The root `metrics` array is
   empty, and the root has one child per category. The operator tree child has
