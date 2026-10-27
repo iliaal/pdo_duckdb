@@ -225,7 +225,7 @@ cleanup:
     $probeExe = Join-Path $scratch 'bridge-probe.exe'
     Push-Location $scratch
     try {
-        $registration = if ($manifest.engine_major -eq 2) { @('/DHAVE_DUCKDB_STATIC_EXTENSIONS') } else { @() }
+        $registration = @(if ($manifest.engine_major -eq 2) { '/DHAVE_DUCKDB_STATIC_EXTENSIONS' })
         & cl.exe /nologo /TC /MD @registration "/I$output/include" "/I$source" $probeSource (Join-Path $source 'duckdb_static_extensions.c') "/Fe$probeExe" /link $import
         if ($LASTEXITCODE -ne 0) { throw 'C caller probe could not link against combined DLL' }
         Copy-Item $dll (Join-Path $scratch 'duckdb.dll')
