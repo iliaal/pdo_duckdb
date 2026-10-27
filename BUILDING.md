@@ -124,6 +124,10 @@ marker. Pass these options to the PHP SDK extension build:
 --with-pdo-duckdb-bridge-source=C:\build\duckdb-bridge
 ```
 
+If the PHP SDK does not preserve your `PATH`, set `PDO_DUCKDB_PYTHON` to the
+absolute path of your Python 3 executable. Configure uses it for source-cache
+and header verification. CI sets it automatically.
+
 DuckDB 1.5 releases do not provide MSVC static archives. For those versions,
 use a clean checkout of the exact source commit and its matching header cache:
 

@@ -70,20 +70,31 @@ if (PHP_PDO_DUCKDB != "no") {
 			if (PHP_PDO_DUCKDB_BRIDGE_SOURCE == "yes" || duckdb_inc_dir == null) {
 				ERROR("The DuckDB bridge requires explicit library and verified source-cache directories");
 			}
+			var bridge_python = WshShell.Environment("Process").Item("PDO_DUCKDB_PYTHON");
+			var python_command = "python";
+			if (bridge_python) {
+				if (!/^(?:[A-Za-z]:[\\\/]|\\\\)/.test(bridge_python) || /["\r\n]/.test(bridge_python)) {
+					ERROR("PDO_DUCKDB_PYTHON must contain an absolute executable path without quotes");
+				}
+				if (!FSO.FileExists(bridge_python)) {
+					ERROR("PDO_DUCKDB_PYTHON executable not found: " + bridge_python);
+				}
+				python_command = '"' + bridge_python + '"';
+			}
 			var bridge_status = -1;
 			try {
-				bridge_status = pdo_duckdb_run_verifier('python -c "import sys; print(sys.executable); print(sys.version)"');
+				bridge_status = pdo_duckdb_run_verifier(python_command + ' -c "import sys; print(sys.executable); print(sys.version)"');
 				if (bridge_status != 0) {
 					ERROR("Python interpreter inspection failed with exit code " + bridge_status);
 				}
-				bridge_status = pdo_duckdb_run_verifier('python "' + configure_module_dirname + '\\scripts\\duckdb-bridge-source.py" verify "' + PHP_PDO_DUCKDB_BRIDGE_SOURCE + '"');
+				bridge_status = pdo_duckdb_run_verifier(python_command + ' "' + configure_module_dirname + '\\scripts\\duckdb-bridge-source.py" verify "' + PHP_PDO_DUCKDB_BRIDGE_SOURCE + '"');
 			} catch (bridge_error) {
 				ERROR("Python 3 and scripts/duckdb-bridge-source.py are required to verify the DuckDB bridge source cache");
 			}
 			if (bridge_status != 0) {
 				ERROR("DuckDB bridge source-cache verification failed with exit code " + bridge_status);
 			}
-			bridge_status = pdo_duckdb_run_verifier('python "' + configure_module_dirname + '\\scripts\\check-duckdb-headers.py" "' + PHP_PDO_DUCKDB_BRIDGE_SOURCE + '\\include" "' + duckdb_inc_dir + '"');
+			bridge_status = pdo_duckdb_run_verifier(python_command + ' "' + configure_module_dirname + '\\scripts\\check-duckdb-headers.py" "' + PHP_PDO_DUCKDB_BRIDGE_SOURCE + '\\include" "' + duckdb_inc_dir + '"');
 			if (bridge_status != 0) {
 				ERROR("DuckDB header verification failed with exit code " + bridge_status + "; install the matching complete DuckDB C header set (all five release headers for DuckDB 2.0)");
 			}

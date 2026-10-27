@@ -205,6 +205,13 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Set up native Python for configure verification
+        id: python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+          architecture: x64
+
       - name: Prepare exact source headers
         uses: ./.github/actions/duckdb-bridge
         with:
@@ -231,6 +238,8 @@ jobs:
 
       - name: Build extension with the matching PHP SDK and runtime
         uses: php/php-windows-builder/extension@29352c0ef9e8ce65264ea9e287881a6f7758a953 # 1.9.0
+        env:
+          PDO_DUCKDB_PYTHON: ${{ steps.python.outputs.python-path }}
         with:
           extension-ref: ${{ github.sha }}-duckdb-${{ env.DUCKDB_VERSION }}
           php-version: ${{ matrix.php }}
