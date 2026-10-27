@@ -3,6 +3,23 @@
 ARG_WITH("pdo-duckdb", "for pdo_duckdb support", "no");
 ARG_WITH("pdo-duckdb-bridge-source", "verified exact-source cache for a combined DuckDB bridge DLL", "no");
 
+function pdo_duckdb_run_verifier(command)
+{
+	var verifier = WshShell.Exec(command);
+	var output = verifier.StdOut.ReadAll();
+	var errors = verifier.StdErr.ReadAll();
+	if (output) {
+		STDOUT.Write(output);
+	}
+	if (errors) {
+		STDOUT.Write(errors);
+	}
+	while (verifier.Status == 0) {
+		WScript.Sleep(10);
+	}
+	return verifier.ExitCode;
+}
+
 if (PHP_PDO_DUCKDB != "no") {
 	if (PHP_PDO_DUCKDB_BRIDGE_SOURCE == "no" || PHP_PDO_DUCKDB_BRIDGE_SOURCE == "yes") {
 		ERROR("PDO DuckDB requires --with-pdo-duckdb-bridge-source=DIR and a matching combined DuckDB/bridge DLL built by scripts/build-windows-duckdb.ps1; configure never downloads sources");
@@ -55,16 +72,20 @@ if (PHP_PDO_DUCKDB != "no") {
 			}
 			var bridge_status = -1;
 			try {
-				bridge_status = WshShell.Run('python "' + configure_module_dirname + '\\scripts\\duckdb-bridge-source.py" verify "' + PHP_PDO_DUCKDB_BRIDGE_SOURCE + '"', 0, true);
+				bridge_status = pdo_duckdb_run_verifier('python -c "import sys; print(sys.executable); print(sys.version)"');
+				if (bridge_status != 0) {
+					ERROR("Python interpreter inspection failed with exit code " + bridge_status);
+				}
+				bridge_status = pdo_duckdb_run_verifier('python "' + configure_module_dirname + '\\scripts\\duckdb-bridge-source.py" verify "' + PHP_PDO_DUCKDB_BRIDGE_SOURCE + '"');
 			} catch (bridge_error) {
 				ERROR("Python 3 and scripts/duckdb-bridge-source.py are required to verify the DuckDB bridge source cache");
 			}
 			if (bridge_status != 0) {
-				ERROR("DuckDB bridge source-cache verification failed");
+				ERROR("DuckDB bridge source-cache verification failed with exit code " + bridge_status);
 			}
-			bridge_status = WshShell.Run('python "' + configure_module_dirname + '\\scripts\\check-duckdb-headers.py" "' + PHP_PDO_DUCKDB_BRIDGE_SOURCE + '\\include" "' + duckdb_inc_dir + '"', 0, true);
+			bridge_status = pdo_duckdb_run_verifier('python "' + configure_module_dirname + '\\scripts\\check-duckdb-headers.py" "' + PHP_PDO_DUCKDB_BRIDGE_SOURCE + '\\include" "' + duckdb_inc_dir + '"');
 			if (bridge_status != 0) {
-				ERROR("Install the matching complete DuckDB C header set; DuckDB 2.0 requires all five release headers");
+				ERROR("DuckDB header verification failed with exit code " + bridge_status + "; install the matching complete DuckDB C header set (all five release headers for DuckDB 2.0)");
 			}
 			var cache_identity = PHP_PDO_DUCKDB_BRIDGE_SOURCE + "\\include\\pdo_duckdb_bridge_build.h";
 			var library_identity = duckdb_inc_dir + "\\pdo_duckdb_bridge_build.h";
