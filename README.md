@@ -24,7 +24,9 @@ foreach ($stmt as $row) {
 
 ## Requirements
 
-- PHP 8.1 or newer with the `pdo` extension
+- PHP 8.1 or newer with the `pdo` extension for source builds
+- Prebuilt binaries require PHP 8.2.35+, 8.3.36+, 8.4.27+, or 8.5.12+ in their
+  respective series. PHP 8.6 binaries target 8.6.0RC4 and are development builds.
 - For a source build only: DuckDB 1.5.3 or newer (`libduckdb`, complete C
   headers, and matching verified bridge sources; see [BUILDING.md](BUILDING.md)),
   available as a prebuilt bundle from the [DuckDB installation page](https://duckdb.org/docs/installation/)
@@ -42,16 +44,25 @@ pie install iliaal/pdo_duckdb
 
 On Linux (x86_64/arm64), macOS (Apple Silicon), and Windows x64, PIE downloads a
 self-contained prebuilt binary. No DuckDB install or build toolchain needed. On
-Linux the prebuilt baseline is glibc 2.36 (Debian 12); Apple Silicon binaries
-target macOS 11.0. On other platforms, older operating systems, or older PHP,
-PIE falls back to a source build, which needs the complete DuckDB C header set,
-`libduckdb`, and the verified C++ bridge sources matching that library. See
-[building and binary targets](BUILDING.md) to obtain the matching sources.
+Linux the glibc prebuilt baseline is 2.36 (Debian 12); Apple Silicon binaries
+target macOS 11.0. Binaries use the PHP patch minimums listed above so they
+include the checks that stop conversion and writes after a memory-limit error.
+
+PIE selects binaries by PHP minor version, so an older patch can receive an
+incompatible binary. On older PHP patches or operating systems, build from
+source explicitly; do not rely on automatic fallback. On Linux and macOS,
+passing configure options [selects a source build](https://php.github.io/pie/usage#specifying-configure-options):
 
 ```sh
 pie install iliaal/pdo_duckdb --with-pdo-duckdb=/opt/duckdb \
   --with-pdo-duckdb-bridge-source=/opt/duckdb-source
 ```
+
+Source builds need the complete DuckDB C header set, `libduckdb`, and verified
+C++ bridge sources matching that library. See [building and binary targets](BUILDING.md)
+for those dependencies and Windows source-build instructions. Rebuild a local
+extension when upgrading PHP across the patch minimums above so it gains the
+memory-limit safeguards supplied by the newer PHP headers.
 
 ### From source
 

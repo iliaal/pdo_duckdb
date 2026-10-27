@@ -45,7 +45,7 @@ def targets():
                     "platform": f"{os_name}-{arch}-{libc}",
                     "asset": f"duckdb-static-libs-{asset_suffix}.tar.gz",
                     "channel": "development" if source_build else "stable",
-                    "runtime-version": "8.6.0RC4" if source_build else php,
+                    "runtime-version": "8.6.0RC4" if source_build else version,
                     "source-build": source_build, "image": image,
                     "image-key": hashlib.sha256(image.encode()).hexdigest()[:16],
                 })

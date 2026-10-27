@@ -151,6 +151,12 @@ replace the combined DLL: it does not export the bridge entry points.
 
 The binary workflows build PHP 8.2–8.5 as stable targets and the explicitly
 pinned PHP 8.6.0RC4 as a development target. PHP 8.1 remains a source target.
+Stable binaries require PHP 8.2.35+, 8.3.36+, 8.4.27+, or 8.5.12+ in their
+respective series. They use the newer PHP allocation APIs to stop safely after
+a pending memory-limit error. Older patches remain supported through source
+builds; do not load these binaries on them. PIE selects archives by minor, so
+use the explicit source-build command in the README for older patches.
+Rebuild source-installed modules when upgrading PHP across these minimums.
 The development NTS and ZTS runtimes are built separately and checked at runtime;
 an image tag alone does not establish thread safety.
 

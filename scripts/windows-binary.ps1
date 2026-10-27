@@ -36,6 +36,15 @@ if ($sdkVersionLine.Count -ne 1 -or $sdkVersionLine[0] -notmatch '^#define PHP_V
     throw 'cannot identify the PHP SDK version'
 }
 $sdkVersion = $Matches[1]
+$stableVersions = @{
+    '8.2' = '8.2.35'
+    '8.3' = '8.3.36'
+    '8.4' = '8.4.27'
+    '8.5' = '8.5.12'
+}
+if ($Channel -eq 'stable' -and $sdkVersion -cne $stableVersions[$PhpSeries]) {
+    throw "expected pinned PHP SDK $($stableVersions[$PhpSeries]), got $sdkVersion"
+}
 $probe = (Resolve-Path 'scripts/binary-probe.php').Path
 $dependency = (Resolve-Path (Join-Path $DuckDBDirectory 'duckdb.dll')).Path
 $notices = @{

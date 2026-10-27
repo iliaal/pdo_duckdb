@@ -7,6 +7,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-10-27
+
+### Fixed
+
+- Fixed lost writes and stale reads between PDO connections to the same file.
+  Equivalent paths share an instance while transactions remain connection-local.
+- Coordinated shared-instance configuration and `open_basedir` enforcement
+  across handles, persistent reuse, and concurrent ZTS requests.
+- Preserved embedded NUL bytes in nested values, ENUM labels, and column names.
+- Fixed remote `CONNECT` preparation executing statements prematurely, bound
+  `ATTACH` parameters, and remote affected-row counts.
+- Stopped Appender writes and partial fetch or metadata results after PHP
+  allocation failures, including deferred `memory_limit` errors.
+
+### Added
+
+- Added `getColumnMeta()` fields `duckdb:decl_type` for complete logical types
+  and `duckdb:type_annotations` for retained collations and their child paths.
+- Added opt-in `PDO::DUCKDB_ATTR_NATIVE_STRUCTURES` on connections and statements
+  for lossless LIST, ARRAY, STRUCT, TUPLE, MAP, UNION, JSON, and VARIANT fetches.
+- Preserved exact numeric values, binary keys, UNION tags, JSON object/array
+  distinctions, and SQL NULL versus VARIANT null in native structured fetches.
+- Added top-level and nested VARIANT fetching and extended VARIANT Appender
+  input to PHP arrays and plain objects.
+- Added unnamed STRUCT/TUPLE rendering and positional DuckDB 2.0 tuple input
+  to the Appender, including nested types and quoted column subsets.
+- Added schema-segment arrays to `duckdbAppender()` for DuckDB 2.0 nested
+  schemas, preserving literal dots and quotes in individual identifiers.
+- Added DuckDB 2.0 session variables alongside PDO placeholders and repeated
+  bindings, plus remote prepared bindings, fetching, and transactions.
+
+### Changed
+
+- Bundled DuckDB 2.0.0 GA with core functions, JSON, Parquet, and timezone support.
+  Source builds still support PHP 8.1+ and DuckDB 1.5.3+.
+- Matched DuckDB 2.0 fixed-array quoting while retaining DuckDB 1.5 formatting.
+  Default PHP scalar mappings and canonical-string structured fetches remain.
+- Refused another statement while a DuckDB 2.0 unbuffered result is live,
+  keeping the original result usable until drained or closed.
+- Expanded PHP 8.2–8.6 binaries to Linux glibc x86_64/arm64 NTS and ZTS,
+  Linux musl x86_64/arm64 NTS, macOS arm64 NTS and ZTS, and Windows x64 NTS and TS.
+- Marked PHP 8.6 binaries as development builds, pinned to PHP 8.6.0RC4.
+  PHP 8.1 remains supported through source builds.
+
+### Compatibility
+
+- Prebuilt binaries require PHP 8.2.35+, 8.3.36+, 8.4.27+, or 8.5.12+ to retain
+  memory-limit safeguards. Older patches require an explicit source build.
+- PIE selects binaries by PHP minor, so it cannot select a compatible archive
+  for older patches automatically; see the README's source-build instructions.
+- New DuckDB 2.0 files require `storage_compatibility_version` for DuckDB 1.5
+  readers; existing 1.5 files retain their format after 2.0 writes.
+- Documented DuckDB 2.0 transaction invalidation, SQL and profiling changes,
+  and remote prepare-error timing. See the README's DuckDB 2.0 section.
+- Source builds require Python 3, C++17, and verified DuckDB source headers
+  matching the linked library; see BUILDING.md for the updated build commands.
+
 ## [0.8.1] - 2026-10-26
 
 ### Security
@@ -463,7 +520,8 @@ Initial release. A PDO driver for DuckDB.
   table/schema names are rejected, rather than silently truncating the statement
   or identifier at the NUL.
 
-[Unreleased]: https://github.com/iliaal/pdo_duckdb/compare/0.8.1...HEAD
+[Unreleased]: https://github.com/iliaal/pdo_duckdb/compare/0.9.0...HEAD
+[0.9.0]: https://github.com/iliaal/pdo_duckdb/releases/tag/0.9.0
 [0.8.1]: https://github.com/iliaal/pdo_duckdb/releases/tag/0.8.1
 [0.8.0]: https://github.com/iliaal/pdo_duckdb/releases/tag/0.8.0
 [0.7.1]: https://github.com/iliaal/pdo_duckdb/releases/tag/0.7.1
