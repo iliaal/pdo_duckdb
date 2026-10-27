@@ -9,21 +9,41 @@ $db = new PDO('duckdb::memory:', null, null, [
     PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
     PDO::DUCKDB_ATTR_UNBUFFERED => true,
 ]);
+$db->exec('SET threads=1');
+$db->exec("SET streaming_buffer_size='64KB'");
 
-// VARIANT has no safe C-API extractor: the query itself executes (the value
-// computes fine), the error surfaces when the row is fetched, not at execute.
-$stmt = $db->query('SELECT CAST(42 AS VARIANT) AS v');
+$sql = "SELECT CAST(CASE WHEN i=1000000 THEN ? || i::VARCHAR ELSE i::VARCHAR END AS INTEGER) FROM range(1000001) t(i)";
+$stmt = $db->prepare($sql);
+$stmt->execute(['not-an-integer']);
+$seen = 0;
 try {
-    $stmt->fetchColumn();
-    echo "BAD: VARIANT fetched\n";
+    while (($value = $stmt->fetchColumn()) !== false) {
+        if ($value !== $seen++ || $seen > 1000000) {
+            throw new RuntimeException('Streaming result changed a valid row before its conversion error');
+        }
+    }
+    echo "BAD: invalid value fetched\n";
 } catch (PDOException $e) {
-    echo str_contains($e->getMessage(), 'VARIANT') ? "fetch_raised\n" : ('other=' . $e->getMessage() . "\n");
+    if ($seen < 2048) {
+        throw new RuntimeException('Streaming error surfaced before a complete valid chunk was returned', 0, $e);
+    }
+    echo str_contains($e->getMessage(), 'Conversion Error') ? "fetch_raised\n" : ('other=' . $e->getMessage() . "\n");
 }
 
 // Silent-mode fetch errors carry the streaming/fetch driver code.
 $db->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_SILENT);
-$stmt = $db->query('SELECT CAST(42 AS VARIANT)');
-var_dump($stmt->fetchColumn());
+$stmt = $db->prepare($sql);
+$stmt->execute(['not-an-integer']);
+$seen = 0;
+while (($value = $stmt->fetchColumn()) !== false) {
+    if ($value !== $seen++ || $seen > 1000000) {
+        throw new RuntimeException('Silent streaming result changed a valid row before its conversion error');
+    }
+}
+if ($seen < 2048) {
+    throw new RuntimeException('Silent streaming error surfaced before a complete valid chunk was returned');
+}
+var_dump($value);
 $info = $stmt->errorInfo();
 echo "fetch_sqlstate={$info[0]}\n";
 echo 'fetch_driver=' . var_export($info[1], true) . "\n";

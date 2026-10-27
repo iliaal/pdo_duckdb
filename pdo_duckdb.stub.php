@@ -38,9 +38,10 @@ namespace Pdo {
         /**
          * Create a bulk-insert appender for the given table. When $columns is
          * given, the appender targets only those columns (in that order) and any
-         * omitted column is filled with its DEFAULT, or NULL.
+         * omitted column is filled with its DEFAULT, or NULL. A schema string
+         * is a literal identifier; an array gives nested schema segments.
          */
-        public function duckdbAppender(string $table, ?string $schema = null, ?array $columns = null): \Pdo\Duckdb\Appender {}
+        public function duckdbAppender(string $table, string|array|null $schema = null, ?array $columns = null): \Pdo\Duckdb\Appender {}
 
         /**
          * Return the tables a query references, using DuckDB's parser. Read

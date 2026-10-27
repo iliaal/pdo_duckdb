@@ -35,12 +35,17 @@ check() {
 }
 
 for workflow in release-linux.yml binary-validate.yml; do
+    production="$repo/.github/workflows/$workflow"
+    if [ "$workflow" = binary-validate.yml ] &&
+        grep -q '^    uses: ./.github/workflows/release-linux.yml$' "$production"; then
+        production="$repo/.github/workflows/release-linux.yml"
+    fi
     # Run exactly the production producer/assignment, including the old combined
     # assignment when testing this suite against the base checkout.
-    probe=$(sed -n '/^[[:space:]]*otool -l /p; /^[[:space:]]*min_macos=/p' "$repo/.github/workflows/$workflow")
+    probe=$(sed -n '/^[[:space:]]*otool -l /p; /^[[:space:]]*min_macos=/p' "$production")
     [ "$(printf '%s\n' "$probe" | grep -c 'min_macos=')" -eq 1 ]
-    module=modules/pdo_duckdb.so
-    [ "$workflow" != release-linux.yml ] || module=release-stage/pdo_duckdb.so
+    module=binary-verify/pdo_duckdb.so
+    [ "${production##*/}" != release-linux.yml ] || module=release-stage/pdo_duckdb.so
 
     printf '    minos 11.0\n' > "$work/input"
     check 'ordinary minimum' 11.0 0

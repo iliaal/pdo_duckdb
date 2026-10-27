@@ -30,6 +30,8 @@ install-sh
 ltmain.sh
 missing
 mkinstalldirs
+/duckdb-bridge/
+__pycache__/
 tests/*.diff
 tests/*.out
 tests/*.exp
@@ -49,3 +51,4 @@ tests/*.sh
 /AGENTS.md
 /CLAUDE.md
 .worktrees
+.plan/

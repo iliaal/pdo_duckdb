@@ -1,91 +1,68 @@
 --TEST--
-pdo_duckdb: non-NULL VARIANT fetches report an error instead of silently becoming NULL
+pdo_duckdb: VARIANT fetch APIs preserve top-level and nested values in canonical and native modes
 --EXTENSIONS--
 pdo
 pdo_duckdb
 --FILE--
 <?php
-$db = new PDO('duckdb::memory:');
-$db->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
-
-$fetches = [
-    'fetch' => static fn(PDOStatement $stmt) => $stmt->fetch(PDO::FETCH_ASSOC),
-    'fetchColumn' => static fn(PDOStatement $stmt) => $stmt->fetchColumn(),
-    'fetchAll' => static fn(PDOStatement $stmt) => $stmt->fetchAll(PDO::FETCH_ASSOC),
-];
-foreach ($fetches as $label => $fetch) {
-    try {
-        $fetch($db->query('SELECT CAST(42 AS VARIANT) AS value'));
-        echo "$label accepted (BUG)\n";
-    } catch (PDOException $e) {
-        echo $label, ': ', str_contains($e->getMessage(), 'VARIANT') ? 'VARIANT error' : $e->getMessage(), "\n";
+function check($got, $want): void {
+    if ($want instanceof stdClass) {
+        if (!is_object($got) || get_class($got) !== stdClass::class) throw new Exception('expected stdClass wrapper');
+        $got = get_object_vars($got);
+        $want = get_object_vars($want);
     }
-}
-
-var_dump($db->query('SELECT CAST(NULL AS VARIANT)')->fetchColumn());
-var_dump($db->query('SELECT CAST(CAST(42 AS VARIANT) AS VARCHAR)')->fetchColumn());
-var_dump($db->query('SELECT 7')->fetchColumn());
-var_dump($db->query('SELECT [CAST(NULL AS VARIANT)], {\'v\': CAST(NULL AS VARIANT)}')->fetch(PDO::FETCH_NUM));
-
-/* The fetcher rejects the whole row before any column is read, so the
- * rejection does not depend on which column the caller asks for, and a row
- * after the first still fails fetchAll(). */
-$rows = 'SELECT i, CASE WHEN i = 1 THEN CAST(i AS VARIANT) END AS v FROM range(3) t(i)';
-foreach (['fetchAll' => static fn(PDOStatement $stmt) => $stmt->fetchAll(PDO::FETCH_NUM),
-          'fetchColumn(0)' => static function (PDOStatement $stmt) { $stmt->fetchColumn(0); return $stmt->fetchColumn(0); },
-          'nested' => static fn(PDOStatement $stmt) => $stmt->fetch(),
-] as $label => $fetch) {
-    try {
-        $fetch($db->query($label === 'nested' ? 'SELECT [CAST(1 AS VARIANT)]' : $rows));
-        echo "$label accepted (BUG)\n";
-    } catch (PDOException $e) {
-        echo $label, ': ', str_contains($e->getMessage(), 'VARIANT') ? 'VARIANT error' : $e->getMessage(), "\n";
+    if (is_array($want) && is_array($got) && array_keys($got) === array_keys($want)) {
+        foreach ($want as $key => $value) check($got[$key], $value);
+        return;
     }
+    if ($got !== $want) throw new Exception(var_export([$got, $want], true));
 }
+$db = new PDO('duckdb::memory:', null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
+foreach ([false, true] as $native) {
+    $db->setAttribute(PDO::DUCKDB_ATTR_NATIVE_STRUCTURES, $native);
+    $label = $native ? 'native' : 'canonical';
+    $value = $native ? (object)['type' => 'INTEGER', 'value' => 42] : '42';
+    foreach ([
+        [static fn(PDOStatement $st) => $st->fetch(PDO::FETCH_ASSOC), ['value' => $value]],
+        [static fn(PDOStatement $st) => $st->fetchColumn(), $value],
+        [static fn(PDOStatement $st) => $st->fetchAll(PDO::FETCH_ASSOC), [['value' => $value]]],
+    ] as [$fetch, $expected]) {
+        check($fetch($db->query('SELECT CAST(42 AS VARIANT) AS value')), $expected);
+    }
+    check($db->query('SELECT CAST(NULL AS VARIANT)')->fetchColumn(), null);
+    check($db->query('SELECT CAST(CAST(42 AS VARIANT) AS VARCHAR)')->fetchColumn(), '42');
+    check($db->query('SELECT 7')->fetchColumn(), 7);
+    check($db->query("SELECT [NULL::VARIANT], struct_pack(v := NULL::VARIANT)")->fetch(PDO::FETCH_NUM),
+        $native ? [(object)['type' => 'VARIANT[]', 'value' => [null]],
+            (object)['type' => 'STRUCT(v VARIANT)', 'value' => ['v' => null]]] : ['[NULL]', "{'v': NULL}"]);
+    echo "$label fetch APIs OK\n";
 
-$db->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_SILENT);
-$stmt = $db->query('SELECT CAST(42 AS VARIANT)');
-var_dump($stmt->fetchColumn());
-var_dump($stmt->errorCode());
+    $oneTag = ['type' => 'INTEGER', 'value' => 1];
+    $one = $native ? (object)$oneTag : '1';
+    $rows = 'SELECT i, CASE WHEN i = 1 THEN CAST(CAST(i AS INTEGER) AS VARIANT) END AS v FROM range(3) t(i)';
+    check($db->query($rows)->fetchAll(PDO::FETCH_NUM), [[0, null], [1, $one], [2, null]]);
+    $st = $db->query($rows);
+    check([$st->fetchColumn(0), $st->fetchColumn(0), $st->fetchColumn(0)], [0, 1, 2]);
+    check($db->query('SELECT [CAST(1 AS VARIANT)]')->fetchColumn(),
+        $native ? (object)['type' => 'VARIANT[]', 'value' => [$oneTag]] : '[1]');
+    echo "$label mixed rows OK\n";
 
-$stmt = $db->query($rows);
-var_dump($stmt->fetch(PDO::FETCH_NUM), $stmt->fetch(PDO::FETCH_NUM), $stmt->errorInfo()[2], $stmt->fetch(PDO::FETCH_NUM));
-
-$stmt = $db->query('SELECT CAST(NULL AS VARIANT)');
-var_dump($stmt->fetchColumn());
-var_dump($stmt->errorCode());
+    $db->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_SILENT);
+    $st = $db->query($rows);
+    check([$st->fetch(PDO::FETCH_NUM), $st->fetch(PDO::FETCH_NUM), $st->fetch(PDO::FETCH_NUM)],
+        [[0, null], [1, $one], [2, null]]);
+    check($st->errorCode(), '00000');
+    $st = $db->query('SELECT CAST(NULL AS VARIANT)');
+    check($st->fetchColumn(), null);
+    check($st->errorCode(), '00000');
+    $db->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+    echo "$label silent mode OK\n";
+}
 ?>
 --EXPECT--
-fetch: VARIANT error
-fetchColumn: VARIANT error
-fetchAll: VARIANT error
-NULL
-string(2) "42"
-int(7)
-array(2) {
-  [0]=>
-  string(6) "[NULL]"
-  [1]=>
-  string(11) "{'v': NULL}"
-}
-fetchAll: VARIANT error
-fetchColumn(0): VARIANT error
-nested: VARIANT error
-bool(false)
-string(5) "HY000"
-array(2) {
-  [0]=>
-  int(0)
-  [1]=>
-  NULL
-}
-bool(false)
-string(93) "DuckDB VARIANT values are not supported by the C result API; cast the value to VARCHAR in SQL"
-array(2) {
-  [0]=>
-  int(2)
-  [1]=>
-  NULL
-}
-NULL
-string(5) "00000"
+canonical fetch APIs OK
+canonical mixed rows OK
+canonical silent mode OK
+native fetch APIs OK
+native mixed rows OK
+native silent mode OK

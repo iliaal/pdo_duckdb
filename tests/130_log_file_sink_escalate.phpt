@@ -5,6 +5,7 @@ pdo
 pdo_duckdb
 --FILE--
 <?php
+require __DIR__ . '/duckdb_v2.inc';
 // The sink stays under the future open_basedir so PHP can read it afterward;
 // the escalated profile denies DuckDB every path, so the hazard is the sink
 // writing on through its already-open file.
@@ -17,9 +18,17 @@ $db->exec("SELECT 'before_sandbox' AS x");
 ini_set('open_basedir', __DIR__);
 
 $db->exec("SELECT 'after_sandbox' AS y");
-// CALL enable_logging still runs after lock_configuration; it must not re-arm
-// the file sink.
-$db->exec("CALL enable_logging()");
+try {
+    $db->exec("CALL enable_logging()");
+    if (pdo_duckdb_v2_headers()) {
+        echo "BAD: locked logging configuration changed\n";
+    }
+} catch (PDOException $e) {
+    if (!pdo_duckdb_v2_headers() || !str_contains($e->getMessage(), 'enable_logging')
+        || !str_contains($e->getMessage(), 'configuration has been locked')) {
+        throw $e;
+    }
+}
 $db->exec("SELECT 'after_reenable' AS z");
 var_dump($db->query("SELECT current_setting('logging_storage')")->fetchColumn());
 $db = null;

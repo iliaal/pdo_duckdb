@@ -1,6 +1,18 @@
+# DuckDB 1.5.6 compatibility builds.
 b845005f5132a7d8180057c35e14a7626632258782f871a90861b19c1c03841b  libduckdb-linux-amd64.zip
 e0bc007d9b0094c0970ac1847a8601d10aad07cbd2910ce586ec810f77b638d6  libduckdb-osx-universal.zip
 44cf59583f9951d2cb09b1bf115a63ecb2d8901e363903029d86c7d8683fe96a  libduckdb-windows-amd64.zip
 ab3d1d33951b8cb8bdcae740d8e06adf66bfb7ee880a3f7052d7a35088e16d2d  static-libs-linux-amd64.zip
 56249751117a4c04289764e06eb431352ce33fb3f8e2f30401122d4d0e184139  static-libs-linux-arm64.zip
 e77c382fba15e3f5c0b3265d12e3a4de534699fdb91bcc9d10d4a857a58103d5  static-libs-osx-arm64.zip
+
+# DuckDB 2.0.0 GA release assets.
+993ad89e7dfca66cd6da994c2cad090c2fc160ddf9f550498a098ab4bb13cfb1  duckdb-shared-libs-linux-amd64.tar.gz
+14cd63180614cfd961f7959146ecd9087527ff20b67311efdc3fa1c29c18204d  duckdb-shared-libs-osx-universal.tar.gz
+2b83169128239de5f45fe21de80f99bf436e53aa4bb24020dd951a1ba8d4b95f  duckdb-shared-libs-windows-amd64.tar.gz
+112d62c980f5447cd303a70b3dacbc09acd41ccb4ef6d154e8629f543a0f8568  duckdb-static-libs-linux-amd64.tar.gz
+8171b4842e68a85b2e82b342d3bf7b542a88fd6666e0c18438d7b459012494ee  duckdb-static-libs-linux-arm64.tar.gz
+c3a571e6d4a0da97534c631df463ab13c07f8cf78049625f5df936b7beaab9ce  duckdb-static-libs-osx-arm64.tar.gz
+2f783d69fc8713cf8482577fcde7e000f487997908feb9ef20ad35a3a642f59c  duckdb-static-libs-linux-amd64-musl.tar.gz
+988bd2dbe05a115ee45ec97dd29b405ca59d54999fca712d7230d0b8ff930c44  duckdb-static-libs-linux-arm64-musl.tar.gz
+9a7e2c1200209ea70cdf4535aa3fdf581c3a141137569462ed7b555cde49b112  duckdb-static-libs-windows-amd64.tar.gz

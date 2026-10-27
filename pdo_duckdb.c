@@ -13,14 +13,18 @@
 #ifdef HAVE_CONFIG_H
 #include <config.h>
 #endif
-
 #include "php.h"
+#ifndef HAVE_PDO_DUCKDB_BRIDGE
+# error "pdo_duckdb requires the verified exact-source DuckDB bridge"
+#endif
 #include "php_ini.h"
 #include "ext/standard/info.h"
 #include "ext/pdo/php_pdo.h"
 #include "ext/pdo/php_pdo_driver.h"
 #include "php_pdo_duckdb.h"
 #include "php_pdo_duckdb_int.h"
+#include "duckdb_static_extensions.h"
+#include "pdo_duckdb_bridge.h"
 #include "zend_exceptions.h"
 
 /* {{{ pdo_duckdb_deps */
@@ -54,8 +58,31 @@ ZEND_GET_MODULE(pdo_duckdb)
 PHP_MINIT_FUNCTION(pdo_duckdb)
 {
 	zend_class_entry *pdo_ce;
+	pdd_bridge_error error = {0};
+
+	if (pdd_bridge_check(&error) != PDD_BRIDGE_OK) {
+		char message[256];
+		if (error.data) {
+			snprintf(message, sizeof(message), "%.*s", (int)MIN(error.length, sizeof(message) - 1), error.data);
+		} else {
+			snprintf(message, sizeof(message), "Unable to verify the DuckDB bridge header/library identity");
+		}
+		pdd_bridge_error_free(&error);
+		php_error_docref(NULL, E_WARNING, "%s", message);
+		return FAILURE;
+	}
+	pdd_bridge_error_free(&error);
+
+	if (pdo_duckdb_register_static_extensions() != 0) {
+		php_error_docref(NULL, E_WARNING, "Unable to register bundled DuckDB extensions");
+		return FAILURE;
+	}
 
 	if (php_pdo_register_driver(&pdo_duckdb_driver) == FAILURE) {
+		return FAILURE;
+	}
+	if (pdo_duckdb_instances_minit() == FAILURE) {
+		php_pdo_unregister_driver(&pdo_duckdb_driver);
 		return FAILURE;
 	}
 
@@ -65,11 +92,14 @@ PHP_MINIT_FUNCTION(pdo_duckdb)
 		ZEND_STRL("DUCKDB_ATTR_CONFIG"), PDO_DUCKDB_ATTR_CONFIG);
 	zend_declare_class_constant_long(pdo_ce,
 		ZEND_STRL("DUCKDB_ATTR_UNBUFFERED"), PDO_DUCKDB_ATTR_UNBUFFERED);
+	zend_declare_class_constant_long(pdo_ce,
+		ZEND_STRL("DUCKDB_ATTR_NATIVE_STRUCTURES"), PDO_DUCKDB_ATTR_NATIVE_STRUCTURES);
 
 	if (pdo_duckdb_appender_minit() == FAILURE) {
 		/* Don't leave a half-initialized module: PDO would keep a "duckdb" driver
 		 * entry for a module that reported startup FAILURE. */
 		php_pdo_unregister_driver(&pdo_duckdb_driver);
+		pdo_duckdb_instances_mshutdown();
 		return FAILURE;
 	}
 
@@ -82,6 +112,7 @@ PHP_MSHUTDOWN_FUNCTION(pdo_duckdb)
 {
 	php_pdo_unregister_driver(&pdo_duckdb_driver);
 	pdo_duckdb_tls_caches_shutdown();
+	pdo_duckdb_instances_mshutdown();
 	return SUCCESS;
 }
 /* }}} */

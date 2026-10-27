@@ -13,7 +13,11 @@ tests/*.phpt -text
 # artifact's license metadata accurate and the package lean.
 /run-tests.php    export-ignore
 /.github/         export-ignore
-/scripts/         export-ignore
+/scripts/*        export-ignore
+/scripts/duckdb-bridge-source.py -export-ignore
+/scripts/check-duckdb-headers.py -export-ignore
+/scripts/build-windows-duckdb.ps1 -export-ignore
+/scripts/windows-duckdb-source/ -export-ignore
 /tests/           export-ignore
 /.upstream/       export-ignore
 /.release-config  export-ignore

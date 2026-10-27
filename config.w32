@@ -1,8 +1,12 @@
 // vim:ft=javascript
 
 ARG_WITH("pdo-duckdb", "for pdo_duckdb support", "no");
+ARG_WITH("pdo-duckdb-bridge-source", "verified exact-source cache for a combined DuckDB bridge DLL", "no");
 
 if (PHP_PDO_DUCKDB != "no") {
+	if (PHP_PDO_DUCKDB_BRIDGE_SOURCE == "no" || PHP_PDO_DUCKDB_BRIDGE_SOURCE == "yes") {
+		ERROR("PDO DuckDB requires --with-pdo-duckdb-bridge-source=DIR and a matching combined DuckDB/bridge DLL built by scripts/build-windows-duckdb.ps1; configure never downloads sources");
+	}
 	// Accept both the flat Windows bundle and include/lib prefix layouts.
 	var header_search = (PHP_PDO_DUCKDB != "yes")
 		? PHP_PDO_DUCKDB + ";" + PHP_PDO_DUCKDB + "\\include"
@@ -16,16 +20,19 @@ if (PHP_PDO_DUCKDB != "no") {
 			CHECK_FUNC_IN_HEADER("duckdb.h", "DUCKDB_TYPE_VARIANT", PHP_PDO_DUCKDB + "\\include");
 
 	var duckdb_inc = CHECK_HEADER_ADD_INCLUDE("duckdb.h", "CFLAGS_PDO_DUCKDB", header_search);
+	var duckdb_lib = CHECK_LIB("duckdb.lib", "pdo_duckdb", lib_search);
 
 	if (duckdb_inc &&
 		version_header_ok &&
-		CHECK_LIB("duckdb.lib", "pdo_duckdb", lib_search)) {
+		duckdb_lib) {
 		// Only headers in the directory duckdb.h came from count, so a stray
 		// duckdb_v2.h on the include path cannot flip a 1.5.x build.
 		var duckdb_inc_dir = (typeof(duckdb_inc) == "string") ? duckdb_inc : null;
 		var v2_tests_note = "The PHPT suite's DuckDB 2.0 branches are then off as well, so the engine-behaviour tests (030, 035, 051, 078, 093) fail against a DuckDB 2.0 library; those failures are not driver bugs.";
 		var have_tz_ns = duckdb_inc_dir != null &&
 			GREP_HEADER("duckdb.h", "DUCKDB_TYPE_TIMESTAMP_TZ_NS", duckdb_inc_dir);
+		var have_merge_into = duckdb_inc_dir != null &&
+			GREP_HEADER("duckdb.h", "DUCKDB_STATEMENT_TYPE_MERGE_INTO", duckdb_inc_dir);
 		var have_v2 = duckdb_inc_dir != null &&
 			FSO.FileExists(duckdb_inc_dir + "\\duckdb_v2.h") &&
 			GREP_HEADER("duckdb_v2.h", "#define\\s+DUCKDB_V2_API_VERSION_MAJOR\\s+[2-9]", duckdb_inc_dir);
@@ -33,6 +40,7 @@ if (PHP_PDO_DUCKDB != "no") {
 			WARNING("duckdb.h was found only through the INCLUDE environment variable, so its directory is unknown and the DuckDB 2.0 header probes are skipped. If this is DuckDB 2.0, pass --with-pdo-duckdb=DIR to enable the DuckDB 2.0 code paths. " + v2_tests_note);
 		}
 		AC_DEFINE("HAVE_DECL_DUCKDB_TYPE_TIMESTAMP_TZ_NS", have_tz_ns ? 1 : 0);
+		AC_DEFINE("HAVE_DECL_DUCKDB_STATEMENT_TYPE_MERGE_INTO", have_merge_into ? 1 : 0);
 		if (have_v2) {
 			if (!have_tz_ns) {
 				ERROR("duckdb_v2.h is DuckDB 2.0 but duckdb.h lacks DUCKDB_TYPE_TIMESTAMP_TZ_NS; the DuckDB headers come from different releases");
@@ -41,7 +49,52 @@ if (PHP_PDO_DUCKDB != "no") {
 		} else if (have_tz_ns) {
 			WARNING("duckdb.h declares DUCKDB_TYPE_TIMESTAMP_TZ_NS but duckdb_v2.h is not next to it. If this is DuckDB 2.0, install its full header set to enable the DuckDB 2.0 code paths. " + v2_tests_note);
 		}
-		EXTENSION("pdo_duckdb", "pdo_duckdb.c duckdb_driver.c duckdb_statement.c duckdb_appender.c");
+		if (PHP_PDO_DUCKDB_BRIDGE_SOURCE != "no") {
+			if (PHP_PDO_DUCKDB_BRIDGE_SOURCE == "yes" || duckdb_inc_dir == null) {
+				ERROR("The DuckDB bridge requires explicit library and verified source-cache directories");
+			}
+			var bridge_status = -1;
+			try {
+				bridge_status = WshShell.Run('python "' + configure_module_dirname + '\\scripts\\duckdb-bridge-source.py" verify "' + PHP_PDO_DUCKDB_BRIDGE_SOURCE + '"', 0, true);
+			} catch (bridge_error) {
+				ERROR("Python 3 and scripts/duckdb-bridge-source.py are required to verify the DuckDB bridge source cache");
+			}
+			if (bridge_status != 0) {
+				ERROR("DuckDB bridge source-cache verification failed");
+			}
+			bridge_status = WshShell.Run('python "' + configure_module_dirname + '\\scripts\\check-duckdb-headers.py" "' + PHP_PDO_DUCKDB_BRIDGE_SOURCE + '\\include" "' + duckdb_inc_dir + '"', 0, true);
+			if (bridge_status != 0) {
+				ERROR("Install the matching complete DuckDB C header set; DuckDB 2.0 requires all five release headers");
+			}
+			var cache_identity = PHP_PDO_DUCKDB_BRIDGE_SOURCE + "\\include\\pdo_duckdb_bridge_build.h";
+			var library_identity = duckdb_inc_dir + "\\pdo_duckdb_bridge_build.h";
+			var package_header = duckdb_inc_dir + "\\pdo_duckdb_bridge_package.h";
+			if (!FSO.FileExists(cache_identity) || !FSO.FileExists(library_identity) ||
+				!FSO.FileExists(package_header)) {
+				ERROR("Use scripts/build-windows-duckdb.ps1 to build the combined DuckDB and bridge DLL; compiling the bridge into PHP would cross incompatible C++ runtimes");
+			}
+			var package_file = FSO.OpenTextFile(package_header, 1);
+			var package_text = package_file.ReadAll().replace(/\r\n/g, "\n");
+			package_file.Close();
+			if (!/^#define[ \t]+PDO_DUCKDB_BRIDGE_COMBINED_DLL[ \t]+1[ \t]*$/m.test(package_text) ||
+				!/^#define[ \t]+PDO_DUCKDB_BRIDGE_PACKAGE_ABI[ \t]+1[ \t]*$/m.test(package_text)) {
+				ERROR("Unsupported DuckDB combined bridge DLL package ABI");
+			}
+			var cache_file = FSO.OpenTextFile(cache_identity, 1);
+			var cache_text = cache_file.ReadAll().replace(/\r\n/g, "\n");
+			cache_file.Close();
+			var library_file = FSO.OpenTextFile(library_identity, 1);
+			var library_text = library_file.ReadAll().replace(/\r\n/g, "\n");
+			library_file.Close();
+			if (cache_text != library_text || !/\bpdd_bridge_check\b/.test(execute('dumpbin /linkermember:1 "' + duckdb_lib + '"'))) {
+				ERROR("The combined DuckDB bridge library does not match the selected exact-source cache");
+			}
+			AC_DEFINE("HAVE_PDO_DUCKDB_BRIDGE", 1, "Whether the exact-source DuckDB C++ bridge is enabled");
+			if (have_v2) {
+				AC_DEFINE("HAVE_DUCKDB_STATIC_EXTENSIONS", 1, "Whether bundled DuckDB extensions need explicit registration");
+			}
+		}
+		EXTENSION("pdo_duckdb", "pdo_duckdb.c duckdb_driver.c duckdb_statement.c duckdb_appender.c duckdb_static_extensions.c pdo_duckdb_sql.c duckdb_value.c");
 		ADD_EXTENSION_DEP("pdo_duckdb", "pdo");
 	} else {
 		WARNING("pdo_duckdb not enabled; DuckDB 1.5.3 or newer headers/libraries not found");

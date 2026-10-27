@@ -5,6 +5,7 @@ source_repo=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd -P)
 phpize=${PHPIZE:-phpize}
 php_config=${PHP_CONFIG:-php-config}
 duckdb_prefix=${DUCKDB_PREFIX:-${HOME}/duckdb}
+: "${BRIDGE_SOURCE:?Set BRIDGE_SOURCE to the verified exact-source cache}"
 work=$(mktemp -d /tmp/pdo-duckdb-v2-detect.XXXXXXXX)
 cleanup() {
     status=$?
@@ -23,15 +24,19 @@ if test ! -r "${duckdb_prefix}/include/duckdb.h" || test ! -r "${duckdb_prefix}/
     exit 77
 fi
 if grep -q DUCKDB_TYPE_TIMESTAMP_TZ_NS "${duckdb_prefix}/include/duckdb.h" ||
-        test -e "${duckdb_prefix}/include/duckdb_v2.h"; then
+    test -e "${duckdb_prefix}/include/duckdb_v2.h"; then
     echo "DUCKDB_PREFIX must be a DuckDB 1.5.x install" >&2
     exit 77
 fi
 duckdb_prefix=$(CDPATH='' cd -- "${duckdb_prefix}" && pwd -P)
+bridge_source=$(CDPATH='' cd -- "${BRIDGE_SOURCE}" && pwd -P)
 
 repo="${work}/source"
-mkdir "${repo}"
-cp "${source_repo}"/*.c "${source_repo}"/*.h "${source_repo}/config.m4" "${repo}/"
+mkdir -p "${repo}/scripts"
+cp "${source_repo}"/*.c "${source_repo}"/*.h "${source_repo}"/*.cpp \
+    "${source_repo}"/*.hpp "${source_repo}/config.m4" "${repo}/"
+cp "${source_repo}/scripts/duckdb-bridge-source.py" "${repo}/scripts/"
+cp "${source_repo}/scripts/check-duckdb-headers.py" "${repo}/scripts/"
 
 stray="${work}/stray"
 mkdir -p "${stray}"
@@ -58,20 +63,20 @@ expect_no_v2() {
 cd "${repo}"
 "${phpize}" >"${work}/phpize.log" 2>&1
 
-if ! ./configure --with-pdo-duckdb="${duckdb_prefix}" --with-php-config="${php_config}" >"${work}/baseline.log" 2>&1; then
+if ! ./configure --with-pdo-duckdb="${duckdb_prefix}" --with-php-config="${php_config}" --with-pdo-duckdb-bridge-source="${bridge_source}" >"${work}/baseline.log" 2>&1; then
     cat "${work}/baseline.log" >&2
     exit 1
 fi
 expect_no_v2 baseline
 
 if ! CPPFLAGS="-I${stray}" C_INCLUDE_PATH="${stray}" \
-        ./configure --with-pdo-duckdb="${duckdb_prefix}" --with-php-config="${php_config}" >"${work}/stray.log" 2>&1; then
+    ./configure --with-pdo-duckdb="${duckdb_prefix}" --with-php-config="${php_config}" --with-pdo-duckdb-bridge-source="${bridge_source}" >"${work}/stray.log" 2>&1; then
     cat "${work}/stray.log" >&2
     exit 1
 fi
 expect_no_v2 'stray duckdb_v2.h on the include path'
 
-if ./configure --with-pdo-duckdb="${mixed}" --with-php-config="${php_config}" >"${work}/mixed.log" 2>&1; then
+if ./configure --with-pdo-duckdb="${mixed}" --with-php-config="${php_config}" --with-pdo-duckdb-bridge-source="${bridge_source}" >"${work}/mixed.log" 2>&1; then
     echo 'a DuckDB 2.0 duckdb_v2.h next to a 1.5.x duckdb.h unexpectedly configured' >&2
     exit 1
 fi

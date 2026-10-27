@@ -1,11 +1,12 @@
 --TEST--
-pdo_duckdb: current engine behavior: another statement aborts a partially read unbuffered result at its next chunk
+pdo_duckdb: interleaved statements preserve the engine's unbuffered result contract
 --EXTENSIONS--
 pdo
 pdo_duckdb
 --FILE--
 <?php
-// A planned active-stream guard will change this to an error at the second statement.
+require __DIR__ . '/duckdb_v2.inc';
+$v2 = pdo_duckdb_v2_headers();
 $db = new PDO('duckdb::memory:', null, null, [
     PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
     PDO::DUCKDB_ATTR_UNBUFFERED => true,
@@ -16,15 +17,31 @@ function drain(PDOStatement $stmt, int &$seen): string
     try {
         while (($v = $stmt->fetchColumn()) !== false) {
             if ((int) $v !== $seen) {
-                return "BAD: row $seen read back as $v";
+                throw new RuntimeException("row $seen read back as $v");
             }
             $seen++;
         }
-        return "completed";
+        return 'completed';
     } catch (PDOException $e) {
-        $aborted = str_contains($e->getMessage(), 'Attempting to execute an unsuccessful or closed')
-            && $e->errorInfo[1] === 5;
-        return $aborted ? "aborted" : "BAD: unexpected error " . $e->getMessage();
+        if (!str_contains($e->getMessage(), 'Attempting to execute an unsuccessful or closed')
+            || $e->errorInfo[1] !== 5) {
+            throw $e;
+        }
+        return 'aborted';
+    }
+}
+
+function interleave(callable $other, bool $v2): void
+{
+    try {
+        $other();
+        if ($v2) {
+            throw new RuntimeException('another statement accepted with an open result');
+        }
+    } catch (PDOException $e) {
+        if (!$v2 || !str_contains($e->getMessage(), 'connection has an open result')) {
+            throw $e;
+        }
     }
 }
 
@@ -36,15 +53,19 @@ $interleave = [
 
 foreach ($interleave as $label => $other) {
     $first = $db->query('SELECT i FROM range(5000) t(i)');
-    $seen = 0;
-    $first->fetchColumn();
-    $seen++;
-    $other();
-    // The rows already pulled in DuckDB's first 2048-row vector stay readable;
-    // the next chunk pull reports the abort.
-    echo "$label: ", drain($first, $seen), " after $seen rows\n";
-    var_dump($first->fetchColumn());
-    var_dump($first->closeCursor());
+    if ($first->fetchColumn() !== 0) {
+        throw new RuntimeException('first row was not zero');
+    }
+    interleave($other, $v2);
+    $seen = 1;
+    $status = drain($first, $seen);
+    if ($status !== ($v2 ? 'completed' : 'aborted') || $seen !== ($v2 ? 5000 : 2048)) {
+        throw new RuntimeException("$label: $status after $seen rows");
+    }
+    if ($first->fetchColumn() !== false || !$first->closeCursor()) {
+        throw new RuntimeException('finished result did not close');
+    }
+    echo "$label: interleave contract verified\n";
     $first->execute();
     $seen = 0;
     echo "$label rerun: ", drain($first, $seen), " $seen rows\n";
@@ -52,40 +73,50 @@ foreach ($interleave as $label => $other) {
 
 $small = $db->query('SELECT i FROM range(10) t(i)');
 $small->fetchColumn();
-$db->query('SELECT 99')->fetchColumn();
+interleave($interleave['query'], $v2);
 $seen = 1;
-echo "single chunk: ", drain($small, $seen), " after $seen rows\n";
+$status = drain($small, $seen);
+if ($status !== ($v2 ? 'completed' : 'aborted') || $seen !== 10) {
+    throw new RuntimeException("single chunk: $status after $seen rows");
+}
+echo "single chunk: interleave contract verified\n";
 
 $alone = $db->query('SELECT i FROM range(5000) t(i)');
 $seen = 0;
-echo "no interleave: ", drain($alone, $seen), " $seen rows\n";
+echo 'no interleave: ', drain($alone, $seen), " $seen rows\n";
 
 $db->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_SILENT);
 $quiet = $db->query('SELECT i FROM range(5000) t(i)');
-$quiet->fetch();
-$db->query('SELECT 99');
+$quiet->fetchColumn();
+$other = $db->query('SELECT 99');
+if ($v2 && ($other !== false || $db->errorCode() !== '42000' || $db->errorInfo()[1] !== 3)) {
+    throw new RuntimeException('silent interleave did not report the preparation error');
+}
 $seen = 1;
-while ($quiet->fetch() !== false) {
+while (($v = $quiet->fetchColumn()) !== false) {
+    if ($v !== $seen) {
+        throw new RuntimeException("silent row $seen read back as $v");
+    }
     $seen++;
 }
-echo "silent: stopped after $seen rows, code=", $quiet->errorCode(), " driver=", $quiet->errorInfo()[1], "\n";
-
+if ($v2) {
+    if ($seen !== 5000 || $quiet->errorCode() !== '00000') {
+        throw new RuntimeException('rejected statement damaged the original stream');
+    }
+} elseif ($seen !== 2048 || $quiet->errorCode() !== 'HY000' || $quiet->errorInfo()[1] !== 5) {
+    throw new RuntimeException('legacy stream did not report its interleave failure');
+}
+echo "silent: interleave contract verified\n";
 echo $db->query('SELECT 42')->fetchColumn(), "\n";
 ?>
 --EXPECT--
-query: aborted after 2048 rows
-bool(false)
-bool(true)
+query: interleave contract verified
 query rerun: completed 5000 rows
-exec: aborted after 2048 rows
-bool(false)
-bool(true)
+exec: interleave contract verified
 exec rerun: completed 5000 rows
-prepare: aborted after 2048 rows
-bool(false)
-bool(true)
+prepare: interleave contract verified
 prepare rerun: completed 5000 rows
-single chunk: aborted after 10 rows
+single chunk: interleave contract verified
 no interleave: completed 5000 rows
-silent: stopped after 2048 rows, code=HY000 driver=5
+silent: interleave contract verified
 42

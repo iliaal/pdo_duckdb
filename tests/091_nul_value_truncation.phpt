@@ -1,5 +1,5 @@
 --TEST--
-pdo_duckdb: embedded NUL truncates nested renders; top-level VARCHAR/BLOB keep NULs
+pdo_duckdb: embedded NUL survives nested rendering and top-level VARCHAR/BLOB binding
 --EXTENSIONS--
 pdo
 pdo_duckdb
@@ -20,17 +20,12 @@ var_dump($db->query("SELECT 'a' || chr(0) || 'b'")->fetchColumn() === $payload);
 var_dump(strlen($row[0]));
 var_dump(bin2hex($row[1]));
 
-// Nested string leaves go through the NUL-terminated value renderer, so a NUL
-// truncates the element there (documented limitation); the engine-side CAST
-// shows the untruncated form for contrast. Quoting style is intentionally not
-// locked here, only the truncation itself.
 $db->exec('CREATE TABLE n (c VARCHAR[])');
 $db->exec("INSERT INTO n VALUES (['a' || chr(0) || 'b'])");
 $got = $db->query('SELECT c FROM n')->fetchColumn();
 $want = $db->query('SELECT CAST(c AS VARCHAR) FROM n')->fetchColumn();
-$truncated = str_contains($got, 'a') && !str_contains($got, 'b');
-var_dump($truncated);
-var_dump($got !== $want);
+var_dump($got === "[a\0b]");
+var_dump($got === $want);
 echo 'engine_keeps_tail=', str_contains($want, 'b') ? "yes\n" : "no\n";
 ?>
 --EXPECT--

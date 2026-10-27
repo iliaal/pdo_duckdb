@@ -25,10 +25,12 @@ foreach ($stmt as $row) {
 ## Requirements
 
 - PHP 8.1 or newer with the `pdo` extension
-- For a source build only: DuckDB 1.5.3 or newer (`libduckdb` + `duckdb.h`),
+- For a source build only: DuckDB 1.5.3 or newer (`libduckdb`, complete C
+  headers, and matching verified bridge sources; see [BUILDING.md](BUILDING.md)),
   available as a prebuilt bundle from the [DuckDB installation page](https://duckdb.org/docs/installation/)
   or via your package manager. Prebuilt installs (below) need nothing else.
-  Source builds against the DuckDB 2.0 preview also work; see [DuckDB 2.0](#duckdb-20).
+  Prebuilt binaries bundle DuckDB 2.0.0; see [DuckDB 2.0](#duckdb-20) for
+  compatibility changes when you upgrade from 1.5.
 
 ## 🚀 Installation
 
@@ -42,18 +44,21 @@ On Linux (x86_64/arm64), macOS (Apple Silicon), and Windows x64, PIE downloads a
 self-contained prebuilt binary. No DuckDB install or build toolchain needed. On
 Linux the prebuilt baseline is glibc 2.36 (Debian 12); Apple Silicon binaries
 target macOS 11.0. On other platforms, older operating systems, or older PHP,
-PIE falls back to a source build, which needs `libduckdb` + `duckdb.h`. If
-they aren't in a standard location, point it at the prefix:
+PIE falls back to a source build, which needs the complete DuckDB C header set,
+`libduckdb`, and the verified C++ bridge sources matching that library. See
+[building and binary targets](BUILDING.md) to obtain the matching sources.
 
 ```sh
-pie install iliaal/pdo_duckdb --with-pdo-duckdb=/opt/duckdb
+pie install iliaal/pdo_duckdb --with-pdo-duckdb=/opt/duckdb \
+  --with-pdo-duckdb-bridge-source=/opt/duckdb-source
 ```
 
 ### From source
 
 ```sh
 phpize
-./configure --with-pdo-duckdb=/opt/duckdb
+./configure --with-pdo-duckdb=/opt/duckdb \
+  --with-pdo-duckdb-bridge-source=/opt/duckdb-source
 make
 make install
 ```
@@ -64,7 +69,7 @@ Then enable it in `php.ini` (after `pdo`):
 extension=pdo_duckdb
 ```
 
-To build against the DuckDB 2.0 preview, see [DuckDB 2.0](#duckdb-20).
+To build against DuckDB 2.0, see [DuckDB 2.0](#duckdb-20).
 
 ### Other DuckDB PDO drivers
 
@@ -87,6 +92,28 @@ Only the exact path `:memory:` (or an empty path) opens an in-memory database.
 Anything else is a file path, including `:memory:foo`, which creates a file
 named `:memory:foo`. For a named in-memory database, attach one in SQL:
 `ATTACH ':memory:' AS name`.
+
+### Multiple connections to one file
+
+PDO connections to the same file share a DuckDB database instance within the
+process. Committed writes are visible to the other connections and survive
+closing and reopening them. Transactions and rollback remain connection-local.
+Relative paths, symlinks, and hard links cannot create independent competing
+instances. Each unnamed in-memory connection remains isolated.
+
+Use compatible database configuration for every connection to a shared file;
+conflicting configurations fail instead of silently opening another instance.
+When a handle requires `open_basedir` containment, the shared database is
+restricted for its remaining lifetime, including sibling handles. A per-handle
+flag cannot restore unrestricted engine settings.
+
+Do not unlink, rename, or replace a database while a connection or attachment
+still owns it. Detected identity changes are refused until the observing
+owners close; racing external replacements are outside the supported contract.
+DuckDB's case-folding cache can also refuse distinct case-sensitive filenames
+on Windows or macOS. Supporting those names requires a filesystem-aware engine
+cache and path manager; the driver does not create competing instances to
+work around that restriction.
 
 ### Connection options
 
@@ -201,6 +228,12 @@ columns, pass a PHP array: a list fills `LIST`/`ARRAY`, and an associative array
 fills `STRUCT` (by field name) or `MAP`. Nesting deeper than 128 levels is
 rejected.
 
+For a DuckDB 2.0 tuple, pass a positional array with one value per field. For
+VARIANT input, sequential arrays become arrays, associative arrays and plain
+`stdClass` objects become objects, and strings remain strings. Use `(object) []`
+for an empty object. Native-fetch `type`/`value` wrappers are output formats;
+passing one to the Appender creates an ordinary object with those fields.
+
 ```php
 $db->exec('CREATE TABLE t (tags VARCHAR[], attrs STRUCT(x INTEGER, y VARCHAR))');
 $app = $db->duckdbAppender('t');
@@ -219,6 +252,13 @@ $app = $db->duckdbAppender('events', null, ['payload']);
 $app->appendRow('hello')->appendRow('world');   // id and ts fill themselves
 $app->flush();
 ```
+
+The schema argument accepts a literal string or a list of identifier segments.
+A string such as `'sales.eu'` names one schema containing a dot; it is never
+parsed as SQL. On DuckDB 2.0, use `['sales', 'eu']` to select nested schema
+`sales.eu` in the current catalog. Table, schema, and column names are quoted
+as identifiers, including embedded quotes and dots. Column subsets work with
+both forms. DuckDB 1.5 accepts a one-segment list and rejects nested paths.
 
 On PHP 8.4+, `PDO::connect('duckdb:…')` returns a `Pdo\Duckdb` instance and
 `duckdbAppender()` lives on that subclass. On `new PDO('duckdb:…')` (and on PHP
@@ -264,10 +304,14 @@ $db->exec('INSTALL httpfs; LOAD httpfs;');  // downloadable extensions
 
 ### Placeholders
 
-Positional `?` and named `:name` placeholders both work; PDO rewrites them to
-DuckDB `$N` parameters. A repeated `:name` is bound once. Because `:` is
-reserved for placeholders, inline `STRUCT`/`MAP` literals in prepared queries
-must keep a space after the colon (`{'k': 1}`, not `{'k':1}`).
+You can use positional `?` or named `:name` placeholders; a repeated `:name`
+is bound once. The scanner leaves placeholders inside SQL comments, quoted
+strings, quoted identifiers, and dollar-quoted strings untouched. You can
+also bind the path in `ATTACH ? AS name`: preparing it neither creates nor
+attaches the database; `execute()` performs the attachment.
+
+Because `:` is reserved for placeholders, inline `STRUCT`/`MAP` literals in
+prepared queries must keep a space after the colon (`{'k': 1}`, not `{'k':1}`).
 
 ### Parameter binding
 
@@ -324,7 +368,8 @@ Tightening `open_basedir` on an open handle also switches DuckDB logging to
 in-memory storage (`logging_storage='memory'`), on every DuckDB version. If the
 connection was logging to a file (`CALL enable_logging(storage='file', ...)`),
 that file gets no new lines from then on, and neither the driver nor DuckDB
-reports the switch. `CALL enable_logging()` doesn't restore the file sink. Read
+reports the switch. `CALL enable_logging()` doesn't restore the file sink;
+DuckDB 2.0 rejects the call because the configuration is locked. Read
 later entries from `duckdb_logs`, or open the connection with the final
 `open_basedir` already in place if you need a file log outside the sandbox.
 
@@ -376,20 +421,18 @@ generated keys, use a sequence and `currval()`.
 | `TINYINT`, `SMALLINT`, `INTEGER`, `BIGINT`, `UTINYINT`, `USMALLINT`, `UINTEGER` | `int` (a string for `BIGINT`/`UINTEGER` values outside the PHP integer range on 32-bit PHP) | Same |
 | `FLOAT`, `DOUBLE` | `float` | Same |
 | `BLOB` | binary string | Same |
-| everything else (`VARCHAR`, `DATE`/`TIME`/`TIMESTAMP`, `DECIMAL`, `HUGEINT`/`UBIGINT`/`UHUGEINT`, nested types) | canonical string form (exceptions for `VARIANT`, `GEOMETRY`, and `TIMESTAMPTZ` below) | Same, including the zero-field `STRUCT` (`{}`) that only DuckDB 2.0 can build |
-| `TIMESTAMPTZ_NS` | DuckDB 1.5 has no such type. If the build loads a DuckDB 2.0 `libduckdb`, every value fetches as `null` (see the warning below) | canonical string form of the UTC instant, like `TIMESTAMPTZ` |
-| A type newer than the DuckDB headers the driver was built with | `null`, even for non-NULL values (see the warning below) | `null` when NULL; any other value reports a PDO error, like `VARIANT` |
+| everything else (`VARCHAR`, `DATE`/`TIME`/`TIMESTAMP`, `DECIMAL`, `HUGEINT`/`UBIGINT`/`UHUGEINT`, nested types, `VARIANT`) | canonical string form (see `GEOMETRY` and `TIMESTAMPTZ` below) | Same, including the zero-field `STRUCT` (`{}`) that only DuckDB 2.0 can build |
+| `TIMESTAMPTZ_NS` | Unavailable in DuckDB 1.5 | canonical string form of the UTC instant, like `TIMESTAMPTZ` |
+| A type newer than the DuckDB headers the driver was built with | unsupported; legacy fallback is `null` | `null` when NULL; any other value reports a PDO error |
 | SQL NULL | `null` | Same |
 
-**Warning:** Build the driver against the headers of the `libduckdb` it loads.
-The library's file name carries no version, so a build against the DuckDB 1.5
-headers can load a DuckDB 2.0 library. That build doesn't know the types
-DuckDB 2.0 adds, and it loses their data without an error: a `TIMESTAMPTZ_NS`
-value fetches as `null`, `[ts]` fetches as `[NULL]`, and `getColumnMeta()`
-reports `UNKNOWN`.
+Build the driver against the exact DuckDB sources and headers matching the
+library it loads. The extension checks this identity during configuration and
+module startup and refuses a mismatched library. This requirement applies to
+both DuckDB 1.5.3+ and 2.0 builds.
 
 `getColumnMeta()` reports the real DuckDB type name per column and a `pdo_type`
-that matches the fetch shape: `PDO::PARAM_INT` for exactly `BOOLEAN`,
+that matches the default fetch mapping: `PDO::PARAM_INT` for exactly `BOOLEAN`,
 `TINYINT`, `SMALLINT`, `INTEGER`, `BIGINT`, `UTINYINT`, `USMALLINT`,
 `UINTEGER`; `PDO::PARAM_LOB` for `BLOB`; `PDO::PARAM_STR` for everything else
 (so `UBIGINT` and `HUGEINT` stay `PARAM_STR`). `DECIMAL` columns also report
@@ -398,25 +441,41 @@ that matches the fetch shape: `PDO::PARAM_INT` for exactly `BOOLEAN`,
 `PDO::PARAM_NULL`. DuckDB 2.0 gives a bare `SELECT NULL` that type; DuckDB 1.5
 types it `INTEGER`.
 
+Use `getColumnMeta($column)['duckdb:decl_type']` for the complete logical
+declaration, including decimal parameters, nested fields, array dimensions,
+and aliases retained by DuckDB, such as `JSON`. Unnamed structs report
+`STRUCT(INTEGER, VARCHAR)` on 1.5 and `TUPLE(INTEGER, VARCHAR)` on 2.0.
+You can read this additive field after execution, even for empty results;
+re-execution refreshes it when bindings change the result type. Existing
+`native_type`, `pdo_type`, `precision`, and `scale` fields remain unchanged.
+
+Read `getColumnMeta($column)['duckdb:type_annotations']` for collations retained
+by the engine. This list is empty for types without retained collations. Each
+entry contains `collation` and a `path` of zero-based logical child positions:
+`[]` identifies the column itself; LIST/ARRAY elements use `0`, STRUCT/TUPLE
+fields and UNION members use their declaration order, and MAP keys and values
+use `0` and `1`. For example, `['Ab' COLLATE nocase]` reports
+`[['path' => [0], 'collation' => 'nocase']]`. Ordinal paths remain unambiguous
+when field names contain dots or NUL bytes. Collations stay separate from
+`duckdb:decl_type` because nested SQL type declarations cannot contain `COLLATE`.
+
 Nested values with boolean, integer, `FLOAT`/`DOUBLE`, `DECIMAL`, `DATE`,
 `TIME`, `TIMESTAMP`, `UUID`, and `VARCHAR` leaves use a direct renderer that
 applies DuckDB's quoting rules, so
 `[TIMESTAMP '2020-01-01 10:00:00']` returns `['2020-01-01 10:00:00']`, exactly
-like `CAST(... AS VARCHAR)`. Other nested values use DuckDB's own renderer.
-Nested fetches return canonical strings, not PHP arrays; for a different
-PHP-facing shape, use SQL projections such as `unnest`, `struct_extract`, or
-`json`.
+like `CAST(... AS VARCHAR)`. DuckDB 2.0 also applies those quoting rules to
+`ARRAY` elements and quotes strings containing backslashes; DuckDB 1.5 retains
+its older formatting. Other nested values use DuckDB's own renderer.
+Nested fetches return canonical strings by default. Enable native structured
+fetches below, or use SQL projections such as `unnest` and `struct_extract`,
+when you need individual values.
 
-A NUL byte inside a nested `VARCHAR` member truncates the fetched string,
-because the driver matches DuckDB's value renderer, which returns a
-NUL-terminated C string. With the direct renderer, the member is cut at the NUL
-and loses its closing quote, but later members still render:
-`['it''s' || chr(0), 'x', 'admin']` returns `['it\'s, x, admin]`. With DuckDB's
-renderer, everything after the NUL is dropped, closing brackets included. In
-both cases, you can't reliably split the result into elements. Top-level
-`VARCHAR` and `BLOB` columns aren't affected. If nested strings can contain NUL
-bytes, unnest them in SQL or render them yourself, for example with
-`to_json()` or `hex()`.
+Rendering preserves embedded NUL bytes in ENUM labels, nested names, and values. For example,
+`['a' || chr(0) || 'b']` returns the five-byte PHP string `"[a\0b]"`.
+This fixes the earlier truncation at the first NUL; top-level `VARCHAR` and
+`BLOB` remain binary-safe.
+Result column names also retain their full length in metadata, associative
+fetches, and named column bindings.
 
 `GEOMETRY` returns its WKB bytes as an uppercase hex string. Nested `GEOMETRY` elements inside `LIST`/`ARRAY`/`STRUCT`/`MAP`/
 `UNION` render the same uppercase hex per element, because the C API has no
@@ -426,14 +485,87 @@ call `ST_AsText()` from the spatial extension.
 
 `TIMESTAMPTZ` native fetches render the instant in UTC (`+00`), both at the top
 level and as a nested leaf. For DuckDB's session-`TimeZone` rendering, select
-`CAST(col AS VARCHAR)`. `TIMESTAMPTZ_NS` on DuckDB 2.0 follows the same rule,
-but don't cast `TIMESTAMPTZ_NS` columns to `VARCHAR` on the DuckDB 2.0 preview:
-a DuckDB defect in that cast can invalidate the whole database. See
-[Types](#types) in the DuckDB 2.0 section.
+`CAST(col AS VARCHAR)`. `TIMESTAMPTZ_NS` on DuckDB 2.0 follows the same rule.
 
-DuckDB's C result API can't extract non-NULL `VARIANT` cells safely, so
-fetching a row that holds one reports a PDO error; cast it to `VARCHAR` (or
-another concrete SQL type) in the query.
+`VARIANT` values are supported at the top level and inside nested types. Default
+fetches render their values as strings, preserving object keys and container
+shape. Native structured fetches retain the dynamic type as well.
+
+### Native structured fetches
+
+Set `PDO::DUCKDB_ATTR_NATIVE_STRUCTURES` to `true` to fetch structured values
+as `stdClass` objects with `type` and `value` properties. The payload contains
+native PHP arrays and scalars. The default is `false`; scalar column mappings
+stay unchanged.
+
+```php
+$db->setAttribute(PDO::DUCKDB_ATTR_NATIVE_STRUCTURES, true);
+$stmt = $db->prepare('SELECT [1, NULL, 3], MAP([42], [1.25::DECIMAL(5,2)])');
+$stmt->execute();
+$row = $stmt->fetch(PDO::FETCH_NUM);
+assert($row[0]->type === 'INTEGER[]');
+assert($row[0]->value === [1, null, 3]);
+assert($row[1]->value === [['key' => 42, 'value' => '1.25']]);
+```
+
+Statements capture the connection default when prepared. Override it with
+`prepare($sql, [PDO::DUCKDB_ATTR_NATIVE_STRUCTURES => true])` or the statement's
+`setAttribute()`; read it with `getAttribute()`. This works with buffered and
+unbuffered execution and after re-execution. Returned values own their data
+and remain usable after the cursor closes or advances to another chunk.
+
+The wrapper's `type` is the complete logical declaration. JSON uses `JSON`;
+VARIANT uses its dynamic type, including `ARRAY`, `OBJECT`, or `NULL`. SQL NULL
+returns PHP `null` without a wrapper. The `value` property uses these shapes:
+
+| SQL value | Native payload |
+|-----------|----------------|
+| LIST, fixed ARRAY, TUPLE/unnamed STRUCT | Zero-based array in element order |
+| Named STRUCT | Array indexed by field name, using PHP's normal numeric-string key conversion |
+| MAP | List of `['key' => key, 'value' => value]` entries, preserving non-string and binary keys |
+| UNION | `['tag' => memberName, 'value' => value]`, including a NULL member |
+| JSON | A JSON node, as described below |
+| VARIANT | Its scalar value, tagged array elements, or ordered object entries |
+
+Empty LIST, ARRAY, TUPLE, STRUCT, and MAP payloads use `[]`; their declared type
+remains in the wrapper and `duckdb:decl_type`. VARIANT objects contain ordered
+`['key' => name, 'value' => taggedValue]` entries, so empty and NUL-containing
+names survive. VARIANT arrays contain tagged elements. Nested VARIANT values
+use `['type' => logicalType, 'value' => payload]` arrays. A VARIANT null's
+wrapper has `type === 'NULL'` and `value === null`, distinct from SQL NULL.
+
+JSON nodes use arrays for JSON arrays and
+`['type' => 'object', 'value' => entries]` for objects, including empty objects.
+Object entries preserve order, duplicate keys, and NUL bytes. Numbers use
+`['type' => 'number', 'value' => originalNumberText]`, preserving large values,
+negative zero, and exponent spelling. Strings, booleans, and JSON null use
+PHP strings, booleans, and `null` inside the outer JSON wrapper.
+Nested JSON values retain `['type' => 'JSON', 'value' => node]` arrays. Accepted
+non-finite JSON number tokens also remain exact strings in tagged number nodes.
+
+SQL scalar leaves keep the default mappings: BOOLEAN is `0`/`1`, exact
+DECIMAL and wide integers remain strings, temporal values retain their
+precision, and GEOMETRY remains uppercase hex WKB. Binary strings and keys
+retain their full lengths. Native conversion rejects excessive nesting beyond
+its 128-level limit with a fetch error; it never returns a partial value.
+
+PDO's fetch modes still control the surrounding row. `ATTR_STRINGIFY_FETCHES`
+takes precedence and returns the default textual values. Scalar `bindColumn()`
+selects the default mapping for that column in every row view, before native
+conversion; PDO applies the requested scalar coercion to the bound variable.
+Other columns remain native. This also lets you bind deeply nested JSON as
+text without triggering native nesting limits.
+
+`FETCH_KEY_PAIR`, `FETCH_GROUP`, and `FETCH_UNIQUE` require scalar key columns.
+Cast a structured key in SQL or bind that column as `PDO::PARAM_STR`; a native
+wrapper object cannot be a PHP array key.
+
+Wrapper objects let `FETCH_NAMED` distinguish a structured payload from PDO's
+array of duplicate-name columns. They have normal PHP object identity:
+`FETCH_BOTH`'s named and numeric entries reference the same wrapper, and copying
+a row shares its wrapper objects. Clone a wrapper if you need an independent
+mutable copy. The attribute changes fetching only; it does not change parameter
+binding or the Appender's input contract.
 
 ### Streaming results
 
@@ -447,48 +579,56 @@ $db->setAttribute(PDO::DUCKDB_ATTR_UNBUFFERED, true);
 ```
 
 An unbuffered result needs the connection to itself until you finish reading
-it. Preparing or running another statement on the same connection, including
-`prepare()`, `query()`, and `exec()`, makes DuckDB abort the partially read
-result. Rows from the chunk already fetched (up to 2048) stay readable, and the
-fetch after them throws a `PDOException` (driver code 5, `Attempting to execute
-an unsuccessful or closed ... result`), even when the result had no more rows.
-This applies to DuckDB 1.5 and 2.0. If you need to interleave queries, read the
-stream to the end first, use a buffered result, or open a second connection.
-After an abort, call `PDOStatement::closeCursor()` and `execute()` again to
-rerun the query. To release the native result early, call `closeCursor()`.
+it or call `PDOStatement::closeCursor()`. This includes a single-row result
+after its first `fetchColumn()`: fetch again to reach the end, or close it.
+If you need to interleave queries, use a buffered result or a second connection.
 
-Under `PDO::ERRMODE_SILENT` or `PDO::ERRMODE_WARNING`, the aborted fetch returns
-`false`, so a fetch loop ends as if the result were complete. Check
-`errorCode()` right after the loop: it's `HY000` after an abort, and
-`errorInfo()[1]` is 5. Another fetch resets `errorCode()` to `00000`.
+On DuckDB 2.0, preparing or running another statement while the result is
+open fails with `Resource In Use Error: connection has an open result; drain
+or destroy it before starting a new query`. The original result remains
+readable. Drain or close it before retrying the other statement. Under
+`PDO::ERRMODE_SILENT` or `PDO::ERRMODE_WARNING`, check the other statement's
+return value and the connection's `errorInfo()`.
 
-Persistent connections reset `DUCKDB_ATTR_UNBUFFERED` to false on every
+On DuckDB 1.5, the other statement succeeds and aborts the partially read
+result. Rows from the current chunk (up to 2048) stay readable; the next chunk
+fetch throws with driver code 5 (`Attempting to execute an unsuccessful or
+closed ... result`), even when there were no further rows. Under silent or
+warning mode, that fetch returns `false`. Check the original statement's
+`errorCode()` immediately after the loop: an abort reports `HY000` and
+`errorInfo()[1]` is 5. Another fetch resets the code to `00000`. To rerun an
+aborted query, call `closeCursor()` and then `execute()`.
+
+Persistent connections reset `DUCKDB_ATTR_UNBUFFERED` and
+`DUCKDB_ATTR_NATIVE_STRUCTURES` to false on every
 checkout (`check_liveness`). Pass it again in the constructor options, or call
 `setAttribute` after each `new PDO(..., [PDO::ATTR_PERSISTENT => true])`.
 
 ## DuckDB 2.0
 
-DuckDB 2.0 is in preview. The prebuilt binaries use DuckDB 1.5.x, and a build
-against DuckDB 1.5.x behaves as before. You can build the driver against the
-2.0 preview C library to test your application. This section describes
-`v2.0.0-alpha46057`; later previews can change what it covers.
+Prebuilt binaries use DuckDB 2.0.0. Source builds continue to support DuckDB
+1.5.3 and newer, with version-specific behavior described below. Keeping
+source compatibility does not make the engine upgrade transparent: new
+database files, SQL errors, streamed results, and canonical nested strings
+can behave differently.
 
-### Build against the preview
+### Build against 2.0
 
 Download the `duckdb-shared-libs-<platform>.tar.gz` bundle from the
-[DuckDB preview install page](https://duckdb.org/install/preview.html). Put
+[DuckDB 2.0.0 release](https://github.com/duckdb/duckdb/releases/tag/v2.0.0). Put
 every header from the bundle in `include/`, put the shared library in `lib/`,
 and point `configure` at that prefix:
 
 ```sh
-./configure --with-pdo-duckdb=/opt/duckdb-2.0
+./configure --with-pdo-duckdb=/opt/duckdb-2.0 \
+  --with-pdo-duckdb-bridge-source=/opt/duckdb-2.0-source
 ```
 
 DuckDB 2.0 still reports C API version 1.5.6 in `duckdb.h`, so `configure`
 detects 2.0 from `duckdb_v2.h` in the same directory as `duckdb.h`:
 
-- If `duckdb_v2.h` is missing, `configure` prints a warning and builds without
-  the DuckDB 2.0 code paths. To fix it, copy the full header set.
+- If the complete header set is missing, `configure` stops. Install all headers
+  from the matching bundle rather than copying only `duckdb.h`.
 - If the headers are 2.0 but `libduckdb` is older, `configure` stops with an
   error.
 
@@ -496,13 +636,15 @@ A 2.0 build reports `DuckDB 2.0 headers => yes` in `phpinfo()`.
 
 ### Storage version
 
-By default DuckDB 2.0 writes database files that DuckDB 1.5 can't open:
+By default DuckDB 2.0 creates new database files that DuckDB 1.5 can't open:
 
 ```text
 IO Error: Trying to read a database file with version number 69, but we can only read versions between 64 and 68.
 ```
 
-If DuckDB 1.5 must also read a file, set `storage_compatibility_version` when
+Opening an existing 1.5 file with 2.0 preserves its older format, including
+after updates and inserts. If DuckDB 1.5 must also read a new file, set
+`storage_compatibility_version` when
 you open it, in the DSN or in `PDO::DUCKDB_ATTR_CONFIG`:
 
 ```php
@@ -527,6 +669,13 @@ tag, such as `v1.5.0+`:
 ```sql
 SELECT database_name, tags['storage_version'] FROM duckdb_databases();
 ```
+
+On DuckDB 1.5, a new file's default compatibility format predates VARIANT
+storage. If you need VARIANT table columns, open the file with
+`storage_compatibility_version=v1.5.3` or a later supported version. An
+in-memory database does not have that file-format restriction. A compatibility
+tag describes the format; verify interoperability by actually reopening the
+file with every engine version that must use it.
 
 ### SQL behavior changes
 
@@ -556,22 +705,31 @@ those only to a 2.0 build. DuckDB 1.5 accepts `lambda_syntax`.
   `Binder Error: Deprecated lambda arrow (->) detected`. Write
   `lambda x: x + 1`, which also works on 1.5, or set
   `lambda_syntax=ENABLE_SINGLE_ARROW`. DuckDB plans to remove that setting.
-- **New default parser.** Parser error messages point at a different token, for
-  example `syntax error at or near "1"` instead of `"SELEC"` for `SELEC 1`. If
-  your code matches parser error text, set `enable_legacy_parser=true`. That
-  setting loads the downloadable `legacy_parser` extension, so it isn't
-  available under `open_basedir`.
+- **New default parser.** DuckDB 2.0 uses its PEG parser, so accepted syntax and
+  diagnostic text can differ. `enable_legacy_parser=true` loads the downloadable
+  `legacy_parser` extension if you need the old parser. You cannot load it under
+  `open_basedir`; a handle that has already loaded it is refused if you later
+  tighten `open_basedir`. Prepared bindings follow the selected parser, including
+  per-query fallback: `$1_0` means parameter 10 with PEG and parameter 1 with the
+  legacy parser. Use `?` or `:name` for portable parameter numbering.
 
 ### New SQL features
 
 - **Triggers.** `CREATE TRIGGER` runs through `exec()`. `rowCount()` and the
   `exec()` return value count only the rows of the statement you ran, not the
   rows its triggers write. A `FOR EACH ROW` trigger body must reference `NEW` or
-  `OLD`.
+  `OLD`. Appender inserts also run triggers.
+- **Data-modifying CTEs.** You can prepare a query such as
+  `WITH inserted AS (INSERT INTO t VALUES (?) RETURNING *) SELECT * FROM inserted`.
+  Its outer `SELECT` returns rows and has `rowCount()` zero.
+- **Session-variable shorthand.** `SELECT $x` reads a variable set with
+  `SET VARIABLE x = ...`. You can combine it with PDO's `?` or `:name`
+  placeholders, including a repeated `:x` alongside `$x`. PDO bindings and
+  session variables remain separate; an omitted PDO binding reports an error.
+  On DuckDB 1.5, use `getvariable('x')`; `$x` has no session-variable fallback.
 - **VARIANT and JSON.** `variant_*` and `json_*` functions work in plain SQL,
-  for example `variant_extract(v, 'a')::INTEGER`. Fetching a non-NULL `VARIANT`
-  value still reports a PDO error, as on 1.5; cast it to a concrete type in
-  the query.
+  for example `variant_extract(v, 'a')::INTEGER`. Both support the optional
+  [native structured fetch representation](#native-structured-fetches).
 
 ### Types
 
@@ -593,9 +751,15 @@ or changes. The [type mapping](#type-mapping) table lists the PHP values.
 - **`GEOMETRY`.** Unchanged: fetches return uppercase hex WKB. DuckDB 2.0 adds
   a core `BLOB` to `GEOMETRY` cast, so `CAST(from_hex(?) AS GEOMETRY)` turns a
   fetched value back into a geometry without the spatial extension.
-- **`VARIANT`.** Unchanged: fetching a non-NULL value reports a PDO error. The
-  appender stores PHP scalars into a `VARIANT` column as `VARCHAR`, `INT64`,
-  `DOUBLE`, or boolean values.
+- **`VARIANT`.** Fetches support both text and native structured values. The
+  appender stores PHP scalars as `VARCHAR`, `INT64`, `DOUBLE`, boolean, or
+  null values. Sequential PHP arrays become arrays; associative arrays and
+  plain `stdClass` objects become objects. Use `(object) []` for an empty
+  object and `[]` for an empty array. Strings remain VARCHAR values rather
+  than being parsed as JSON; cast JSON in SQL when you want that conversion.
+- **`TUPLE`.** Positional PHP arrays map to tuple fields in declaration order.
+  DuckDB 1.5 can return unnamed STRUCT values, but cannot store those types
+  as table columns; positional Appender tuples therefore require DuckDB 2.0.
 - **Empty `STRUCT`.** DuckDB 2.0 can build a `STRUCT` with no fields (`{}`).
   It fetches as `{}`, and the appender accepts an empty PHP array for it.
 - **Newer types.** If DuckDB returns a type that the driver's headers don't
@@ -606,42 +770,31 @@ or changes. The [type mapping](#type-mapping) table lists the PHP values.
   no layout for a type its headers don't define. Reporting an error is safer
   than reading memory it can't interpret or returning a wrong `null`.
 
-**Warning:** DuckDB's own `CAST(x AS VARCHAR)` mishandles a `TIMESTAMPTZ_NS`
-instant before 1970 that falls less than one microsecond before a whole
-second. In a session with `SET TimeZone='UTC'`, it renders
-`make_timestamp_ns(-1)` as `1970-01-01 00:00:00.00000000/+00` instead of
-`1969-12-31 23:59:59.999999999+00`, and for other values, such as
-`make_timestamp_ns(-500)`, it raises `INTERNAL Error: Information loss on
-integer cast`. If DuckDB raises that error while it runs the query, for
-example on a table column, it invalidates the whole database: every later
-statement, even `SELECT 1`, fails with `FATAL Error: Failed: database has been
-invalidated because of a previous fatal error` until you open the database
-again. The database stays usable only when DuckDB evaluates the cast before it
-runs the query, which happens only when the cast's input is built from
-constants and bound parameters alone; any column reference in the input
-puts the database at risk.
-The driver's own fetch of these values is correct, so fetch the column instead
-of casting it.
-
 ### `CONNECT`
 
-While a connection is redirected with DuckDB 2.0's `CONNECT` statement,
-`prepare()` and `query()` fail with `INTERNAL Error: PREPARE succeeded but the
-prepared statement was not registered`, and DuckDB has already run the
-statement on the remote database by then. A failed `prepare()` of an `INSERT`
-still inserts the row. `exec()` works. This is a DuckDB 2.0 preview defect in
-`duckdb_prepare()`, so the driver can't avoid it. Until DuckDB fixes it, use
-`exec()` for statements while connected, or `ATTACH` the remote database and
-query it with qualified names instead of `CONNECT`. `DISCONNECT` restores
-normal behavior.
+You can use `prepare()`, `query()`, bound parameters, and transactions while
+redirected with DuckDB 2.0's `CONNECT`, or query an attached quack database
+with qualified names. Preparing a remote statement only parses its SQL;
+`execute()` runs it once. The driver avoids DuckDB's native prepared-statement
+path, which can execute remote SQL prematurely.
 
-The `ATTACH` workaround has its own limits on a quack remote. `prepare()` of a
-statement with a placeholder fails with `Invalid Input Error: Values were not
-provided for the following parameters: 1`, so statements on the remote can't
-use bound parameters. With both `CONNECT` and `ATTACH`, `exec()` returns `0`
-and `rowCount()` reports `0` for an `INSERT`, `UPDATE`, or `DELETE` on the
-remote, however many rows it changed, because DuckDB reports no changed rows
-for it. Count the rows in SQL if you need the number.
+While `CONNECT`ed, syntax and binding errors detected on the client before SQL
+execution leave your server transaction unchanged. Errors returned by server
+execution follow the server's transaction invalidation policy. Local and
+attached queries retain DuckDB's native invalidation policy. Matching native
+remote prepare-error behavior requires an upstream server protocol that
+validates SQL without executing it.
+
+Repeated named parameters, `bindParam()` references, embedded NUL bytes, and
+binary LOB streams keep their local binding behavior. Prepared `INSERT`,
+`UPDATE`, `DELETE`, and `MERGE` statements report affected rows through
+`rowCount()`; a `SELECT` reports zero. `exec()` also returns affected rows for
+remote DML and preserves the local rules for multi-statement counts.
+
+`PDO::DUCKDB_ATTR_UNBUFFERED` streams remote query results lazily. Drain the
+result or call `closeCursor()` before executing another statement on that
+connection; a rejected interleaved statement leaves the original result
+readable. `DISCONNECT` restores local execution.
 
 ### Driver differences
 
@@ -692,21 +845,21 @@ Other contracts:
   use throws `Error`); rows already flushed survive, but unflushed buffered
   rows are lost. Probe rejections (`Failed to append value: …`) and soft
   validation failures don't poison.
-- **`VARIANT`.** A row holding a non-NULL `VARIANT` value, at any nesting
-  depth, fails the fetch before any of its columns are read: under
+- **Structured conversion errors.** A row whose value exceeds the native
+  nesting limit or cannot be decoded fails before any column is read: under
   `ERRMODE_EXCEPTION` the fetch throws, otherwise it returns `false` with the
   error in `errorInfo()`, and the next fetch continues with the following row.
-  SQL NULL `VARIANT` cells read back as `null`. Before PHP 8.5, `fetchAll()`
+  Before PHP 8.5, `fetchAll()`
   reports a failure only when it happens on its first row, so under
-  `ERRMODE_WARNING` or `ERRMODE_SILENT` a later `VARIANT` row ends the result
+  `ERRMODE_WARNING` or `ERRMODE_SILENT` a later conversion failure ends the result
   early with no warning; check `errorInfo()`. Because the failed fetch returns
   `false`, a `while ($row = $stmt->fetch())` loop stops at that row as if the
-  result had ended. Cast `VARIANT` columns to `VARCHAR` in SQL to fetch the
-  value, or check `errorInfo()` after the loop.
+  result had ended. Check `errorInfo()` after the loop.
 - **`getAttribute()`.** Returns the library version for
   `ATTR_CLIENT_VERSION`/`ATTR_SERVER_VERSION`, `"duckdb"` for
   `ATTR_DRIVER_NAME`, and the streaming flag for
-  `PDO::DUCKDB_ATTR_UNBUFFERED`. `PDO::DUCKDB_ATTR_CONFIG` and
+  `PDO::DUCKDB_ATTR_UNBUFFERED` and the native conversion flag for
+  `PDO::DUCKDB_ATTR_NATIVE_STRUCTURES`. `PDO::DUCKDB_ATTR_CONFIG` and
   `PDO::ATTR_AUTOCOMMIT` are not gettable.
 - **`duckdbTableNames()`.** An unparseable query throws `PDOException` with a
   detail-free message (`could not parse the query`); `prepare()` the query

@@ -1,127 +1,262 @@
-name: Release Windows binaries
-
-# Called by release.yml when a GitHub Release is published. DuckDB ships no MSVC static
-# Windows lib (only a MinGW one, not MSVC-linkable), so a static self-contained
-# DLL is impossible. We build php_pdo_duckdb.dll against DuckDB's dynamic
-# import lib (duckdb.lib) and ship duckdb.dll inside the asset zip. PIE
-# installs bundled dependency DLLs to the PHP root (next to php.exe, on the
-# loader path) and the extension DLL to ext\, so the dependency resolves at
-# load. Each exact release archive is loaded and queried before it is staged.
-#
-# x64 only: DuckDB ships no 32-bit Windows lib. NTS + TS. PHP 8.4/8.5 are the
-# runtime-validated set; older PHP falls back to PIE's composer-default source
-# build.
+name: Build Windows binary archives
 
 on:
   workflow_call:
+    inputs:
+      package-version:
+        type: string
+        default: ''
+      artifact-prefix:
+        type: string
+        default: release-windows
+      include-source-floor:
+        type: boolean
+        default: false
+      duckdb-version:
+        type: string
+        default: '2.0.0'
+      source-compatibility-only:
+        type: boolean
+        default: false
 
 permissions: {}
 
 env:
-  # Keep in sync with DUCKDB_VERSION in tests.yml.
-  DUCKDB_VERSION: "1.5.6"
+  DUCKDB_VERSION: ${{ inputs.duckdb-version }}
 
 jobs:
-  build:
-    name: ${{ matrix.php }} ${{ matrix.ts }} x64
-    runs-on: windows-2022
+  prepare:
+    name: Prepare Windows engine and PHP matrix
+    runs-on: ubuntu-latest
     permissions:
       contents: read
-    strategy:
-      fail-fast: false
-      matrix:
-        php: ['8.4', '8.5']
-        ts: ['nts', 'ts']
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+      duckdb-sha256: ${{ steps.engine.outputs.sha256 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - name: Download libduckdb (amd64 dynamic; duckdb.h, duckdb.lib, duckdb.dll)
+      - name: Select target matrix
+        id: matrix
+        shell: bash
+        env:
+          INCLUDE_SOURCE_FLOOR: ${{ inputs.include-source-floor }}
+          SOURCE_COMPATIBILITY_ONLY: ${{ inputs.source-compatibility-only }}
+        run: |
+          set -euo pipefail
+          matrix=$(jq -cn --argjson floor "$INCLUDE_SOURCE_FLOOR" --argjson source "$SOURCE_COMPATIBILITY_ONLY" '
+            {include: [
+              (if $source then ["8.1"] else (if $floor then ["8.1"] else [] end) + ["8.2", "8.3", "8.4", "8.5", "8.6"] end) | .[] as $php |
+              ["nts", "ts"][] as $ts |
+              {php: $php, ts: $ts,
+               channel: (if $php == "8.6" then "development" elif $php == "8.1" then "source" else "stable" end),
+               runner: (if $php == "8.6" then "windows-2025-vs2026" else "windows-2022" end)}
+            ]}')
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+
+      - name: Read pinned DuckDB checksum
+        id: engine
+        if: startsWith(env.DUCKDB_VERSION, '2.')
+        shell: bash
+        run: |
+          set -euo pipefail
+          asset=duckdb-static-libs-windows-amd64.tar.gz
+          mapfile -t checksums < <(awk -v asset="$asset" '$2 == asset { print $1 }' .github/duckdb-sha256.txt)
+          test "${#checksums[@]}" -eq 1
+          [[ "${checksums[0]}" =~ ^[a-f0-9]{64}$ ]]
+          echo "sha256=${checksums[0]}" >> "$GITHUB_OUTPUT"
+
+      - name: Cache verified engine archive across PHP and thread flavors
+        if: startsWith(env.DUCKDB_VERSION, '2.')
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: engine-cache
+        with:
+          path: duckdb-static-libs-windows-amd64.tar.gz
+          key: duckdb-static-windows-amd64-${{ env.DUCKDB_VERSION }}-${{ steps.engine.outputs.sha256 }}
+          enableCrossOsArchive: true
+
+      - name: Fetch engine archive
+        if: startsWith(env.DUCKDB_VERSION, '2.') && steps.engine-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          asset=duckdb-static-libs-windows-amd64.tar.gz
+          curl --fail --location --retry 5 --output "$asset" "https://github.com/duckdb/duckdb/releases/download/v${DUCKDB_VERSION}/$asset"
+
+      - name: Verify engine archive, including cache hits
+        if: startsWith(env.DUCKDB_VERSION, '2.')
+        shell: bash
+        env:
+          EXPECTED_SHA256: ${{ steps.engine.outputs.sha256 }}
+        run: |
+          set -euo pipefail
+          printf '%s  %s\n' "$EXPECTED_SHA256" duckdb-static-libs-windows-amd64.tar.gz | sha256sum --check --strict -
+
+      - name: Warm exact source header cache
+        uses: ./.github/actions/duckdb-bridge
+        with:
+          version: ${{ env.DUCKDB_VERSION }}
+
+  combined-engine:
+    name: Build shared Windows engine and bridge DLL
+    needs: prepare
+    runs-on: windows-2022
+    permissions:
+      contents: read
+    outputs:
+      cache-key: ${{ steps.identity.outputs.cache-key }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Prepare exact source headers
+        id: bridge
+        uses: ./.github/actions/duckdb-bridge
+        with:
+          version: ${{ env.DUCKDB_VERSION }}
+
+      - name: Select MSVC toolchain and combined-library cache identity
+        id: identity
+        shell: pwsh
+        env:
+          ENGINE_SHA256: ${{ needs.prepare.outputs.duckdb-sha256 }}
+          SOURCE_CACHE_KEY: ${{ steps.bridge.outputs.cache-key }}
+          BRIDGE_BUILD_HASH: ${{ hashFiles('pdo_duckdb_bridge*', 'duckdb_static_extensions.*', 'scripts/build-windows-duckdb.ps1', 'scripts/windows-duckdb-source/CMakeLists.txt', 'config.w32') }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if ($LASTEXITCODE -ne 0 -or -not $vs) { throw 'x64 MSVC installation not found' }
+          Import-Module "$vs\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
+          Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'
+          $compiler = (Get-Item (Get-Command cl.exe).Source).VersionInfo.FileVersion
+          if (-not $env:BRIDGE_BUILD_HASH -or -not $env:WindowsSDKVersion) { throw 'incomplete combined-DLL build identity' }
+          $sdk = $env:WindowsSDKVersion.TrimEnd('\')
+          "cache-key=duckdb-combined-windows-amd64-$env:ENGINE_SHA256-$env:SOURCE_CACHE_KEY-$env:BRIDGE_BUILD_HASH-msvc$compiler-sdk$sdk" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "vs-directory=$vs" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Cache combined engine once across PHP and thread flavors
+        id: combined-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: duckdb-deps
+          key: ${{ steps.identity.outputs.cache-key }}
+
+      - name: Restore verified engine archive
+        if: startsWith(env.DUCKDB_VERSION, '2.') && steps.combined-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: duckdb-static-libs-windows-amd64.tar.gz
+          key: duckdb-static-windows-amd64-${{ env.DUCKDB_VERSION }}-${{ needs.prepare.outputs.duckdb-sha256 }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
+
+      - name: Link and exercise the combined GA engine and bridge
+        if: startsWith(env.DUCKDB_VERSION, '2.') && steps.combined-cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        env:
+          EXPECTED_SHA256: ${{ needs.prepare.outputs.duckdb-sha256 }}
+          VS_DIRECTORY: ${{ steps.identity.outputs.vs-directory }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $asset = 'duckdb-static-libs-windows-amd64.tar.gz'
+          if ((Get-FileHash $asset -Algorithm SHA256).Hash.ToLowerInvariant() -ne $env:EXPECTED_SHA256) { throw 'DuckDB checksum mismatch' }
+          New-Item -ItemType Directory -Path duckdb-static | Out-Null
+          tar -xzf $asset -C duckdb-static
+          if ($LASTEXITCODE -ne 0) { throw 'DuckDB archive extraction failed' }
+          Import-Module "$env:VS_DIRECTORY\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
+          Enter-VsDevShell -VsInstallPath $env:VS_DIRECTORY -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'
+          ./scripts/build-windows-duckdb.ps1 -BundleDirectory duckdb-static -BridgeSourceCache duckdb-bridge -SourceDirectory . -OutputDirectory duckdb-deps
+
+      - name: Fetch exact legacy engine source
+        if: startsWith(env.DUCKDB_VERSION, '1.') && steps.combined-cache.outputs.cache-hit != 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: duckdb/duckdb
+          ref: ${{ steps.bridge.outputs.source-id }}
+          path: duckdb-engine
+          persist-credentials: false
+
+      - name: Build and exercise the combined legacy engine and bridge
+        if: startsWith(env.DUCKDB_VERSION, '1.') && steps.combined-cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        env:
+          VS_DIRECTORY: ${{ steps.identity.outputs.vs-directory }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Import-Module "$env:VS_DIRECTORY\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
+          Enter-VsDevShell -VsInstallPath $env:VS_DIRECTORY -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'
+          ./scripts/build-windows-duckdb.ps1 -EngineSourceDirectory duckdb-engine -BridgeSourceCache duckdb-bridge -SourceDirectory . -OutputDirectory duckdb-deps -Parallel 4
+
+  build:
+    name: PHP ${{ matrix.php }} ${{ matrix.ts }} x64 (${{ matrix.channel }})
+    needs: [prepare, combined-engine]
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Prepare exact source headers
+        uses: ./.github/actions/duckdb-bridge
+        with:
+          version: ${{ env.DUCKDB_VERSION }}
+
+      - name: Restore tested combined engine and bridge
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: duckdb-deps
+          key: ${{ needs.combined-engine.outputs.cache-key }}
+          fail-on-cache-miss: true
+
+      - name: Check the complete combined package
         shell: pwsh
         run: |
-          $url = "https://github.com/duckdb/duckdb/releases/download/v$env:DUCKDB_VERSION/libduckdb-windows-amd64.zip"
-          Invoke-WebRequest -Uri $url -OutFile duckdb.zip
-          $entry = Get-Content .github\duckdb-sha256.txt | Where-Object { $_ -match '  libduckdb-windows-amd64\.zip$' }
-          if (-not $entry) { throw 'missing checksum for libduckdb-windows-amd64.zip' }
-          $expected = ($entry -split '\s+')[0]
-          $actual = (Get-FileHash duckdb.zip -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($actual -ne $expected) { throw "DuckDB checksum mismatch: expected $expected, got $actual" }
-          Expand-Archive duckdb.zip -DestinationPath duckdb-deps -Force
+          $ErrorActionPreference = 'Stop'
+          $files = @('include/duckdb.h', 'include/duckdb_extension.h', 'include/pdo_duckdb_bridge_build.h', 'include/pdo_duckdb_bridge_package.h', 'lib/duckdb.lib', 'duckdb.dll', 'LICENSE.duckdb', 'LICENSE.fmt')
+          if ($env:DUCKDB_VERSION.StartsWith('2.')) {
+            $files += @('include/duckdb_v2.h', 'include/duckdb_extension_v2.h', 'include/duckdb_static_extension.h')
+          }
+          foreach ($file in $files) {
+            if (-not (Test-Path "duckdb-deps\$file" -PathType Leaf)) { throw "missing combined package file: $file" }
+          }
 
-      - name: Build extension DLL (MSVC, against dynamic libduckdb)
+      - name: Build extension with the matching PHP SDK and runtime
         uses: php/php-windows-builder/extension@29352c0ef9e8ce65264ea9e287881a6f7758a953 # 1.9.0
         with:
+          extension-ref: ${{ github.sha }}-duckdb-${{ env.DUCKDB_VERSION }}
           php-version: ${{ matrix.php }}
           arch: x64
           ts: ${{ matrix.ts }}
-          args: --with-pdo-duckdb=${{ github.workspace }}\duckdb-deps
+          build-directory: builder
+          args: --with-pdo-duckdb=${{ github.workspace }}\duckdb-deps --with-pdo-duckdb-bridge-source=${{ github.workspace }}\duckdb-bridge
           run-tests: false
 
-      - name: Setup matching PHP for final-archive validation
-        uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
-        with:
-          php-version: ${{ matrix.php }}
-          coverage: none
-        env:
-          phpts: ${{ matrix.ts }}
-
-      - name: Bundle duckdb.dll and finalize the release archive
+      - name: Package and validate the relocated archive
         id: package
         shell: pwsh
         env:
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          PACKAGE_VERSION: ${{ inputs.package-version || github.event.release.tag_name }}
+          PHP_SERIES: ${{ matrix.php }}
+          PHP_THREAD_SAFETY: ${{ matrix.ts }}
+          PHP_CHANNEL: ${{ matrix.channel }}
+          PDO_DUCKDB_EXPECT_VERSION: ${{ env.DUCKDB_VERSION }}
+          PDO_DUCKDB_EXPECT_V2: ${{ startsWith(env.DUCKDB_VERSION, '2.') && '1' || '0' }}
+          PDO_DUCKDB_EXPECT_STATIC: '1'
         run: |
-          $ErrorActionPreference = 'Stop'
-          $tag = $env:RELEASE_TAG
-          if ($tag -notmatch '^[A-Za-z0-9][A-Za-z0-9._+-]*$') {
-            throw 'unsupported release tag for an archive name'
-          }
+          ./scripts/windows-binary.ps1 -PackageVersion $env:PACKAGE_VERSION -PhpSeries $env:PHP_SERIES -ThreadSafety $env:PHP_THREAD_SAFETY -Channel $env:PHP_CHANNEL
 
-          $zip = Get-ChildItem artifacts -Filter "php_pdo_duckdb-*.zip" |
-                 Where-Object { $_.Name -notlike '*-logs*' } | Select-Object -First 1
-          if (-not $zip) { throw "no extension artifact zip produced" }
-          # Reuse the php-ts-vs-arch suffix the builder picked (the vs version
-          # tracks the PHP version); only swap the ref segment for the tag.
-          if ($zip.BaseName -notmatch '(\d+\.\d+-(?:nts|ts)-vs\d+-\w+)$') {
-            throw "unexpected artifact name: $($zip.Name)"
-          }
-          $newbase = "php_pdo_duckdb-$tag-$($matches[1])"
-
-          Expand-Archive $zip.FullName -DestinationPath stage -Force
-          Get-ChildItem stage -Filter "php_pdo_duckdb-*.dll" | ForEach-Object { Rename-Item $_.FullName "$newbase.dll" }
-          Get-ChildItem stage -Filter "php_pdo_duckdb-*.pdb" | ForEach-Object { Rename-Item $_.FullName "$newbase.pdb" }
-          # Ship duckdb.dll alongside; PIE drops it next to php.exe on install.
-          Copy-Item duckdb-deps\duckdb.dll -Destination stage\ -Force
-
-          $out = "$newbase.zip"
-          if (Test-Path $out) { Remove-Item $out -Force }
-          Compress-Archive -Path stage\* -DestinationPath $out
-          Get-FileHash $out -Algorithm SHA256 | Format-List
-          "package=$out" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
-
-      - name: Validate the exact release archive
-        shell: pwsh
-        env:
-          PACKAGE: ${{ steps.package.outputs.package }}
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $package = $env:PACKAGE
-          Expand-Archive $package -DestinationPath release-verify -Force
-          $extdll = Get-ChildItem release-verify -Filter 'php_pdo_duckdb-*.dll' | Select-Object -First 1
-          $duckdbdll = Get-ChildItem release-verify -Filter 'duckdb.dll' | Select-Object -First 1
-          if (-not $extdll) { throw 'final archive contains no extension DLL' }
-          if (-not $duckdbdll) { throw 'final archive contains no duckdb.dll' }
-
-          $php = (Get-Command php).Source
-          Copy-Item $duckdbdll.FullName -Destination (Split-Path $php) -Force
-          php -d extension="$($extdll.FullName)" scripts\win-probe.php
-          if ($LASTEXITCODE -ne 0) { throw "final archive probe failed (exit $LASTEXITCODE)" }
-          Get-FileHash $package -Algorithm SHA256 | Format-List
-
-      - name: Stage validated release archive
+      - name: Stage validated archive
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: release-windows-php${{ matrix.php }}-${{ matrix.ts }}
+          name: ${{ inputs.artifact-prefix }}-php${{ matrix.php }}-${{ matrix.ts }}-${{ matrix.channel }}
           path: ${{ steps.package.outputs.package }}
           if-no-files-found: error

@@ -20,8 +20,16 @@ PHP_ARG_ENABLE([pdo-duckdb-dev],
   [no],
   [no])
 
+PHP_ARG_WITH([pdo-duckdb-bridge-source],
+  [for verified DuckDB C++ bridge headers],
+  [AS_HELP_STRING([--with-pdo-duckdb-bridge-source=DIR],
+    [Use the exact-source cache produced by scripts/duckdb-bridge-source.py.
+     The selected DuckDB library must have the same version and source ID.])],
+  [no],
+  [no])
+
 pdo_duckdb_cleanup_staged_aliases() {
-  rm -rf "$DUCKDB_CONFIG_STATIC_STAGE" "$DUCKDB_CONFIG_INCLUDE_STAGE" "$DUCKDB_CONFIG_LIBDIR_STAGE"
+  rm -rf "$DUCKDB_CONFIG_STATIC_STAGE" "$DUCKDB_CONFIG_INCLUDE_STAGE" "$DUCKDB_CONFIG_LIBDIR_STAGE" "$DUCKDB_CONFIG_BRIDGE_STAGE"
 }
 
 pdo_duckdb_promote_alias() {
@@ -252,6 +260,10 @@ elif test "$PHP_PDO_DUCKDB" != "no"; then
 fi
 
 if test "$PHP_PDO_DUCKDB" != "no"; then
+  if test "$PHP_PDO_DUCKDB_BRIDGE_SOURCE" = "no" || test "$PHP_PDO_DUCKDB_BRIDGE_SOURCE" = "yes"; then
+    pdo_duckdb_cleanup_staged_aliases
+    AC_MSG_ERROR([PDO DuckDB requires matching C++ source headers. Stage a verified cache with scripts/duckdb-bridge-source.py and pass --with-pdo-duckdb-bridge-source=DIR. Configure never downloads sources.])
+  fi
   save_CPPFLAGS="$CPPFLAGS"
   dnl AC_CHECK_DECLS expands CPPFLAGS as shell words; use the stable,
   dnl whitespace-free symlink created for the compiler build flags.
@@ -296,8 +308,144 @@ if test "$PHP_PDO_DUCKDB" != "no"; then
       LDFLAGS="$save_CHECK_LDFLAGS"
     fi
     AC_DEFINE([HAVE_DUCKDB_V2], [1], [Whether the DuckDB 2.0 C API headers are available])
+    if test -n "$DUCKDB_CONFIG_STATIC_FINAL"; then
+      if test ! -r "$DUCKDB_CONFIG_INCLUDE/duckdb_static_extension.h"; then
+        pdo_duckdb_cleanup_staged_aliases
+        AC_MSG_ERROR([DuckDB 2.0 static builds require the complete header set, including duckdb_static_extension.h.])
+      fi
+      dnl Preserve the extensions bundled before 2.0. New optional archives
+      dnl such as httpfs require additional third-party static dependencies.
+      for pdo_extension in autocomplete core_functions icu json parquet tpcds tpch; do
+        if test ! -r "$DUCKDB_CONFIG_STATIC_DIR/lib${pdo_extension}_extension.a"; then
+          pdo_duckdb_cleanup_staged_aliases
+          AC_MSG_ERROR([The DuckDB 2.0 static bundle is missing lib${pdo_extension}_extension.a.])
+        fi
+      done
+      for pdo_capability in httplib loadable_extensions; do
+        if test ! -r "$DUCKDB_CONFIG_STATIC_DIR/libduckdb_${pdo_capability}.a"; then
+          pdo_duckdb_cleanup_staged_aliases
+          AC_MSG_ERROR([The DuckDB 2.0 static bundle is missing libduckdb_${pdo_capability}.a.])
+        fi
+      done
+      save_STATIC_LIBS="$LIBS"
+      save_STATIC_CPPFLAGS="$CPPFLAGS"
+      save_STATIC_CFLAGS="$CFLAGS"
+      save_STATIC_LDFLAGS="$LDFLAGS"
+      dnl PHP_REQUIRE_CXX adds -lstdc++ to LIBS. Leaving it in this probe
+      dnl would mask an incomplete static runtime with the host's shared one.
+      LIBS="$PDO_DUCKDB_SHARED_LIBADD -lm"
+      CPPFLAGS="$CPPFLAGS -I$DUCKDB_CONFIG_INCLUDE"
+      case `uname -s 2>/dev/null` in
+        Linux)
+          CFLAGS="$CFLAGS -fPIC"
+          LDFLAGS="$LDFLAGS -shared -Wl,-z,defs"
+          dnl GA's archives retain this GCC 13 ABI import even when the
+          dnl selected API paths do not reference it through a relocation.
+          dnl -z defs alone therefore misses the incomplete runtime.
+          if ! pdo_duckdb_static_imports=`${NM:-nm} -u "$DUCKDB_STATIC_DIR/libduckdb_static.a" 2>/dev/null`; then
+            pdo_duckdb_cleanup_staged_aliases
+            AC_MSG_ERROR([Unable to inspect the DuckDB static archive with ${NM:-nm}.])
+          fi
+          if printf '%s\n' "$pdo_duckdb_static_imports" | grep '_ZSt21ios_base_library_initv' >/dev/null; then
+            LDFLAGS="$LDFLAGS -Wl,--require-defined=_ZSt21ios_base_library_initv"
+          fi
+          ;;
+      esac
+      AC_MSG_CHECKING([whether DuckDB 2.0 static extensions and the C++ runtime link])
+      AC_LINK_IFELSE([AC_LANG_PROGRAM([[
+#include <duckdb_static_extension.h>
+extern int32_t duckdb_extension_core_functions_describe(duckdb_extension_descriptor *);
+      ]], [[return duckdb_register_static_extension(duckdb_extension_core_functions_describe);]])],
+        [AC_MSG_RESULT([yes])],
+        [pdo_duckdb_cleanup_staged_aliases; AC_MSG_RESULT([no]); AC_MSG_ERROR([The DuckDB 2.0 static bundle cannot link with the selected C++ runtime. Use matching archives and a compatible runtime; the official Linux GA bundle requires GCC 13 or newer libstdc++. A Bookworm-built GCC 13 preserves the Debian 12 deployment baseline. See config.log.])])
+      LIBS="$save_STATIC_LIBS"
+      CPPFLAGS="$save_STATIC_CPPFLAGS"
+      CFLAGS="$save_STATIC_CFLAGS"
+      LDFLAGS="$save_STATIC_LDFLAGS"
+      AC_DEFINE([HAVE_DUCKDB_STATIC_EXTENSIONS], [1], [Whether bundled DuckDB extensions need explicit registration])
+    fi
   elif test "$ac_cv_have_decl_DUCKDB_TYPE_TIMESTAMP_TZ_NS" = "yes"; then
     AC_MSG_WARN([duckdb.h declares DUCKDB_TYPE_TIMESTAMP_TZ_NS but duckdb_v2.h is not next to it. If this is DuckDB 2.0, install its full header set to enable the DuckDB 2.0 code paths. The PHPT suite's DuckDB 2.0 branches are then off as well, so the engine-behaviour tests (030, 035, 051, 078, 093) fail against a DuckDB 2.0 library; those failures are not driver bugs.])
+  fi
+  if test "$PHP_PDO_DUCKDB_BRIDGE_SOURCE" != "no"; then
+    if test "$PHP_PDO_DUCKDB_BRIDGE_SOURCE" = "yes"; then
+      AC_MSG_ERROR([--with-pdo-duckdb-bridge-source requires a verified source-cache directory.])
+    fi
+    AC_PATH_PROG([PDO_DUCKDB_PYTHON], [python3])
+    if test -z "$PDO_DUCKDB_PYTHON" ||
+        ! "$PDO_DUCKDB_PYTHON" "$srcdir/scripts/duckdb-bridge-source.py" verify "$PHP_PDO_DUCKDB_BRIDGE_SOURCE"; then
+      pdo_duckdb_cleanup_staged_aliases
+      AC_MSG_ERROR([DuckDB bridge source-cache verification failed. Stage matching sources with scripts/duckdb-bridge-source.py.])
+    fi
+    AC_MSG_CHECKING([whether the selected DuckDB C headers match the verified source])
+    if ! "$PDO_DUCKDB_PYTHON" "$srcdir/scripts/check-duckdb-headers.py" "$PHP_PDO_DUCKDB_BRIDGE_SOURCE/include" "$DUCKDB_CONFIG_INCLUDE"; then
+      pdo_duckdb_cleanup_staged_aliases
+      AC_MSG_RESULT([no])
+      AC_MSG_ERROR([Install the matching complete DuckDB C header set; DuckDB 2.0 requires all five release headers.])
+    fi
+    AC_MSG_RESULT([yes])
+    DUCKDB_BRIDGE_SOURCE=`cd "$PHP_PDO_DUCKDB_BRIDGE_SOURCE" && pwd -P`
+    DUCKDB_CONFIG_BRIDGE_STAGE="build/.duckdb-config-bridge-$$"
+    DUCKDB_CONFIG_BRIDGE_FINAL="build/duckdb-config-bridge"
+    if ! ln -s "$DUCKDB_BRIDGE_SOURCE/include" "$DUCKDB_CONFIG_BRIDGE_STAGE"; then
+      pdo_duckdb_cleanup_staged_aliases
+      AC_MSG_ERROR([Unable to stage the DuckDB bridge headers.])
+    fi
+    PHP_REQUIRE_CXX()
+    save_BRIDGE_CPPFLAGS="$CPPFLAGS"
+    save_BRIDGE_LIBS="$LIBS"
+    save_BRIDGE_LDFLAGS="$LDFLAGS"
+    save_BRIDGE_CXXFLAGS="$CXXFLAGS"
+    CPPFLAGS="$CPPFLAGS -I$DUCKDB_CONFIG_INCLUDE -I$DUCKDB_CONFIG_BRIDGE_STAGE"
+    CXXFLAGS="$CXXFLAGS -std=c++17"
+    if test -n "$DUCKDB_CONFIG_STATIC_FINAL"; then
+      LIBS="$PDO_DUCKDB_SHARED_LIBADD -lm"
+    else
+      LDFLAGS="$LDFLAGS -L$DUCKDB_CONFIG_LIBDIR"
+      LIBS="-lduckdb $LIBS"
+    fi
+    save_BRIDGE_LD_LIBRARY_PATH=${LD_LIBRARY_PATH-}
+    save_BRIDGE_DYLD_LIBRARY_PATH=${DYLD_LIBRARY_PATH-}
+    bridge_had_ld_path=${LD_LIBRARY_PATH+yes}
+    bridge_had_dyld_path=${DYLD_LIBRARY_PATH+yes}
+    if test -n "$DUCKDB_RUNTIME_LIBDIR"; then
+      LD_LIBRARY_PATH="$DUCKDB_RUNTIME_LIBDIR${LD_LIBRARY_PATH+:$LD_LIBRARY_PATH}"
+      DYLD_LIBRARY_PATH="$DUCKDB_RUNTIME_LIBDIR${DYLD_LIBRARY_PATH+:$DYLD_LIBRARY_PATH}"
+      export LD_LIBRARY_PATH DYLD_LIBRARY_PATH
+    fi
+    AC_LANG_PUSH([C++])
+    AC_MSG_CHECKING([whether DuckDB bridge headers exactly match the linked runtime])
+    AC_RUN_IFELSE([AC_LANG_PROGRAM([[
+#include <duckdb.hpp>
+#include <pdo_duckdb_bridge_build.h>
+#include <cstring>
+    ]], [[
+      return std::strcmp(duckdb::DuckDB::LibraryVersion(), PDO_DUCKDB_BRIDGE_EXPECTED_VERSION) ||
+        std::strcmp(duckdb::DuckDB::SourceID(), PDO_DUCKDB_BRIDGE_EXPECTED_SOURCE_ID);
+    ]])], [pdo_bridge_identity=yes], [pdo_bridge_identity=no],
+      [pdo_bridge_identity=cross-compiling])
+    AC_MSG_RESULT([$pdo_bridge_identity])
+    AC_LANG_POP([C++])
+    CPPFLAGS="$save_BRIDGE_CPPFLAGS"
+    LIBS="$save_BRIDGE_LIBS"
+    LDFLAGS="$save_BRIDGE_LDFLAGS"
+    CXXFLAGS="$save_BRIDGE_CXXFLAGS"
+    if test "$bridge_had_ld_path" = yes; then
+      LD_LIBRARY_PATH="$save_BRIDGE_LD_LIBRARY_PATH"
+      export LD_LIBRARY_PATH
+    else
+      unset LD_LIBRARY_PATH
+    fi
+    if test "$bridge_had_dyld_path" = yes; then
+      DYLD_LIBRARY_PATH="$save_BRIDGE_DYLD_LIBRARY_PATH"
+      export DYLD_LIBRARY_PATH
+    else
+      unset DYLD_LIBRARY_PATH
+    fi
+    if test "$pdo_bridge_identity" != yes; then
+      pdo_duckdb_cleanup_staged_aliases
+      AC_MSG_ERROR([DuckDB bridge header/library identity mismatch or runtime probe failure. Native execution of the matching version and source ID is required; see config.log.])
+    fi
   fi
   if test -n "$DUCKDB_CONFIG_STATIC_FINAL"; then
     if ! pdo_duckdb_promote_alias "$DUCKDB_CONFIG_STATIC_STAGE" "$DUCKDB_CONFIG_STATIC_FINAL"; then
@@ -345,9 +493,27 @@ if test "$PHP_PDO_DUCKDB" != "no"; then
     PDO_DUCKDB_CFLAGS=""
   fi
 
+  PDO_DUCKDB_SOURCES="pdo_duckdb.c duckdb_driver.c duckdb_statement.c duckdb_appender.c duckdb_static_extensions.c pdo_duckdb_sql.c duckdb_value.c"
+  if test "$PHP_PDO_DUCKDB_BRIDGE_SOURCE" != "no"; then
+    if ! pdo_duckdb_promote_alias "$DUCKDB_CONFIG_BRIDGE_STAGE" "$DUCKDB_CONFIG_BRIDGE_FINAL"; then
+      pdo_duckdb_cleanup_staged_aliases
+      AC_MSG_ERROR([Unable to promote the DuckDB bridge header alias.])
+    fi
+    PHP_ADD_INCLUDE([$DUCKDB_CONFIG_BRIDGE_FINAL])
+    if test -z "$DUCKDB_CONFIG_STATIC_FINAL"; then
+      case `uname -s 2>/dev/null` in
+        Darwin) PDO_DUCKDB_SHARED_LIBADD="$PDO_DUCKDB_SHARED_LIBADD -lc++" ;;
+        *) PDO_DUCKDB_SHARED_LIBADD="$PDO_DUCKDB_SHARED_LIBADD -lstdc++" ;;
+      esac
+    fi
+    AC_DEFINE([HAVE_PDO_DUCKDB_BRIDGE], [1], [Whether the exact-source DuckDB C++ bridge is enabled])
+    PDO_DUCKDB_SOURCES="$PDO_DUCKDB_SOURCES pdo_duckdb_bridge.cpp pdo_duckdb_bridge_query.cpp pdo_duckdb_bridge_types.cpp pdo_duckdb_bridge_variant.cpp pdo_duckdb_bridge_appender.cpp pdo_duckdb_bridge_logging.cpp pdo_duckdb_bridge_filesystem.cpp"
+    CXXFLAGS="$CXXFLAGS -std=c++17"
+  fi
+
   PHP_SUBST([PDO_DUCKDB_SHARED_LIBADD])
   PHP_NEW_EXTENSION([pdo_duckdb],
-    [pdo_duckdb.c duckdb_driver.c duckdb_statement.c duckdb_appender.c],
+    [$PDO_DUCKDB_SOURCES],
     [$ext_shared],,[$PDO_DUCKDB_CFLAGS])
 
   PHP_ADD_EXTENSION_DEP(pdo_duckdb, pdo)

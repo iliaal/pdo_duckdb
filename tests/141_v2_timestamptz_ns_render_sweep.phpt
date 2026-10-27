@@ -29,22 +29,19 @@ for ($i = 0; count($ns) < 800; $i++) {
     }
 }
 
-// DuckDB's own CAST(TIMESTAMPTZ_NS AS VARCHAR) misrenders, or raises an
-// INTERNAL error for, a pre-epoch instant less than 1 us before a whole
-// second. Those rows are checked against the TIMESTAMP_NS rendering only.
-$db->exec('CREATE TABLE f (id INTEGER, x TIMESTAMPTZ_NS, cast_ok BOOLEAN)');
-$ins = $db->prepare('INSERT INTO f SELECT ?, make_timestamp_ns(?::BIGINT)::TIMESTAMPTZ_NS, ?::INTEGER = 1');
+$db->exec('CREATE TABLE f (id INTEGER, x TIMESTAMPTZ_NS)');
+$ins = $db->prepare('INSERT INTO f SELECT ?, make_timestamp_ns(?::BIGINT)::TIMESTAMPTZ_NS');
 foreach ($ns as $id => $n) {
-    $ins->execute([$id, $n, ($n < 0 && $n % 1000 !== 0 && intdiv($n, 1000) % 1000000 === 0) ? 0 : 1]);
+    $ins->execute([$id, $n]);
 }
-$db->exec("INSERT INTO f VALUES (-1, 'infinity', true), (-2, '-infinity', true)");
+$db->exec("INSERT INTO f VALUES (-1, 'infinity'), (-2, '-infinity')");
 
 $shape = "x, [x] AS l, {'t': x} AS s, MAP {'k': x} AS m, [x, x]::TIMESTAMPTZ_NS[2] AS a, union_value(t := x) AS u";
 $got = $db->query("SELECT id, $shape, x::TIMESTAMP_NS::VARCHAR AS ns FROM f ORDER BY id")->fetchAll(PDO::FETCH_ASSOC | PDO::FETCH_UNIQUE);
 $cast = "CAST(x AS VARCHAR) AS x, CAST([x] AS VARCHAR) AS l, CAST({'t': x} AS VARCHAR) AS s,"
     . " CAST(MAP {'k': x} AS VARCHAR) AS m, CAST([x, x]::TIMESTAMPTZ_NS[2] AS VARCHAR) AS a,"
     . " CAST(union_value(t := x) AS VARCHAR) AS u";
-$want = $db->query("SELECT id, $cast FROM f WHERE cast_ok ORDER BY id")->fetchAll(PDO::FETCH_ASSOC | PDO::FETCH_UNIQUE);
+$want = $db->query("SELECT id, $cast FROM f ORDER BY id")->fetchAll(PDO::FETCH_ASSOC | PDO::FETCH_UNIQUE);
 
 $ny = new PDO('duckdb::memory:', null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
 $ny->exec("SET TimeZone='America/New_York'");
@@ -55,7 +52,6 @@ foreach ($got as $id => $row) {
 }
 $ny_got = $ny->query("SELECT id, $shape FROM f ORDER BY id")->fetchAll(PDO::FETCH_ASSOC | PDO::FETCH_UNIQUE);
 
-$template = $want[0];
 $cases = $scalar_bad = $nested_bad = $tz_bad = $engine_checked = 0;
 foreach ($got as $id => $row) {
     $cases++;
@@ -66,15 +62,8 @@ foreach ($got as $id => $row) {
         $scalar_bad++;
         echo "SCALAR id=$id got={$row['x']} want=$oracle\n";
     }
-    if (isset($want[$id])) {
-        $engine_checked++;
-        $expect = $want[$id];
-    } else {
-        $expect = [];
-        foreach ($template as $k => $v) {
-            $expect[$k] = str_replace($template['x'], $oracle, $v);
-        }
-    }
+    $engine_checked++;
+    $expect = $want[$id];
     foreach ($expect as $k => $v) {
         if ($row[$k] !== $v) {
             $k === 'x' ? $scalar_bad++ : $nested_bad++;
@@ -89,4 +78,4 @@ foreach ($got as $id => $row) {
 echo "cases=$cases engine_checked=$engine_checked scalar_bad=$scalar_bad nested_bad=$nested_bad tz_bad=$tz_bad\n";
 ?>
 --EXPECT--
-cases=802 engine_checked=642 scalar_bad=0 nested_bad=0 tz_bad=0
+cases=802 engine_checked=802 scalar_bad=0 nested_bad=0 tz_bad=0

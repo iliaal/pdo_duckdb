@@ -1,0 +1,6 @@
+ARG PHP_IMAGE=php:8.5.12-cli-alpine3.23@sha256:dc60e039a84bc0e3d79335497f40b886d4084693b4b2544ff0736972f2f984d6
+FROM ${PHP_IMAGE}
+
+ENV CC=gcc CXX=g++
+RUN apk add --no-cache autoconf bash g++ make pkgconf libstdc++-dev python3 \
+    && test -f "$(g++ -print-file-name=libstdc++.a)"

@@ -31,6 +31,11 @@
                 "name": "with-pdo-duckdb-static",
                 "description": "DuckDB static-libs bundle directory (containing duckdb.h and lib*.a archives)",
                 "needs-value": true
+            },
+            {
+                "name": "with-pdo-duckdb-bridge-source",
+                "description": "Verified exact-source DuckDB header cache produced by scripts/duckdb-bridge-source.py",
+                "needs-value": true
             }
         ]
     }

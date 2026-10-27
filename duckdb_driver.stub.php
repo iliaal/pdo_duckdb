@@ -12,7 +12,8 @@ class PdoDuckDb_Ext
     /**
      * Create a bulk-insert appender for the given table. When $columns is given,
      * the appender targets only those columns (in that order); omitted columns
-     * are filled with their DEFAULT, or NULL.
+     * are filled with their DEFAULT, or NULL. A schema string is a literal
+     * identifier; an array gives nested schema segments in the current catalog.
      *
      * Throws ValueError for a NUL byte in $table/$schema/column names and for
      * an empty $columns list, TypeError for non-string column names. Using a
@@ -22,7 +23,7 @@ class PdoDuckDb_Ext
      * Probe rejections ("Failed to append value: ...") and soft validation
      * failures leave the appender usable.
      */
-    public function duckdbAppender(string $table, ?string $schema = null, ?array $columns = null): \Pdo\Duckdb\Appender {}
+    public function duckdbAppender(string $table, string|array|null $schema = null, ?array $columns = null): \Pdo\Duckdb\Appender {}
 
     /**
      * Return the tables a query references, using DuckDB's parser. UPDATE,

@@ -7,14 +7,20 @@ pdo_duckdb
 open_basedir={PWD}
 --FILE--
 <?php
+require __DIR__ . '/duckdb_v2.inc';
 $db = new PDO('duckdb::memory:;threads=1', null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
 $sink = __DIR__ . '/114_log_sink.d';
-$db->exec("CALL enable_logging(storage='file', storage_path='$sink')");
+$phase = 'enable';
 try {
+    $db->exec("CALL enable_logging(storage='file', storage_path='$sink')");
+    $phase = 'query';
     $db->query('SELECT 1');
     echo "no error\n";
 } catch (PDOException $e) {
-    var_dump(str_contains($e->getMessage(), 'disabled by configuration'));
+    var_dump(pdo_duckdb_v2_headers()
+        ? $phase === 'enable' && str_contains($e->getMessage(), 'enable_logging')
+            && str_contains($e->getMessage(), 'configuration has been locked')
+        : $phase === 'query' && str_contains($e->getMessage(), 'disabled by configuration'));
 }
 $db = null;
 var_dump(file_exists($sink));

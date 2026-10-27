@@ -35,6 +35,9 @@ jobs:
       GH_REPO: ${{ github.repository }}
       RELEASE_TAG: ${{ github.event.release.tag_name }}
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Download and publish the complete validated archive set
         shell: bash
         run: |
@@ -45,11 +48,12 @@ jobs:
           fi
 
           gh run download "$GITHUB_RUN_ID" --pattern 'release-*' --dir release-assets
+          python3 scripts/binary-matrix.py verify-archives --directory release-assets --version "$RELEASE_TAG"
           readarray -d '' archives < <(
             find release-assets -type f -name '*.zip' -print0
           )
-          if [ "${#archives[@]}" -ne 10 ]; then
-            printf 'expected 10 validated release archives, found %d\n' "${#archives[@]}"
+          if [ "${#archives[@]}" -ne 50 ]; then
+            printf 'expected 50 validated release archives, found %d\n' "${#archives[@]}"
             exit 1
           fi
           gh release upload "$RELEASE_TAG" "${archives[@]}" --clobber

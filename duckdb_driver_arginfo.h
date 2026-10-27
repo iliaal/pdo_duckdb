@@ -1,9 +1,9 @@
-/* This is a generated file, edit the .stub.php file instead.
- * Stub hash: e86fa220199ddc46ad5ea2a715fd04fd3d8b1bef */
+/* This is a generated file, edit duckdb_driver.stub.php instead.
+ * Stub hash: e1fc78459e83c1f5752f22c19538b984b1965496 */
 
 ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_class_PdoDuckDb_Ext_duckdbAppender, 0, 1, Pdo\\Duckdb\\Appender, 0)
 	ZEND_ARG_TYPE_INFO(0, table, IS_STRING, 0)
-	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, schema, IS_STRING, 1, "null")
+	ZEND_ARG_TYPE_MASK(0, schema, MAY_BE_STRING|MAY_BE_ARRAY|MAY_BE_NULL, "null")
 	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, columns, IS_ARRAY, 1, "null")
 ZEND_END_ARG_INFO()
 

@@ -1,199 +1,338 @@
-name: Release Linux & macOS binaries
-
-# Called by release.yml when a GitHub Release is published. Builds self-contained .so
-# binaries for Linux glibc (x86_64 + arm64) and macOS arm64 at the PHP
-# versions in the matrix (NTS only; ZTS lives in the Windows lane) and
-# stages each for release.yml using PIE's pre-packaged-binary naming
-# convention.
-#
-# The prebuilt statically links DuckDB so it loads without libduckdb on the
-# user's loader path. Each runner downloads DuckDB's static-libs bundle for its
-# os/arch and builds with config.m4's --with-pdo-duckdb-static mode. The
-# self-contained and load-and-query gates from binary-validate.yml run against
-# each exact archive before staging it.
-#
-# macOS Intel (macos-13) and Linux musl have no prebuilt. composer.json
-# declares "download-url-method": ["pre-packaged-binary", "composer-default"],
-# so PIE falls back to a source build when no asset matches (older PHP, other
-# arches/libc).
+name: Build Unix binary archives
 
 on:
   workflow_call:
+    inputs:
+      package-version:
+        type: string
+        default: ''
+      artifact-prefix:
+        type: string
+        default: release-unix
 
 permissions: {}
 
 env:
-  # Keep in sync with DUCKDB_VERSION in tests.yml / windows.yml.
-  DUCKDB_VERSION: "1.5.6"
+  DUCKDB_VERSION: '2.0.0'
+  PHP_RC_URL: 'https://downloads.php.net/~mbeccati/php-8.6.0RC4.tar.xz'
+  PHP_RC_SHA256: '93f208da9ae059bf6863b0e1d101e6c6475a7b0f0acbf6c084950ab522f514d8'
 
 jobs:
-  build:
-    name: ${{ matrix.os }} php ${{ matrix.php.version }}
-    runs-on: ${{ matrix.os }}
+  prepare:
+    name: Prepare target matrix and exact engine headers
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
-    strategy:
-      fail-fast: false
-      matrix:
-        # Pinned over *-latest so a runner image shift can't silently change
-        # the glibc baseline / toolchain on published assets without a diff.
-        os:
-          - ubuntu-24.04
-          - ubuntu-24.04-arm
-          - macos-15
-        php:
-          - version: '8.4'
-            baseline-image: php:8.4-cli-bookworm@sha256:138a210978c7767ef2a26f499c413fe6de1c13233c9a5068139565c81191b1ac
-          - version: '8.5'
-            baseline-image: php:8.5-cli-bookworm@sha256:fb740987f3e7aefd7f52d1f961fa91602874f2b6a5b0bf0105725f8987b54bee
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+      engines: ${{ steps.matrix.outputs.engines }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Generate the complete Unix target matrix
+        id: matrix
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "matrix=$(python3 scripts/binary-matrix.py matrix)" >> "$GITHUB_OUTPUT"
+          echo "engines=$(python3 scripts/binary-matrix.py engines)" >> "$GITHUB_OUTPUT"
+      - name: Prepare matching source headers once for all PHP ABIs
+        uses: ./.github/actions/duckdb-bridge
+        with:
+          version: ${{ env.DUCKDB_VERSION }}
+          path: duckdb-bridge
 
-      - name: Setup PHP
-        if: runner.os == 'macOS'
+  engines:
+    name: Cache ${{ matrix.asset }}
+    needs: prepare
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.prepare.outputs.engines) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Cache engine archive once per platform
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: engine-cache
+        with:
+          path: ${{ matrix.asset }}
+          key: duckdb-static-${{ env.DUCKDB_VERSION }}-${{ matrix.asset }}-${{ hashFiles('.github/duckdb-sha256.txt') }}
+          enableCrossOsArchive: true
+      - name: Fetch engine archive
+        if: steps.engine-cache.outputs.cache-hit != 'true'
+        env:
+          DUCKDB_ASSET: ${{ matrix.asset }}
+        run: curl --fail --location --retry 5 --output "$DUCKDB_ASSET" "https://github.com/duckdb/duckdb/releases/download/v${DUCKDB_VERSION}/$DUCKDB_ASSET"
+      - name: Verify engine archive, including cache hits
+        env:
+          DUCKDB_ASSET: ${{ matrix.asset }}
+        run: |
+          set -euo pipefail
+          checksum=$(awk -v asset="$DUCKDB_ASSET" '$2 == asset { print $0 }' .github/duckdb-sha256.txt)
+          test "$(printf '%s\n' "$checksum" | wc -l)" -eq 1
+          printf '%s\n' "$checksum" | sha256sum --check --strict -
+
+  build:
+    name: ${{ matrix.platform }} PHP ${{ matrix.php }} ${{ matrix.ts }} (${{ matrix.channel }})
+    needs: [prepare, engines]
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
+    env:
+      PHP_BASELINE_IMAGE: ${{ matrix.image }}
+      PHP_EXPECT_VERSION: ${{ matrix.runtime-version }}
+      PHP_THREAD_SAFETY: ${{ matrix.ts }}
+      PHP_SOURCE_BUILD: ${{ matrix.source-build }}
+      TARGET_LIBC: ${{ matrix.libc }}
+      TARGET_ARCH: ${{ matrix.arch }}
+      MACOSX_DEPLOYMENT_TARGET: '11.0'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Assert native architecture and select runtime cache directory
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$(uname -m)" in
+            x86_64) actual_arch=x86_64 ;;
+            aarch64|arm64) actual_arch=arm64 ;;
+            *) exit 1 ;;
+          esac
+          test "$actual_arch" = "$TARGET_ARCH"
+          if [ "$RUNNER_OS" = Linux ]; then
+            echo "PHP_RUNTIME_DIR=$RUNNER_TEMP/php-runtime" >> "$GITHUB_ENV"
+          else
+            echo 'PHP_RUNTIME_DIR=/opt/pdo-duckdb-php' >> "$GITHUB_ENV"
+            if [ "$PHP_SOURCE_BUILD" = true ]; then
+              sudo mkdir -p /opt/pdo-duckdb-php
+              sudo chown "$(id -u):$(id -g)" /opt/pdo-duckdb-php
+            fi
+          fi
+      - name: Setup stable PHP on macOS
+        if: runner.os == 'macOS' && !matrix.source-build
         uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
         timeout-minutes: 20
         env:
-          # The released watchdog mistakes partial-line output for inactivity.
           SETUP_PHP_BREW_WATCHDOG: 'false'
+          phpts: ${{ matrix.ts }}
         with:
-          php-version: ${{ matrix.php.version }}
+          php-version: ${{ matrix.php }}
           coverage: none
-
-      - name: Download DuckDB static libs for this os/arch
+      - name: Restore and verify matching source headers
+        uses: ./.github/actions/duckdb-bridge
+        with:
+          version: ${{ env.DUCKDB_VERSION }}
+          path: duckdb-bridge
+      - name: Restore target engine archive
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ matrix.asset }}
+          key: duckdb-static-${{ env.DUCKDB_VERSION }}-${{ matrix.asset }}-${{ hashFiles('.github/duckdb-sha256.txt') }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
+      - name: Verify and extract target engine
         shell: bash
         env:
-          MATRIX_OS: ${{ matrix.os }}
+          DUCKDB_ASSET: ${{ matrix.asset }}
         run: |
-          case "$MATRIX_OS" in
-            ubuntu-24.04)     asset=static-libs-linux-amd64.zip ;;
-            ubuntu-24.04-arm) asset=static-libs-linux-arm64.zip ;;
-            macos-15)         asset=static-libs-osx-arm64.zip ;;
-            *) echo "unmapped runner $MATRIX_OS"; exit 1 ;;
-          esac
-          curl -fsSL "https://github.com/duckdb/duckdb/releases/download/v${DUCKDB_VERSION}/${asset}" -o "$asset"
-          grep "  $asset$" .github/duckdb-sha256.txt | shasum -a 256 --check --strict
-          mkdir -p duckdb-static
-          unzip -o -q "$asset" -d duckdb-static
-
-      - name: Build and package prebuilt binary
+          set -euo pipefail
+          checksum=$(awk -v asset="$DUCKDB_ASSET" '$2 == asset { print $0 }' .github/duckdb-sha256.txt)
+          test "$(printf '%s\n' "$checksum" | wc -l)" -eq 1
+          printf '%s\n' "$checksum" | shasum -a 256 --check --strict -
+          mkdir duckdb-static
+          tar -xzf "$DUCKDB_ASSET" -C duckdb-static
+          for header in duckdb.h duckdb_v2.h duckdb_extension.h duckdb_extension_v2.h duckdb_static_extension.h; do
+            test -r "duckdb-static/$header"
+          done
+      - name: Set up the Linux image builder
+        if: runner.os == 'Linux'
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Build the cached Linux toolchain image
+        if: runner.os == 'Linux'
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        env:
+          DOCKER_BUILD_RECORD_UPLOAD: 'false'
+        with:
+          context: scripts
+          file: scripts/Dockerfile.binary-${{ matrix.libc }}
+          build-args: PHP_IMAGE=${{ matrix.image }}
+          tags: pdo-duckdb-builder
+          load: true
+          push: false
+          cache-from: type=gha,scope=duckdb-toolchain-${{ matrix.platform }}-${{ matrix.image-key }}
+          cache-to: type=gha,scope=duckdb-toolchain-${{ matrix.platform }}-${{ matrix.image-key }},mode=max
+      - name: Cache exact PHP development runtime
+        if: matrix.source-build
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: php-cache
+        with:
+          path: ${{ env.PHP_RUNTIME_DIR }}
+          key: duckdb-php-${{ env.PHP_RC_SHA256 }}-${{ matrix.platform }}-${{ matrix.ts }}-${{ hashFiles('scripts/build-php-runtime.sh', 'scripts/php-build-probe.php', 'scripts/Dockerfile.binary-*') }}
+      - name: Build exact PHP development runtime
+        if: matrix.source-build && steps.php-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$RUNNER_OS" = Linux ]; then
+            mkdir -p "$PHP_RUNTIME_DIR"
+            docker run --rm -v "$GITHUB_WORKSPACE:/work:ro" \
+              -v "$PHP_RUNTIME_DIR:/opt/pdo-duckdb-php" -w /work \
+              -e PHP_RC_URL -e PHP_RC_SHA256 -e PHP_THREAD_SAFETY -e PHP_EXPECT_VERSION \
+              pdo-duckdb-builder bash -euo pipefail -c '
+                bash scripts/build-php-runtime.sh --prefix /opt/pdo-duckdb-php \
+                  --thread-safety "$PHP_THREAD_SAFETY" --url "$PHP_RC_URL" \
+                  --sha256 "$PHP_RC_SHA256" --version "$PHP_EXPECT_VERSION" --jobs 4
+              '
+            sudo chown -R "$(id -u):$(id -g)" "$PHP_RUNTIME_DIR"
+          else
+            sudo mkdir -p "$PHP_RUNTIME_DIR"
+            sudo chown "$(id -u):$(id -g)" "$PHP_RUNTIME_DIR"
+            bash scripts/build-php-runtime.sh --prefix "$PHP_RUNTIME_DIR" \
+              --thread-safety "$PHP_THREAD_SAFETY" --url "$PHP_RC_URL" \
+              --sha256 "$PHP_RC_SHA256" --version "$PHP_EXPECT_VERSION" --jobs 4
+          fi
+      - name: Build and package the extension
         id: package
         shell: bash
         env:
-          PHP_BASELINE_IMAGE: ${{ matrix.php.baseline-image }}
-          MATRIX_PHP_VERSION: ${{ matrix.php.version }}
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          PACKAGE_VERSION: ${{ inputs.package-version || github.event.release.tag_name }}
+          PHP_SERIES: ${{ matrix.php }}
+          TARGET_OS: ${{ matrix.os }}
         run: |
           set -euo pipefail
-          if [[ ! "$RELEASE_TAG" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]*$ ]]; then
-            echo "unsupported release tag for an archive name"
+          if [[ ! "$PACKAGE_VERSION" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]*$ ]]; then
+            echo 'unsupported package version'
             exit 1
           fi
           if [ "$RUNNER_OS" = Linux ]; then
-            docker run --rm \
-              -v "$GITHUB_WORKSPACE:/work" \
-              -w /work \
-              "$PHP_BASELINE_IMAGE" \
-              bash -euo pipefail -c '
-                apt-get update -qq
-                apt-get install -y --no-install-recommends autoconf g++ make pkg-config
+            mkdir -p "$PHP_RUNTIME_DIR"
+            docker run --rm --network none -v "$GITHUB_WORKSPACE:/work" \
+              -v "$PHP_RUNTIME_DIR:/opt/pdo-duckdb-php:ro" -w /work \
+              -e PHP_SOURCE_BUILD -e PHP_EXPECT_VERSION -e PHP_THREAD_SAFETY \
+              pdo-duckdb-builder bash -euo pipefail -c '
+                if [ "$PHP_SOURCE_BUILD" = true ]; then export PATH="/opt/pdo-duckdb-php/bin:$PATH"; fi
+                php -n scripts/php-build-probe.php --version "$PHP_EXPECT_VERSION" --thread-safety "$PHP_THREAD_SAFETY"
                 phpize
-                ./configure --with-pdo-duckdb-static=/work/duckdb-static
-                make -j"$(getconf _NPROCESSORS_ONLN)"
+                ./configure --with-pdo-duckdb-static=/work/duckdb-static \
+                  --with-pdo-duckdb-bridge-source=/work/duckdb-bridge --enable-pdo-duckdb-dev
+                grep -qx "#define HAVE_DUCKDB_V2 1" config.h
+                grep -qx "#define HAVE_PDO_DUCKDB_BRIDGE 1" config.h
+                make -j4
+                make clean
+                make -j4
               '
           else
-            export MACOSX_DEPLOYMENT_TARGET=11.0
+            if [ "$PHP_SOURCE_BUILD" = true ]; then export PATH="$PHP_RUNTIME_DIR/bin:$PATH"; fi
+            php -n scripts/php-build-probe.php --version "$PHP_EXPECT_VERSION" --thread-safety "$PHP_THREAD_SAFETY"
             phpize
-            ./configure --with-pdo-duckdb-static="$GITHUB_WORKSPACE/duckdb-static"
-            make -j"$(getconf _NPROCESSORS_ONLN)"
+            ./configure --with-pdo-duckdb-static="$GITHUB_WORKSPACE/duckdb-static" \
+              --with-pdo-duckdb-bridge-source="$GITHUB_WORKSPACE/duckdb-bridge" --enable-pdo-duckdb-dev
+            grep -qx '#define HAVE_DUCKDB_V2 1' config.h
+            grep -qx '#define HAVE_PDO_DUCKDB_BRIDGE 1' config.h
+            make -j3
+            make clean
+            make -j3
           fi
-
-          php_version="$MATRIX_PHP_VERSION"
-          case "$(uname -m)" in
-            x86_64) arch=x86_64 ;;
-            aarch64|arm64) arch=arm64 ;;
-            *) echo "unsupported architecture: $(uname -m)"; exit 1 ;;
-          esac
-          case "$(uname -s)" in
-            Linux) os=linux; libc=glibc ;;
-            Darwin) os=darwin; libc=bsdlibc ;;
-            *) echo "unsupported operating system: $(uname -s)"; exit 1 ;;
-          esac
-          package="php_pdo_duckdb-${RELEASE_TAG}_php${php_version}-${arch}-${os}-${libc}.zip"
-
-          zip -j "$package" modules/pdo_duckdb.so
+          suffix=''
+          if [ "$PHP_THREAD_SAFETY" = zts ]; then suffix=-zts; fi
+          package="php_pdo_duckdb-${PACKAGE_VERSION}_php${PHP_SERIES}-${TARGET_ARCH}-${TARGET_OS}-${TARGET_LIBC}${suffix}.zip"
+          mkdir package-stage
+          cp LICENSE package-stage/LICENSE
+          cp duckdb-bridge/LICENSE package-stage/LICENSE.duckdb
+          cp duckdb-bridge/licenses/fmt/LICENSE package-stage/LICENSE.fmt
+          zip -j "$package" modules/pdo_duckdb.so package-stage/LICENSE package-stage/LICENSE.duckdb package-stage/LICENSE.fmt
           shasum -a 256 "$package"
           echo "package=$package" >> "$GITHUB_OUTPUT"
-
-      - name: Validate the exact release archive
+      - name: Validate the exact archive on the target runtime
         shell: bash
         env:
           PACKAGE: ${{ steps.package.outputs.package }}
-          PHP_BASELINE_IMAGE: ${{ matrix.php.baseline-image }}
         run: |
           set -euo pipefail
-          rm -rf release-stage
           mkdir release-stage
           unzip -q "$PACKAGE" -d release-stage
           test -f release-stage/pdo_duckdb.so
-
+          cmp LICENSE release-stage/LICENSE
+          cmp duckdb-bridge/LICENSE release-stage/LICENSE.duckdb
+          cmp duckdb-bridge/licenses/fmt/LICENSE release-stage/LICENSE.fmt
           if [ "$RUNNER_OS" = Linux ]; then
-            # Finish the inspector before matching: an early grep -q exit can
-            # SIGPIPE the producer and turn a match into a pass under pipefail.
-            ldd release-stage/pdo_duckdb.so > "$RUNNER_TEMP/pdo-duckdb-linked-libraries.txt"
-            if grep -qi libduckdb "$RUNNER_TEMP/pdo-duckdb-linked-libraries.txt"; then
-              echo "release archive still depends on libduckdb"
+            if [ "$TARGET_LIBC" = glibc ]; then
+              ldd release-stage/pdo_duckdb.so > "$RUNNER_TEMP/pdo-duckdb-linked-libraries.txt"
+              if grep -qi libduckdb "$RUNNER_TEMP/pdo-duckdb-linked-libraries.txt"; then
+                echo "release archive still depends on libduckdb"
+                exit 1
+              fi
+              max_glibc=$(
+                readelf --version-info release-stage/pdo_duckdb.so \
+                  | grep -oE 'GLIBC_[0-9]+(\.[0-9]+)+' | sort -Vu | tail -1
+              )
+              if [ -z "$max_glibc" ] ||
+                  [ "$(printf '%s\n' "$max_glibc" GLIBC_2.36 | sort -V | tail -1)" != GLIBC_2.36 ]; then
+                printf 'release archive requires unsupported glibc version: %s\n' "$max_glibc"
+                exit 1
+              fi
+            else
+              readelf -d release-stage/pdo_duckdb.so > "$RUNNER_TEMP/pdo-duckdb-linked-libraries.txt"
+              readelf --version-info release-stage/pdo_duckdb.so > "$RUNNER_TEMP/pdo-duckdb-symbol-versions.txt"
+              if grep -q GLIBC_ "$RUNNER_TEMP/pdo-duckdb-symbol-versions.txt"; then
+                echo 'musl archive imports glibc symbols'
+                exit 1
+              fi
+            fi
+            if grep -qiE 'libduckdb|libstdc\+\+|libgcc_s' "$RUNNER_TEMP/pdo-duckdb-linked-libraries.txt"; then
+              echo 'release archive still depends on an external DuckDB or C++ runtime'
               exit 1
             fi
-            max_glibc=$(
-              readelf --version-info release-stage/pdo_duckdb.so \
-                | grep -oE 'GLIBC_[0-9]+(\.[0-9]+)+' \
-                | sort -Vu \
-                | tail -1
-            )
-            if [ -z "$max_glibc" ] ||
-                [ "$(printf '%s\n' "$max_glibc" GLIBC_2.36 | sort -V | tail -1)" != GLIBC_2.36 ]; then
-              printf 'release archive requires unsupported glibc version: %s\n' "$max_glibc"
+            nm -D -u release-stage/pdo_duckdb.so > "$RUNNER_TEMP/pdo-duckdb-undefined-symbols.txt"
+            if grep -qE '_ZNSt|_ZSt|__cxxabi' "$RUNNER_TEMP/pdo-duckdb-undefined-symbols.txt"; then
+              echo 'release archive has unresolved C++ runtime symbols'
               exit 1
             fi
-            # shellcheck disable=SC2016
-            docker run --rm \
-              -v "$PWD/release-stage/pdo_duckdb.so:/ext/pdo_duckdb.so:ro" \
-              "$PHP_BASELINE_IMAGE" \
-              php -d extension=/ext/pdo_duckdb.so -r '
-                $d = new PDO("duckdb::memory:");
-                $d->exec("CREATE TABLE t(i INTEGER)");
-                $d->exec("INSERT INTO t VALUES (1), (2)");
-                if ((int) $d->query("SELECT count(*) FROM t")->fetchColumn() !== 2) exit(1);
-              '
+            runtime_php=php
+            if [ "$PHP_SOURCE_BUILD" = true ]; then runtime_php=/opt/pdo-duckdb-php/bin/php; fi
+            for probe in php-build-probe binary-probe; do
+              args=()
+              if [ "$probe" = php-build-probe ]; then
+                args=(--version "$PHP_EXPECT_VERSION" --thread-safety "$PHP_THREAD_SAFETY")
+              fi
+              docker run --rm --network none \
+                -v "$PWD/release-stage/pdo_duckdb.so:/ext/pdo_duckdb.so:ro" \
+                -v "$PWD/scripts/$probe.php:/probe.php:ro" \
+                -v "$PHP_RUNTIME_DIR:/opt/pdo-duckdb-php:ro" \
+                -e PDO_DUCKDB_EXPECT_VERSION="$DUCKDB_VERSION" \
+                -e PDO_DUCKDB_EXPECT_V2=1 -e PDO_DUCKDB_EXPECT_STATIC=1 -e LD_BIND_NOW=1 \
+                "$PHP_BASELINE_IMAGE" "$runtime_php" -n -d extension=/ext/pdo_duckdb.so /probe.php "${args[@]}"
+            done
           else
             otool -L release-stage/pdo_duckdb.so > "$RUNNER_TEMP/pdo-duckdb-linked-libraries.txt"
             if grep -qi libduckdb "$RUNNER_TEMP/pdo-duckdb-linked-libraries.txt"; then
               echo "release archive still depends on libduckdb"
               exit 1
             fi
-            # Finish the producer before inspecting its output under pipefail.
             otool -l release-stage/pdo_duckdb.so > "$RUNNER_TEMP/pdo-duckdb-load-commands.txt"
             min_macos=$(awk '$1 == "minos" { print $2; exit }' "$RUNNER_TEMP/pdo-duckdb-load-commands.txt")
             case "$min_macos" in
               11.0|11.0.0) ;;
               *) printf 'release archive has unexpected macOS minimum: %s\n' "$min_macos"; exit 1 ;;
             esac
-            # shellcheck disable=SC2016
-            php -n -d extension="$PWD/release-stage/pdo_duckdb.so" -r '
-              $d = new PDO("duckdb::memory:");
-              $d->exec("CREATE TABLE t(i INTEGER)");
-              $d->exec("INSERT INTO t VALUES (1), (2)");
-              if ((int) $d->query("SELECT count(*) FROM t")->fetchColumn() !== 2) exit(1);
-            '
+            if [ "$PHP_SOURCE_BUILD" = true ]; then export PATH="$PHP_RUNTIME_DIR/bin:$PATH"; fi
+            php -n scripts/php-build-probe.php --version "$PHP_EXPECT_VERSION" --thread-safety "$PHP_THREAD_SAFETY"
+            PDO_DUCKDB_EXPECT_VERSION="$DUCKDB_VERSION" PDO_DUCKDB_EXPECT_V2=1 PDO_DUCKDB_EXPECT_STATIC=1 \
+              php -n -d extension="$PWD/release-stage/pdo_duckdb.so" scripts/binary-probe.php
           fi
           shasum -a 256 "$PACKAGE"
-
-      - name: Stage validated release archive
+      - name: Stage validated archive
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: release-unix-${{ matrix.os }}-php${{ matrix.php.version }}
+          name: ${{ inputs.artifact-prefix }}-${{ matrix.platform }}-php${{ matrix.php }}-${{ matrix.ts }}-${{ matrix.channel }}
           path: ${{ steps.package.outputs.package }}
           if-no-files-found: error

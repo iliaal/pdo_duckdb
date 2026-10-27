@@ -35,31 +35,45 @@ esac
 if test "${PDO_DUCKDB_PROBE_FORCE_FAILURE:-}" = 1; then
     exit 42
 fi
+: "${BRIDGE_SOURCE:?Set BRIDGE_SOURCE to the verified exact-source cache}"
+: "${DUCKDB_STATIC_PREFIX:?Set DUCKDB_STATIC_PREFIX to the matching static archive bundle}"
 
 if test ! -r "${duckdb_prefix}/include/duckdb.h" || test ! -r "${duckdb_prefix}/lib/libduckdb.so"; then
     echo "DUCKDB_PREFIX must contain include/duckdb.h and lib/libduckdb.so" >&2
     exit 77
 fi
 duckdb_prefix=$(CDPATH='' cd -- "${duckdb_prefix}" && pwd -P)
+bridge_source=$(CDPATH='' cd -- "${BRIDGE_SOURCE}" && pwd -P)
+static_bundle=$(CDPATH='' cd -- "${DUCKDB_STATIC_PREFIX}" && pwd -P)
+if test ! -r "${static_bundle}/duckdb.h" || test ! -r "${static_bundle}/libduckdb_static.a"; then
+    echo 'DUCKDB_STATIC_PREFIX must contain duckdb.h and libduckdb_static.a' >&2
+    exit 77
+fi
 prefix_sha=$(sha256sum "${duckdb_prefix}/lib/libduckdb.so")
 prefix_sha=${prefix_sha%% *}
+sha256sum "${static_bundle}"/*.a >"${work}/static-input.sha256"
 
 repo="${work}/source"
 out_source="${work}/out-source"
-mkdir "${repo}" "${out_source}"
-cp "${source_repo}"/*.c "${source_repo}"/*.h "${source_repo}/config.m4" "${repo}/"
-cp "${repo}"/* "${out_source}/"
+mkdir -p "${repo}/scripts" "${out_source}"
+cp "${source_repo}"/*.c "${source_repo}"/*.h "${source_repo}"/*.cpp \
+    "${source_repo}"/*.hpp "${source_repo}/config.m4" "${repo}/"
+cp "${source_repo}/scripts/duckdb-bridge-source.py" "${repo}/scripts/"
+cp "${source_repo}/scripts/check-duckdb-headers.py" "${repo}/scripts/"
+cp -R "${repo}/." "${out_source}/"
 relative_prefix='build/Duck DB'
 static_prefix="${work}/Duck Static"
 mkdir -p "${static_prefix}"
-ln -s "${duckdb_prefix}/include/duckdb.h" "${static_prefix}/duckdb.h"
-ar rcs "${static_prefix}/libduckdb_static.a"
-ar rcs "${static_prefix}/libduckdb_math.a"
+for file in "${static_bundle}"/*.h "${static_bundle}"/*.a; do
+    ln -s "${file}" "${static_prefix}/${file##*/}"
+done
 
 mkdir -p "${work}/Duck DB/include" "${work}/Duck DB/lib"
 mkdir -p "${repo}/build"
 ln -s "${work}/Duck DB" "${repo}/${relative_prefix}"
-ln -s "${duckdb_prefix}/include/duckdb.h" "${work}/Duck DB/include/duckdb.h"
+for header in "${duckdb_prefix}/include/"*.h; do
+    ln -s "${header}" "${work}/Duck DB/include/${header##*/}"
+done
 ln -s "${duckdb_prefix}/lib/libduckdb.so" "${work}/Duck DB/lib/libduckdb.so.1"
 ln -s libduckdb.so.1 "${work}/Duck DB/lib/libduckdb.so"
 
@@ -68,7 +82,7 @@ cd "${repo}"
 (cd "${out_source}" && "${phpize}" >"${work}/out-of-tree-phpize.log" 2>&1)
 out_tree="${work}/out-of-tree"
 mkdir "${out_tree}"
-if ! (cd "${out_tree}" && "${out_source}/configure" --with-pdo-duckdb="${duckdb_prefix}" --with-php-config="${php_config}") >"${work}/out-of-tree.log" 2>&1; then
+if ! (cd "${out_tree}" && "${out_source}/configure" --with-pdo-duckdb="${duckdb_prefix}" --with-php-config="${php_config}" --with-pdo-duckdb-bridge-source="${bridge_source}") >"${work}/out-of-tree.log" 2>&1; then
     cat "${work}/out-of-tree.log" >&2
     exit 1
 fi
@@ -78,13 +92,13 @@ cp "${repo}/configure" "${work}/configure.shared"
 failed_prefix="${work}/Failed Prefix"
 mkdir -p "${failed_prefix}/include"
 ln -s "${duckdb_prefix}/include/duckdb.h" "${failed_prefix}/include/duckdb.h"
-if ! ./configure --with-pdo-duckdb="${duckdb_prefix}" --with-php-config="${php_config}" >"${work}/baseline.log" 2>&1; then
+if ! ./configure --with-pdo-duckdb="${duckdb_prefix}" --with-php-config="${php_config}" --with-pdo-duckdb-bridge-source="${bridge_source}" >"${work}/baseline.log" 2>&1; then
     cat "${work}/baseline.log" >&2
     exit 1
 fi
 make -n >"${work}/baseline-make.log" 2>&1
 make -j2 >"${work}/baseline-build.log" 2>&1
-if ./configure --with-pdo-duckdb="${failed_prefix}" --with-php-config="${php_config}" >"${work}/failed-reconfigure.log" 2>&1; then
+if ./configure --with-pdo-duckdb="${failed_prefix}" --with-php-config="${php_config}" --with-pdo-duckdb-bridge-source="${bridge_source}" >"${work}/failed-reconfigure.log" 2>&1; then
     echo 'invalid DuckDB prefix unexpectedly configured' >&2
     exit 1
 fi
@@ -94,13 +108,13 @@ make -n >"${work}/after-failed-make.log" 2>&1
 make clean >"${work}/after-failed-clean.log" 2>&1
 make -j2 >"${work}/after-failed-build.log" 2>&1
 failed_static_prefix="${work}/Failed Static"
-if ./configure --with-pdo-duckdb-static="${failed_static_prefix}" --with-php-config="${php_config}" >"${work}/failed-static.log" 2>&1; then
+if ./configure --with-pdo-duckdb-static="${failed_static_prefix}" --with-php-config="${php_config}" --with-pdo-duckdb-bridge-source="${bridge_source}" >"${work}/failed-static.log" 2>&1; then
     echo 'invalid static DuckDB prefix unexpectedly configured' >&2
     exit 1
 fi
 grep -F "${failed_static_prefix}" "${work}/failed-static.log" >/dev/null
 make -n >"${work}/after-failed-static-make.log" 2>&1
-if ! ./configure --with-pdo-duckdb="${relative_prefix}" --with-php-config="${php_config}" >"${work}/dynamic.log" 2>&1; then
+if ! ./configure --with-pdo-duckdb="${relative_prefix}" --with-php-config="${php_config}" --with-pdo-duckdb-bridge-source="${bridge_source}" >"${work}/dynamic.log" 2>&1; then
     cat "${work}/dynamic.log" >&2
     exit 1
 fi
@@ -134,7 +148,7 @@ awk '
 ' configure >configure.nonshared
 chmod +x configure.nonshared
 mv configure.nonshared configure
-if ! ./configure --with-pdo-duckdb="${relative_prefix}" --with-php-config="${php_config}" >"${work}/nonshared.log" 2>&1; then
+if ! ./configure --with-pdo-duckdb="${relative_prefix}" --with-php-config="${php_config}" --with-pdo-duckdb-bridge-source="${bridge_source}" >"${work}/nonshared.log" 2>&1; then
     cat "${work}/nonshared.log" >&2
     exit 1
 fi
@@ -193,7 +207,7 @@ $pdo = new PDO("duckdb::memory:");
 exit($pdo->query("SELECT 42")->fetchColumn() === 42 ? 0 : 1);
 PHP
 
-if ! ./configure --with-pdo-duckdb-static="${static_prefix}" --with-php-config="${php_config}" >"${work}/static.log" 2>&1; then
+if ! ./configure --with-pdo-duckdb-static="${static_prefix}" --with-php-config="${php_config}" --with-pdo-duckdb-bridge-source="${bridge_source}" >"${work}/static.log" 2>&1; then
     cat "${work}/static.log" >&2
     exit 1
 fi
@@ -202,9 +216,11 @@ make -n >"${work}/static-make.log" 2>&1
 test -e "${repo}/build/duckdb-config-static/duckdb.h"
 make clean >"${work}/static-clean.log" 2>&1
 test -r "${repo}/build/duckdb-config-static/libduckdb_static.a"
-test -r "${repo}/build/duckdb-config-static/libduckdb_math.a"
+for archive in "${static_bundle}"/*.a; do
+    test -r "${repo}/build/duckdb-config-static/${archive##*/}"
+done
 
-if ! ./configure --with-pdo-duckdb="${duckdb_prefix}" --with-php-config="${php_config}" >"${work}/restore.log" 2>&1; then
+if ! ./configure --with-pdo-duckdb="${duckdb_prefix}" --with-php-config="${php_config}" --with-pdo-duckdb-bridge-source="${bridge_source}" >"${work}/restore.log" 2>&1; then
     cat "${work}/restore.log" >&2
     exit 1
 fi
@@ -213,4 +229,5 @@ test -r "${duckdb_prefix}/lib/libduckdb.so"
 current_sha=$(sha256sum "${duckdb_prefix}/lib/libduckdb.so")
 current_sha=${current_sha%% *}
 test "${current_sha}" = "${prefix_sha}"
+sha256sum --check --status "${work}/static-input.sha256"
 echo 'configure prefix whitespace probe: ok'

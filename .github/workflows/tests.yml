@@ -1,6 +1,7 @@
 name: Tests
 
 on:
+  workflow_dispatch:
   push:
     branches: [master]
   pull_request:
@@ -15,7 +16,7 @@ concurrency:
 
 env:
   # Keep in sync with .upstream/duckdb.yml.
-  DUCKDB_VERSION: '1.5.6'
+  DUCKDB_VERSION: '2.0.0'
 
 jobs:
   validate:
@@ -43,11 +44,28 @@ jobs:
       - run: composer validate --strict
       - name: PIE configure-option metadata regression test
         run: php config-tests/configure_options.php
+      - name: Exact-source cache integrity regressions
+        run: python3 scripts/test-duckdb-bridge-source.py
+
+  bridge-sources:
+    name: Prepare DuckDB ${{ matrix.duckdb }} source headers
+    needs: validate
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        duckdb: ['1.5.3', '1.5.6', '2.0.0']
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/duckdb-bridge
+        with:
+          version: ${{ matrix.duckdb }}
 
   pie-smoke:
     name: PIE install smoke
     runs-on: ubuntu-latest
-    needs: validate
+    needs: bridge-sources
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -63,10 +81,13 @@ jobs:
           sudo apt-get install -y --no-install-recommends bison libtool-bin unzip
       - name: Install libduckdb to /usr/local
         run: |
-          curl -fsSL -o /tmp/libduckdb.zip \
-            "https://github.com/duckdb/duckdb/releases/download/v${DUCKDB_VERSION}/libduckdb-linux-amd64.zip"
-          mkdir -p /tmp/duckdb && unzip -o /tmp/libduckdb.zip -d /tmp/duckdb
-          sudo install -m644 /tmp/duckdb/duckdb.h /usr/local/include/
+          asset=duckdb-shared-libs-linux-amd64.tar.gz
+          curl -fsSL -o "$asset" \
+            "https://github.com/duckdb/duckdb/releases/download/v${DUCKDB_VERSION}/${asset}"
+          grep "  $asset$" .github/duckdb-sha256.txt | sha256sum --check --strict
+          mkdir -p /tmp/duckdb
+          tar -xzf "$asset" -C /tmp/duckdb
+          sudo install -m644 /tmp/duckdb/*.h /usr/local/include/
           sudo install -m755 /tmp/duckdb/libduckdb.so /usr/local/lib/
           sudo ldconfig
       - name: Download PIE
@@ -74,17 +95,35 @@ jobs:
           curl -fsSL -o /tmp/pie.phar https://github.com/php/pie/releases/latest/download/pie.phar
           chmod +x /tmp/pie.phar
       - name: PIE build smoke
+        uses: ./.github/actions/duckdb-bridge
+        with:
+          version: ${{ env.DUCKDB_VERSION }}
+      - name: Build complete source package through PIE
         run: |
+          set -euo pipefail
+          mkdir "$RUNNER_TEMP/pdo-duckdb-dist"
+          git archive HEAD | tar -x -C "$RUNNER_TEMP/pdo-duckdb-dist"
+          cd "$RUNNER_TEMP/pdo-duckdb-dist"
+          for file in scripts/duckdb-bridge-source.py scripts/check-duckdb-headers.py scripts/build-windows-duckdb.ps1 scripts/windows-duckdb-source/CMakeLists.txt; do
+            test -r "$file"
+          done
           php /tmp/pie.phar repository:add path .
-          php /tmp/pie.phar build iliaal/pdo_duckdb:*@dev
+          php /tmp/pie.phar build iliaal/pdo_duckdb:*@dev --with-pdo-duckdb-bridge-source="$GITHUB_WORKSPACE/duckdb-bridge"
 
   linux:
-    name: PHP ${{ matrix.php }} - Linux
+    name: PHP ${{ matrix.php }} - Linux / DuckDB ${{ matrix.duckdb }}
+    needs: bridge-sources
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         php: ['8.1', '8.2', '8.3', '8.4', '8.5']
+        duckdb: ['2.0.0']
+        include:
+          - php: '8.4'
+            duckdb: '1.5.6'
+    env:
+      DUCKDB_VERSION: ${{ matrix.duckdb }}
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -102,23 +141,66 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: duckdb
-          key: libduckdb-linux-amd64-${{ env.DUCKDB_VERSION }}-v1
+          key: duckdb-shared-linux-amd64-${{ env.DUCKDB_VERSION }}-${{ hashFiles('.github/duckdb-sha256.txt') }}-headers-v2
 
       - name: Download libduckdb
         if: steps.cache-duckdb.outputs.cache-hit != 'true'
         run: |
           sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends unzip
-          curl -fsSL -o /tmp/libduckdb.zip \
-            "https://github.com/duckdb/duckdb/releases/download/v${DUCKDB_VERSION}/libduckdb-linux-amd64.zip"
-          mkdir -p duckdb/include duckdb/lib raw && unzip -o /tmp/libduckdb.zip -d raw
-          cp raw/duckdb.h duckdb/include/
+          case "$DUCKDB_VERSION" in
+            1.5.*) asset=libduckdb-linux-amd64.zip ;;
+            *) asset=duckdb-shared-libs-linux-amd64.tar.gz ;;
+          esac
+          curl -fsSL -o "$asset" \
+            "https://github.com/duckdb/duckdb/releases/download/v${DUCKDB_VERSION}/${asset}"
+          grep "  $asset$" .github/duckdb-sha256.txt | sha256sum --check --strict
+          mkdir -p duckdb/include duckdb/lib raw
+          case "$asset" in
+            *.zip) unzip -o "$asset" -d raw ;;
+            *.tar.gz) tar -xzf "$asset" -C raw ;;
+          esac
+          cp raw/*.h duckdb/include/
           cp raw/libduckdb.so duckdb/lib/
 
 
+      - uses: ./.github/actions/duckdb-bridge
+        with:
+          version: ${{ env.DUCKDB_VERSION }}
+      - name: Cache the matching real static bundle for prefix probes
+        if: matrix.php == '8.4'
+        id: static-probe-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: duckdb-static-probe.archive
+          key: duckdb-static-config-probe-${{ env.DUCKDB_VERSION }}-${{ hashFiles('.github/duckdb-sha256.txt') }}
+      - name: Verify and extract the static probe bundle
+        if: matrix.php == '8.4'
+        env:
+          STATIC_CACHE_HIT: ${{ steps.static-probe-cache.outputs.cache-hit }}
+        run: |
+          set -euo pipefail
+          case "$DUCKDB_VERSION" in
+            1.5.*) asset=static-libs-linux-amd64.zip ;;
+            *) asset=duckdb-static-libs-linux-amd64.tar.gz ;;
+          esac
+          if [ "$STATIC_CACHE_HIT" != true ]; then
+            curl -fsSL --retry 5 -o duckdb-static-probe.archive \
+              "https://github.com/duckdb/duckdb/releases/download/v${DUCKDB_VERSION}/$asset"
+          fi
+          checksum=$(awk -v asset="$asset" '$2 == asset { print $1 }' .github/duckdb-sha256.txt)
+          [[ "$checksum" =~ ^[a-f0-9]{64}$ ]]
+          printf '%s  duckdb-static-probe.archive\n' "$checksum" | sha256sum --check --strict -
+          mkdir duckdb-static-probe
+          case "$asset" in
+            *.zip) unzip -q duckdb-static-probe.archive -d duckdb-static-probe ;;
+            *) tar -xzf duckdb-static-probe.archive -C duckdb-static-probe ;;
+          esac
       - name: Configure prefix regression probe (symlink and in-tree TMPDIR)
         if: matrix.php == '8.4'
         env:
           DUCKDB_PREFIX: ${{ github.workspace }}/duckdb
+          DUCKDB_STATIC_PREFIX: ${{ github.workspace }}/duckdb-static-probe
+          BRIDGE_SOURCE: ${{ github.workspace }}/duckdb-bridge
         run: |
           link="$RUNNER_TEMP/pdo-duckdb-wt"
           ln -s "$PWD" "$link"
@@ -127,20 +209,58 @@ jobs:
           TMPDIR="$PWD/build/probe-tmp" "$link/config-tests/prefix_spaces.sh"
           sha256sum --check "$RUNNER_TEMP/probe-input.sha256"
       - name: DuckDB 2.0 header detection regression probe
-        if: matrix.php == '8.4'
+        if: matrix.php == '8.4' && matrix.duckdb == '1.5.6'
         env:
           DUCKDB_PREFIX: ${{ github.workspace }}/duckdb
+          BRIDGE_SOURCE: ${{ github.workspace }}/duckdb-bridge
         run: sh config-tests/duckdb_v2_detection.sh
+      - name: Restore a different release for the bridge identity negative control
+        if: matrix.php == '8.4' && matrix.duckdb == '2.0.0'
+        uses: ./.github/actions/duckdb-bridge
+        with:
+          version: '1.5.3'
+          path: duckdb-bridge-mismatch
+      - name: Reject mismatched and modified C++ source caches
+        if: matrix.php == '8.4' && matrix.duckdb == '2.0.0'
+        env:
+          DUCKDB_PREFIX: ${{ github.workspace }}/duckdb
+          BRIDGE_SOURCE: ${{ github.workspace }}/duckdb-bridge
+          MISMATCH_BRIDGE_SOURCE: ${{ github.workspace }}/duckdb-bridge-mismatch
+        run: sh config-tests/bridge_identity.sh
       - name: Build extension
         shell: bash
         run: |
           phpize
-          ./configure --with-pdo-duckdb="$PWD/duckdb" --enable-pdo-duckdb-dev
+          ./configure --with-pdo-duckdb="$PWD/duckdb" --with-pdo-duckdb-bridge-source="$PWD/duckdb-bridge" --enable-pdo-duckdb-dev
+          grep -qx '#define HAVE_PDO_DUCKDB_BRIDGE 1' config.h
+          if [[ "$DUCKDB_VERSION" == 2.* ]]; then
+            grep -qx '#define HAVE_DUCKDB_V2 1' config.h
+          else
+            grep -qx '/\* #undef HAVE_DUCKDB_V2 \*/' config.h
+          fi
           make -j"$(nproc)" 2>&1 | tee "$RUNNER_TEMP/build.log"
           if grep -q 'warning:' "$RUNNER_TEMP/build.log"; then
             echo "::error::Build produced warnings"
             exit 1
           fi
+
+      - name: Verify engine version and build generation
+        env:
+          PDO_DUCKDB_EXPECT_VERSION: ${{ matrix.duckdb }}
+          PDO_DUCKDB_EXPECT_V2: ${{ matrix.duckdb == '2.0.0' && '1' || '0' }}
+        run: |
+          export LD_LIBRARY_PATH="$PWD/duckdb/lib"
+          php -d "extension=$PWD/modules/pdo_duckdb.so" scripts/binary-probe.php
+
+      - name: Preserve PHP 8.4 module for real storage interoperability
+        if: matrix.php == '8.4'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: interop-${{ matrix.duckdb }}
+          path: |
+            modules/pdo_duckdb.so
+            duckdb/lib/libduckdb.so
+          if-no-files-found: error
 
       - name: Cache DuckDB test extensions
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -183,6 +303,17 @@ jobs:
             tests/118_sandbox_loaded_quack_persistent.phpt \
             tests/119_sandbox_uncontained_extension.phpt \
             tests/136_sandbox_quack_listener_nul_uri.phpt
+          if [[ "$DUCKDB_VERSION" == 2.* ]]; then
+            bash scripts/check-required-tests.sh "$RUNNER_TEMP/test-output.txt" \
+              tests/131_sandbox_extension_repositories.phpt \
+              tests/132_persistent_connect_discard.phpt \
+              tests/133_sandbox_connect_quack_v2.phpt \
+              tests/134_sandbox_file_writers_v2.phpt \
+              tests/137_sandbox_attach_nul_path.phpt \
+              tests/166_remote_prepared_values.phpt \
+              tests/167_remote_prepared_streaming.phpt \
+              tests/207_legacy_parser_parameters.phpt
+          fi
 
       - name: PDO common tests
         # Only on 8.4/8.5, where the suite runs clean apart from the 2
@@ -216,6 +347,7 @@ jobs:
 
   macos-shared:
     name: PHP 8.4 - macOS shared library
+    needs: bridge-sources
     runs-on: macos-15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -232,18 +364,22 @@ jobs:
           coverage: none
       - name: Download libduckdb
         run: |
-          asset=libduckdb-osx-universal.zip
+          asset=duckdb-shared-libs-osx-universal.tar.gz
           curl -fsSL -o "$asset" \
             "https://github.com/duckdb/duckdb/releases/download/v${DUCKDB_VERSION}/${asset}"
           grep "  $asset$" .github/duckdb-sha256.txt | shasum -a 256 --check --strict
           mkdir -p "$RUNNER_TEMP/Duck DB/include" "$RUNNER_TEMP/Duck DB/lib" raw
-          unzip -o "$asset" -d raw
-          cp raw/duckdb.h "$RUNNER_TEMP/Duck DB/include/"
+          tar -xzf "$asset" -C raw
+          cp raw/*.h "$RUNNER_TEMP/Duck DB/include/"
           cp raw/libduckdb.dylib "$RUNNER_TEMP/Duck DB/lib/"
+      - uses: ./.github/actions/duckdb-bridge
+        with:
+          version: ${{ env.DUCKDB_VERSION }}
       - name: Build and rebuild after clean
         run: |
           phpize
-          ./configure --with-pdo-duckdb="$RUNNER_TEMP/Duck DB" --enable-pdo-duckdb-dev
+          ./configure --with-pdo-duckdb="$RUNNER_TEMP/Duck DB" --with-pdo-duckdb-bridge-source="$PWD/duckdb-bridge" --enable-pdo-duckdb-dev
+          grep -qx '#define HAVE_DUCKDB_V2 1' config.h
           make -j"$(getconf _NPROCESSORS_ONLN)"
           make clean
           make -j"$(getconf _NPROCESSORS_ONLN)"
@@ -253,12 +389,8 @@ jobs:
           export TEST_PHP_EXECUTABLE
           export TEST_PHP_ARGS="-d extension=$PWD/modules/pdo_duckdb.so"
           export NO_INTERACTION=1
-          # shellcheck disable=SC2016
-          php -d "extension=$PWD/modules/pdo_duckdb.so" -r '
-            if (!extension_loaded("pdo_duckdb")) { exit(1); }
-            $db = new PDO("duckdb::memory:");
-            exit($db->query("SELECT 42")->fetchColumn() === 42 ? 0 : 1);
-          '
+          PDO_DUCKDB_EXPECT_VERSION="$DUCKDB_VERSION" PDO_DUCKDB_EXPECT_V2=1 \
+            php -d "extension=$PWD/modules/pdo_duckdb.so" scripts/binary-probe.php
           php run-tests.php --show-diff -g FAIL,BORK,LEAK,XLEAK tests/
 
   static-build:
@@ -266,6 +398,7 @@ jobs:
     uses: ./.github/workflows/binary-validate.yml
 
   linux-php-branch:
+    needs: bridge-sources
     # setup-php's '8.6' is a php-src master snapshot, not the PHP-8.6 branch,
     # so the 8.6 lane builds PHP itself (release mode, PDO static in the CLI).
     name: PHP ${{ matrix.php }} - Linux (PHP-${{ matrix.php }} branch)
@@ -291,15 +424,24 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: duckdb
-          key: libduckdb-linux-amd64-${{ env.DUCKDB_VERSION }}-v1
+          key: duckdb-shared-linux-amd64-${{ env.DUCKDB_VERSION }}-${{ hashFiles('.github/duckdb-sha256.txt') }}-headers-v2
 
       - name: Download libduckdb
         if: steps.cache-duckdb.outputs.cache-hit != 'true'
         run: |
-          curl -fsSL -o /tmp/libduckdb.zip \
-            "https://github.com/duckdb/duckdb/releases/download/v${DUCKDB_VERSION}/libduckdb-linux-amd64.zip"
-          mkdir -p duckdb/include duckdb/lib raw && unzip -o /tmp/libduckdb.zip -d raw
-          cp raw/duckdb.h duckdb/include/
+          case "$DUCKDB_VERSION" in
+            1.5.*) asset=libduckdb-linux-amd64.zip ;;
+            *) asset=duckdb-shared-libs-linux-amd64.tar.gz ;;
+          esac
+          curl -fsSL -o "$asset" \
+            "https://github.com/duckdb/duckdb/releases/download/v${DUCKDB_VERSION}/${asset}"
+          grep "  $asset$" .github/duckdb-sha256.txt | sha256sum --check --strict
+          mkdir -p duckdb/include duckdb/lib raw
+          case "$asset" in
+            *.zip) unzip -o "$asset" -d raw ;;
+            *.tar.gz) tar -xzf "$asset" -C raw ;;
+          esac
+          cp raw/*.h duckdb/include/
           cp raw/libduckdb.so duckdb/lib/
 
       - name: Build PHP from the PHP-${{ matrix.php }} branch
@@ -317,12 +459,16 @@ jobs:
           make install
           echo "/tmp/php-branch/bin" >> "$GITHUB_PATH"
 
+      - uses: ./.github/actions/duckdb-bridge
+        with:
+          version: ${{ env.DUCKDB_VERSION }}
       - name: Build extension
         shell: bash
         run: |
           phpize
-          ./configure --with-pdo-duckdb="$PWD/duckdb" --enable-pdo-duckdb-dev \
+          ./configure --with-pdo-duckdb="$PWD/duckdb" --with-pdo-duckdb-bridge-source="$PWD/duckdb-bridge" --enable-pdo-duckdb-dev \
             --with-php-config=/tmp/php-branch/bin/php-config
+          grep -qx '#define HAVE_DUCKDB_V2 1' config.h
           make -j"$(nproc)" 2>&1 | tee "$RUNNER_TEMP/build.log"
           if grep -q 'warning:' "$RUNNER_TEMP/build.log"; then
             echo "::error::Build produced warnings"
@@ -366,7 +512,10 @@ jobs:
             tests/117_sandbox_loaded_quack_lazy.phpt \
             tests/118_sandbox_loaded_quack_persistent.phpt \
             tests/119_sandbox_uncontained_extension.phpt \
-            tests/136_sandbox_quack_listener_nul_uri.phpt
+            tests/136_sandbox_quack_listener_nul_uri.phpt \
+            tests/166_remote_prepared_values.phpt \
+            tests/167_remote_prepared_streaming.phpt \
+            tests/207_legacy_parser_parameters.phpt
 
       - name: PDO common tests
         run: |
@@ -389,6 +538,7 @@ jobs:
 
   duckdb-floor:
     name: DuckDB 1.5.3 floor - PHP 8.4
+    needs: bridge-sources
     runs-on: ubuntu-latest
     env:
       DUCKDB_FLOOR_VERSION: '1.5.3'
@@ -415,11 +565,23 @@ jobs:
           cp raw/duckdb.h duckdb/include/
           cp raw/libduckdb.so duckdb/lib/
 
+      - uses: ./.github/actions/duckdb-bridge
+        with:
+          version: ${{ env.DUCKDB_FLOOR_VERSION }}
       - name: Build against DuckDB floor
         run: |
           phpize
-          ./configure --with-pdo-duckdb="$PWD/duckdb" --enable-pdo-duckdb-dev
+          ./configure --with-pdo-duckdb="$PWD/duckdb" --with-pdo-duckdb-bridge-source="$PWD/duckdb-bridge" --enable-pdo-duckdb-dev
           make -j"$(nproc)"
+
+      - name: Preserve minimum-engine module for real storage interoperability
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: interop-1.5.3
+          path: |
+            modules/pdo_duckdb.so
+            duckdb/lib/libduckdb.so
+          if-no-files-found: error
 
       - name: Run full suite against DuckDB floor
         # No extension pre-install or required-tests gate here: the sandbox
@@ -432,14 +594,56 @@ jobs:
           export NO_INTERACTION=1
           php run-tests.php --show-diff -g FAIL,BORK,LEAK,XLEAK tests/
 
-  duckdb-preview:
-    name: DuckDB 2.0 preview - PHP 8.4
+  storage-interop:
+    name: Reopen databases across DuckDB 1.5.3, 1.5.6, and 2.0
+    needs: [linux, duckdb-floor]
     runs-on: ubuntu-latest
-    env:
-      # The staged/v2.0-cyanoptera pointer is mutable; pin the per-commit
-      # staging path and its hash, and fail closed on a mismatch.
-      DUCKDB_PREVIEW_URL: 'https://duckdb-staging.duckdb.org/b15358c371/v2.0.0-alpha46057/duckdb/duckdb/github_release/duckdb-shared-libs-linux-amd64.tar.gz'
-      DUCKDB_PREVIEW_SHA256: '09d74f9dc26b481c1a61db99d490d141cec037e01a6bb34b668e13e82184fcab'
+    permissions:
+      contents: read
+      actions: read # Download the three engine builds from this workflow run.
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
+        with:
+          php-version: '8.4'
+          coverage: none
+      - name: Download the exact modules built in this run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          for version in 1.5.3 1.5.6 2.0.0; do
+            gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" \
+              --name "interop-$version" --dir "storage-modules/$version"
+          done
+      - name: Build isolated runtime commands
+        run: |
+          python3 - <<'PY'
+          import json
+          import pathlib
+          import shutil
+          runners = {}
+          for version in ('1.5.3', '1.5.6', '2.0.0'):
+              root = pathlib.Path('storage-modules', version).resolve()
+              module = root / 'modules/pdo_duckdb.so'
+              library = root / 'duckdb/lib/libduckdb.so'
+              if not module.is_file() or not library.is_file():
+                  raise SystemExit(f'Missing runtime artifact for {version}')
+              runners[version] = {
+                  'command': [shutil.which('php'), '-n', '-d', f'extension={module}'],
+                  'env': {'LD_LIBRARY_PATH': str(library.parent)},
+              }
+          pathlib.Path('storage-runners.json').write_text(json.dumps(runners))
+          PY
+      - name: Reopen older files after GA writes and GA compatibility files with old engines
+        run: php scripts/storage-interop.php storage-runners.json
+
+  duckdb-ga-hook:
+    name: DuckDB 2.0 GA undecodable-type hook - PHP 8.4
+    needs: bridge-sources
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -452,101 +656,36 @@ jobs:
           tools: phpize, php-config
           coverage: none
 
-      - name: Cache DuckDB 2.0 preview
-        id: cache-duckdb-preview
+      - name: Cache DuckDB 2.0 GA
+        id: cache-duckdb-ga
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: duckdb
-          key: libduckdb-preview-linux-amd64-${{ env.DUCKDB_PREVIEW_SHA256 }}-v1
+          key: duckdb-shared-linux-amd64-${{ env.DUCKDB_VERSION }}-${{ hashFiles('.github/duckdb-sha256.txt') }}-headers-v2
 
-      - name: Download DuckDB 2.0 preview
-        if: steps.cache-duckdb-preview.outputs.cache-hit != 'true'
+      - name: Download DuckDB 2.0 GA
+        if: steps.cache-duckdb-ga.outputs.cache-hit != 'true'
         run: |
-          curl -fsSL -o /tmp/libduckdb.tar.gz "${DUCKDB_PREVIEW_URL}"
-          echo "${DUCKDB_PREVIEW_SHA256}  /tmp/libduckdb.tar.gz" | sha256sum --check --strict
+          asset=duckdb-shared-libs-linux-amd64.tar.gz
+          curl -fsSL -o "$asset" \
+            "https://github.com/duckdb/duckdb/releases/download/v${DUCKDB_VERSION}/${asset}"
+          grep "  $asset$" .github/duckdb-sha256.txt | sha256sum --check --strict
           mkdir -p duckdb/include duckdb/lib raw
-          tar -xzf /tmp/libduckdb.tar.gz -C raw
+          tar -xzf "$asset" -C raw
           cp raw/*.h duckdb/include/
           cp raw/libduckdb.so duckdb/lib/
 
-      - name: Build against DuckDB 2.0 preview
+      - uses: ./.github/actions/duckdb-bridge
+        with:
+          version: ${{ env.DUCKDB_VERSION }}
+      - name: Build with the undecodable-type test hook
+        # Test 147 needs a module that treats DATE as a type it cannot decode.
         shell: bash
         run: |
           phpize
-          ./configure --with-pdo-duckdb="$PWD/duckdb" --enable-pdo-duckdb-dev
-          if ! grep -qx '#define HAVE_DUCKDB_V2 1' config.h; then
-            echo "::error::configure did not detect the DuckDB 2.0 headers"
-            exit 1
-          fi
-          make -j"$(nproc)" 2>&1 | tee "$RUNNER_TEMP/build.log"
-          if grep -q 'warning:' "$RUNNER_TEMP/build.log"; then
-            echo "::error::Build produced warnings"
-            exit 1
-          fi
-
-      - name: Cache DuckDB test extensions
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: duckdb-test-extensions
-          key: duckdb-test-extensions-linux-amd64-preview-${{ env.DUCKDB_PREVIEW_SHA256 }}-${{ hashFiles('scripts/install-test-extensions.php') }}
-
-      - name: Install DuckDB test extensions
-        # Tests 117-119 SKIP when these can't be installed; installing here makes
-        # a failed download fail the job, and the run below rejects any SKIP.
-        run: |
-          export LD_LIBRARY_PATH="$PWD/duckdb/lib"
-          php -d "extension=$PWD/modules/pdo_duckdb.so" \
-            scripts/install-test-extensions.php "$PWD/duckdb-test-extensions"
-
-      - name: Run full suite against DuckDB 2.0 preview
-        run: |
-          export LD_LIBRARY_PATH="$PWD/duckdb/lib"
-          TEST_PHP_EXECUTABLE="$(command -v php)"
-          export TEST_PHP_EXECUTABLE
-          export TEST_PHP_ARGS="-d extension=$PWD/modules/pdo_duckdb.so"
-          export NO_INTERACTION=1
-          # shellcheck disable=SC2016
-          php -d "extension=$PWD/modules/pdo_duckdb.so" -r '
-            $v = (new PDO("duckdb::memory:"))->query("SELECT version()")->fetchColumn();
-            echo $v, "\n";
-            exit(str_starts_with($v, "v2.") ? 0 : 1);
-          '
-          export PDO_DUCKDB_TEST_EXTENSION_DIR="$PWD/duckdb-test-extensions"
-          set +e
-          php run-tests.php --show-diff -g FAIL,BORK,LEAK,XLEAK,SKIP tests/ 2>&1 | tee "$RUNNER_TEMP/test-output.txt"
-          test_status=("${PIPESTATUS[@]}")
-          set -e
-          if [ "${test_status[0]}" -ne 0 ]; then
-            echo "::error::run-tests.php failed (exit ${test_status[0]})"
-            exit "${test_status[0]}"
-          fi
-          if [ "${test_status[1]}" -ne 0 ]; then
-            echo "::error::Test output could not be recorded (exit ${test_status[1]})"
-            exit "${test_status[1]}"
-          fi
-          bash scripts/check-required-tests.sh "$RUNNER_TEMP/test-output.txt" \
-            tests/117_sandbox_loaded_quack_lazy.phpt \
-            tests/118_sandbox_loaded_quack_persistent.phpt \
-            tests/119_sandbox_uncontained_extension.phpt \
-            tests/136_sandbox_quack_listener_nul_uri.phpt \
-            tests/131_sandbox_extension_repositories.phpt \
-            tests/132_persistent_connect_discard.phpt \
-            tests/133_sandbox_connect_quack_v2.phpt \
-            tests/134_sandbox_file_writers_v2.phpt \
-            tests/137_sandbox_attach_nul_path.phpt
-
-      - name: Rebuild with the undecodable-type test hook
-        # Test 147 needs a module that treats DATE as a type it cannot decode;
-        # the regular build above skips it.
-        shell: bash
-        run: |
           CFLAGS="-g -O2 -DPDO_DUCKDB_TEST_UNDECODABLE_TYPE=13" \
-            ./configure --with-pdo-duckdb="$PWD/duckdb" --enable-pdo-duckdb-dev
-          # phpize's `make clean` deletes every *.so under the source tree,
-          # including the in-tree prefix's libduckdb.so (and the cached copy).
-          mv duckdb "$RUNNER_TEMP/duckdb-preview"
-          make clean
-          mv "$RUNNER_TEMP/duckdb-preview" duckdb
+            ./configure --with-pdo-duckdb="$PWD/duckdb" --with-pdo-duckdb-bridge-source="$PWD/duckdb-bridge" --enable-pdo-duckdb-dev
+          grep -qx '#define HAVE_DUCKDB_V2 1' config.h
           make -j"$(nproc)" 2>&1 | tee "$RUNNER_TEMP/build-hook.log"
           if grep -q 'warning:' "$RUNNER_TEMP/build-hook.log"; then
             echo "::error::Build produced warnings"
@@ -578,6 +717,7 @@ jobs:
 
   portable-integers:
     name: Portable integer renderers - PHP 8.4
+    needs: bridge-sources
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -593,20 +733,24 @@ jobs:
 
       - name: Download libduckdb
         run: |
-          asset=libduckdb-linux-amd64.zip
+          asset=duckdb-shared-libs-linux-amd64.tar.gz
           curl -fsSL -o "$asset" \
             "https://github.com/duckdb/duckdb/releases/download/v${DUCKDB_VERSION}/${asset}"
           grep "  $asset$" .github/duckdb-sha256.txt | sha256sum --check --strict
           mkdir -p duckdb/include duckdb/lib raw
-          unzip -o "$asset" -d raw
-          cp raw/duckdb.h duckdb/include/
+          tar -xzf "$asset" -C raw
+          cp raw/*.h duckdb/include/
           cp raw/libduckdb.so duckdb/lib/
 
+      - uses: ./.github/actions/duckdb-bridge
+        with:
+          version: ${{ env.DUCKDB_VERSION }}
       - name: Build without compiler int128 support
         run: |
           phpize
           CFLAGS="-U__SIZEOF_INT128__" \
-            ./configure --with-pdo-duckdb="$PWD/duckdb" --enable-pdo-duckdb-dev
+            ./configure --with-pdo-duckdb="$PWD/duckdb" --with-pdo-duckdb-bridge-source="$PWD/duckdb-bridge" --enable-pdo-duckdb-dev
+          grep -qx '#define HAVE_DUCKDB_V2 1' config.h
           make -j"$(nproc)"
 
       - name: Run full suite through portable integer renderers
@@ -621,17 +765,29 @@ jobs:
           php run-tests.php --show-diff -g FAIL,BORK,LEAK,XLEAK tests/
 
   asan:
-    name: PHP ${{ matrix.php }} - ASAN
+    name: PHP ${{ matrix.php }} ${{ matrix.ts }} - ASAN / DuckDB ${{ matrix.duckdb }}
+    needs: bridge-sources
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         php: ['8.4', '8.6']
+        ts: ['nts']
+        duckdb: ['2.0.0']
+        include:
+          - php: '8.4'
+            ts: zts
+            duckdb: '1.5.3'
+          - php: '8.4'
+            ts: zts
+            duckdb: '2.0.0'
 
     env:
       ASAN_OPTIONS: exitcode=139:verify_asan_link_order=0:detect_odr_violation=0:detect_leaks=1
       LSAN_OPTIONS: suppressions=${{ github.workspace }}/.github/lsan-suppressions.txt:print_suppressions=0
       PHP_VERSION: ${{ matrix.php }}
+      PHP_THREAD_SAFETY: ${{ matrix.ts }}
+      DUCKDB_VERSION: ${{ matrix.duckdb }}
       UBSAN_OPTIONS: print_stacktrace=1
       USE_ZEND_ALLOC: 0
       USE_TRACKED_ALLOC: 1
@@ -656,15 +812,28 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: duckdb
-          key: libduckdb-linux-amd64-${{ env.DUCKDB_VERSION }}-v1
+          key: duckdb-shared-linux-amd64-${{ env.DUCKDB_VERSION }}-${{ hashFiles('.github/duckdb-sha256.txt') }}-headers-v2
 
       - name: Download libduckdb
         if: steps.cache-duckdb.outputs.cache-hit != 'true'
         run: |
-          curl -fsSL -o /tmp/libduckdb.zip \
-            "https://github.com/duckdb/duckdb/releases/download/v${DUCKDB_VERSION}/libduckdb-linux-amd64.zip"
-          mkdir -p duckdb/include duckdb/lib raw && unzip -o /tmp/libduckdb.zip -d raw
-          cp raw/duckdb.h duckdb/include/
+          case "$DUCKDB_VERSION" in
+            1.5.*) asset=libduckdb-linux-amd64.zip ;;
+            *) asset=duckdb-shared-libs-linux-amd64.tar.gz ;;
+          esac
+          curl -fsSL -o "$asset" \
+            "https://github.com/duckdb/duckdb/releases/download/v${DUCKDB_VERSION}/${asset}"
+          if [ "$DUCKDB_VERSION" = 1.5.3 ]; then
+            echo "0a926eba5bce0abc0010f4b9109133e4440cb74e97bd10fd2d0fc2a721621b05  $asset" | sha256sum --check --strict
+          else
+            grep "  $asset$" .github/duckdb-sha256.txt | sha256sum --check --strict
+          fi
+          mkdir -p duckdb/include duckdb/lib raw
+          case "$asset" in
+            *.zip) unzip -o "$asset" -d raw ;;
+            *.tar.gz) tar -xzf "$asset" -C raw ;;
+          esac
+          cp raw/*.h duckdb/include/
           cp raw/libduckdb.so duckdb/lib/
 
       - name: Build PHP with ASAN and PDO (-shared-libasan keeps __cxa_throw resolvable across dlopen)
@@ -672,19 +841,25 @@ jobs:
           git clone --depth=1 --branch="PHP-${PHP_VERSION}" https://github.com/php/php-src.git /tmp/php-src
           cd /tmp/php-src
           ./buildconf --force
+          thread_option=--disable-zts
+          if [ "$PHP_THREAD_SAFETY" = zts ]; then thread_option=--enable-zts; fi
           CC=clang CXX=clang++ \
           CFLAGS="-fsanitize=address,undefined -fno-sanitize=function,vptr -shared-libasan -DZEND_TRACK_ARENA_ALLOC" \
           LDFLAGS="-fsanitize=address,undefined -shared-libasan" \
           ./configure \
             --enable-debug \
-            --disable-zts \
+            "$thread_option" \
             --disable-all \
             --enable-cli \
             --enable-pdo \
+            --enable-embed \
             --prefix=/tmp/php-asan
           make -j"$(nproc)"
           make install
 
+      - uses: ./.github/actions/duckdb-bridge
+        with:
+          version: ${{ env.DUCKDB_VERSION }}
       - name: Build extension with ASAN
         run: |
           export PATH="/tmp/php-asan/bin:$PATH"
@@ -695,8 +870,22 @@ jobs:
           LDFLAGS="-fsanitize=address,undefined -shared-libasan" \
           ./configure \
             --with-pdo-duckdb="$PWD/duckdb" \
+            --with-pdo-duckdb-bridge-source="$PWD/duckdb-bridge" \
             --with-php-config=/tmp/php-asan/bin/php-config
+          if [ "$DUCKDB_VERSION" = 2.0.0 ]; then
+            grep -qx '#define HAVE_DUCKDB_V2 1' config.h
+          else
+            grep -qx '/\* #undef HAVE_DUCKDB_V2 \*/' config.h
+          fi
           make -j"$(nproc)"
+
+      - name: Exercise simultaneous ZTS requests and shared-instance sandbox escalation
+        if: matrix.ts == 'zts'
+        env:
+          PHP_CONFIG: /tmp/php-asan/bin/php-config
+          EXT: ${{ github.workspace }}/modules/pdo_duckdb.so
+          DUCKDB_PREFIX: ${{ github.workspace }}/duckdb
+        run: bash config-tests/zts_instance_threads.sh
 
       - name: Cache DuckDB test extensions
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -741,3 +930,9 @@ jobs:
             tests/118_sandbox_loaded_quack_persistent.phpt \
             tests/119_sandbox_uncontained_extension.phpt \
             tests/136_sandbox_quack_listener_nul_uri.phpt
+          if [ "$DUCKDB_VERSION" = '2.0.0' ]; then
+            bash scripts/check-required-tests.sh /tmp/test-output.txt \
+              tests/166_remote_prepared_values.phpt \
+              tests/167_remote_prepared_streaming.phpt \
+              tests/207_legacy_parser_parameters.phpt
+          fi

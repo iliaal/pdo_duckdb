@@ -1,0 +1,86 @@
+name: Prepare exact DuckDB bridge headers
+description: Cache and verify immutable DuckDB source headers across PHP build targets
+inputs:
+  version:
+    description: Supported DuckDB release without the v prefix
+    required: true
+  path:
+    description: Relative destination for the verified header cache
+    default: duckdb-bridge
+outputs:
+  source-id:
+    description: Full immutable DuckDB source commit
+    value: ${{ steps.identity.outputs.source-id }}
+  cache-key:
+    description: Cross-platform cache key for the verified source headers
+    value: ${{ steps.identity.outputs.cache-key }}
+runs:
+  using: composite
+  steps:
+    - name: Select immutable source identity
+      id: identity
+      shell: bash
+      env:
+        DUCKDB_BRIDGE_VERSION: ${{ inputs.version }}
+        DUCKDB_BRIDGE_PATH: ${{ inputs.path }}
+        SOURCE_HELPER_HASH: ${{ hashFiles('scripts/duckdb-bridge-source.py') }}
+      run: |
+        set -euo pipefail
+        case "$DUCKDB_BRIDGE_VERSION" in
+          1.5.3) source_id=14eca11bd9d4a0de2ea0f078be588a9c1c5b279c ;;
+          1.5.6) source_id=069cc9f9b5be802405797faecc284961b07c70ef ;;
+          2.0.0) source_id=d54cbbe3df17e8e5ce68312f483b4155836112aa ;;
+          *) echo "Unsupported DuckDB bridge version: $DUCKDB_BRIDGE_VERSION" >&2; exit 1 ;;
+        esac
+        [[ "$DUCKDB_BRIDGE_PATH" =~ ^[A-Za-z0-9_-]+$ ]]
+        test -n "$SOURCE_HELPER_HASH"
+        echo "source-id=$source_id" >> "$GITHUB_OUTPUT"
+        echo "cache-key=duckdb-bridge-$source_id-$SOURCE_HELPER_HASH" >> "$GITHUB_OUTPUT"
+
+    - name: Cache platform-independent source headers
+      id: cache
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ inputs.path }}
+        key: ${{ steps.identity.outputs.cache-key }}
+        enableCrossOsArchive: true
+
+    - name: Fetch matching source headers
+      if: steps.cache.outputs.cache-hit != 'true'
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        repository: duckdb/duckdb
+        ref: ${{ steps.identity.outputs.source-id }}
+        path: .duckdb-bridge-checkout-${{ inputs.version }}
+        sparse-checkout: |
+          src/include
+          third_party/fmt/include
+          third_party/fmt/LICENSE
+          LICENSE
+        sparse-checkout-cone-mode: false
+        persist-credentials: false
+
+    - name: Stage exact headers
+      if: steps.cache.outputs.cache-hit != 'true'
+      shell: bash
+      env:
+        DUCKDB_BRIDGE_VERSION: ${{ inputs.version }}
+        DUCKDB_BRIDGE_PATH: ${{ inputs.path }}
+        DUCKDB_BRIDGE_SOURCE_ID: ${{ steps.identity.outputs.source-id }}
+      run: |
+        set -euo pipefail
+        python3 scripts/duckdb-bridge-source.py stage \
+          --checkout ".duckdb-bridge-checkout-$DUCKDB_BRIDGE_VERSION" \
+          --output "$DUCKDB_BRIDGE_PATH" --version "v$DUCKDB_BRIDGE_VERSION" \
+          --source-id "$DUCKDB_BRIDGE_SOURCE_ID"
+
+    - name: Verify every source-cache reuse
+      shell: bash
+      env:
+        DUCKDB_BRIDGE_VERSION: ${{ inputs.version }}
+        DUCKDB_BRIDGE_PATH: ${{ inputs.path }}
+        DUCKDB_BRIDGE_SOURCE_ID: ${{ steps.identity.outputs.source-id }}
+      run: |
+        set -euo pipefail
+        python3 scripts/duckdb-bridge-source.py verify "$DUCKDB_BRIDGE_PATH" \
+          --version "v$DUCKDB_BRIDGE_VERSION" --source-id "$DUCKDB_BRIDGE_SOURCE_ID"

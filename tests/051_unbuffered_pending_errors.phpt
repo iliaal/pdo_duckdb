@@ -22,6 +22,7 @@ try {
 }
 $missing->execute([7]);
 echo $missing->fetchColumn(), "\n";
+$missing->closeCursor();
 
 $invalid = $db->prepare('SELECT CAST(? AS INTEGER)');
 if (pdo_duckdb_v2_headers()) {
@@ -52,6 +53,7 @@ if (pdo_duckdb_v2_headers()) {
 }
 $invalid->execute(['8']);
 echo $invalid->fetchColumn(), "\n";
+$invalid->closeCursor();
 
 echo $db->query('SELECT 42')->fetchColumn(), "\n";
 ?>

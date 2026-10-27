@@ -24,6 +24,9 @@
 #include "zend_exceptions.h"
 #include "pdo_duckdb_arginfo.h"
 #include "duckdb_driver_arginfo.h"
+#include "pdo_duckdb_bridge_types.h"
+#include "pdo_duckdb_bridge_variant.h"
+#include "pdo_duckdb_bridge_appender.h"
 
 zend_class_entry *pdo_duckdb_appender_ce;
 static zend_object_handlers pdo_duckdb_appender_handlers;
@@ -43,49 +46,85 @@ static zend_class_entry *pdo_duckdb_ce; /* the Pdo\Duckdb PDO subclass */
 #define PDO_DUCKDB_CHK_NESTED     6u /* nested columns take only arrays */
 #define PDO_DUCKDB_CHK_KINDS      5
 
-static void pdo_duckdb_appender_throw(duckdb_appender ap, const char *what)
+typedef struct {
+	pdo_duckdb_nested_render_type type;
+	bool tuple;
+	pdd_bridge_bytes *names;
+} pdo_duckdb_appender_desc;
+
+static void pdo_duckdb_appender_bridge_error(pdd_bridge_error *error)
 {
-	duckdb_error_data ed = ap ? duckdb_appender_error_data(ap) : NULL;
+	zend_try {
+		zend_throw_exception_ex(php_pdo_get_exception(), 0, "Pdo\\Duckdb\\Appender: %s",
+			error->data ? error->data : "unable to construct DuckDB value");
+	} zend_catch {
+		pdd_bridge_error_free(error);
+		zend_bailout();
+	} zend_end_try();
+	pdd_bridge_error_free(error);
+}
+
+static void pdo_duckdb_appender_report(duckdb_error_data ed, const char *what, bool warning)
+{
 	const char *msg = (ed && duckdb_error_data_has_error(ed)) ? duckdb_error_data_message(ed) : NULL;
 
-	zend_throw_exception_ex(php_pdo_get_exception(), 0, "%s: %s", what, msg ? msg : "unknown error");
-
+	zend_try {
+		if (warning) {
+			php_error_docref(NULL, E_WARNING, "%s: %s", what, msg ? msg : "unknown error");
+		} else {
+			zend_throw_exception_ex(php_pdo_get_exception(), 0, "%s: %s", what, msg ? msg : "unknown error");
+		}
+	} zend_catch {
+		if (ed) {
+			duckdb_destroy_error_data(&ed);
+		}
+		zend_bailout();
+	} zend_end_try();
 	if (ed) {
 		duckdb_destroy_error_data(&ed);
 	}
 }
 
-static void pdo_duckdb_appender_warning(duckdb_appender ap, const char *what)
+static void pdo_duckdb_appender_throw(pdo_duckdb_db_handle *H, duckdb_appender ap, const char *what)
 {
-	duckdb_error_data ed = ap ? duckdb_appender_error_data(ap) : NULL;
-	const char *msg = (ed && duckdb_error_data_has_error(ed)) ? duckdb_error_data_message(ed) : NULL;
+	duckdb_error_data ed;
 
-	php_error_docref(NULL, E_WARNING, "%s: %s", what, msg ? msg : "unknown error");
+	pdo_duckdb_instance_lock(H);
+	ed = ap ? duckdb_appender_error_data(ap) : NULL;
+	pdo_duckdb_instance_unlock(H);
+	pdo_duckdb_appender_report(ed, what, false);
+}
 
-	if (ed) {
-		duckdb_destroy_error_data(&ed);
+static bool pdo_duckdb_appender_enter(pdo_duckdb_db_handle *H)
+{
+	if (pdo_duckdb_native_enter(H)) {
+		return true;
 	}
+	zend_throw_exception_ex(php_pdo_get_exception(), PDO_DUCKDB_ERRCODE_SANDBOX,
+		"Pdo\\Duckdb\\Appender: %s", pdo_duckdb_sandbox_error(H));
+	return false;
 }
 /* Cache nested metadata once per appender. Scalar leaves borrow col_types[i];
- * child names use DuckDB's allocator. */
+ * field names own bridge byte buffers. */
 static void pdo_duckdb_appender_desc_destroy(pdo_duckdb_nested_render_type *t)
 {
 	idx_t i;
+	pdo_duckdb_appender_desc *desc = (pdo_duckdb_appender_desc *)t;
 
 	if (!t) {
 		return;
 	}
 	for (i = 0; i < t->child_count; i++) {
 		pdo_duckdb_appender_desc_destroy(t->children[i]);
-		if (t->child_names && t->child_names[i]) {
-			duckdb_free(t->child_names[i]);
+		if (desc->names) {
+			pdd_bridge_bytes_free(&desc->names[i]);
 		}
 	}
 	if (t->children) {
 		efree(t->children);
 	}
-	if (t->child_names) {
-		efree(t->child_names);
+	if (desc->names) {
+		efree(desc->names);
 	}
 	if (t->owns_logical_type && t->logical_type) {
 		duckdb_destroy_logical_type(&t->logical_type);
@@ -99,7 +138,7 @@ static void pdo_duckdb_appender_desc_destroy(pdo_duckdb_nested_render_type *t)
  * free, including the DuckDB-allocated child types and field names. */
 static pdo_duckdb_nested_render_type *pdo_duckdb_appender_desc_node(pdo_duckdb_nested_render_type **slot)
 {
-	*slot = ecalloc(1, sizeof(**slot));
+	*slot = ecalloc(1, sizeof(pdo_duckdb_appender_desc));
 	return *slot;
 }
 
@@ -109,6 +148,8 @@ static void pdo_duckdb_appender_desc_child(pdo_duckdb_nested_render_type **slot,
 static void pdo_duckdb_appender_desc_fill(pdo_duckdb_nested_render_type *t)
 {
 	idx_t i, n;
+	pdo_duckdb_appender_desc *desc = (pdo_duckdb_appender_desc *)t;
+	pdd_bridge_error error = {0};
 
 	switch (t->type) {
 		case DUCKDB_TYPE_ARRAY:
@@ -120,19 +161,32 @@ static void pdo_duckdb_appender_desc_fill(pdo_duckdb_nested_render_type *t)
 			pdo_duckdb_appender_desc_child(&t->children[0], t->logical_type, t->type, 0);
 			return;
 		case DUCKDB_TYPE_STRUCT:
+			if (pdd_bridge_type_is_tuple(t->logical_type, &desc->tuple, &error) != PDD_BRIDGE_OK) {
+				pdo_duckdb_appender_bridge_error(&error);
+				return;
+			}
 			n = duckdb_struct_type_child_count(t->logical_type);
 			t->children = ecalloc(n, sizeof(*t->children));
-			t->child_names = ecalloc(n, sizeof(*t->child_names));
+			desc->names = ecalloc(n, sizeof(*desc->names));
 			t->child_count = n;
 			for (i = 0; i < n; i++) {
-				t->child_names[i] = duckdb_struct_type_child_name(t->logical_type, i);
+				if (pdd_bridge_type_field_name(t->logical_type, i, &desc->names[i], &error) != PDD_BRIDGE_OK) {
+					pdo_duckdb_appender_bridge_error(&error);
+					return;
+				}
 				pdo_duckdb_appender_desc_child(&t->children[i], t->logical_type, t->type, i);
+				if (EG(exception)) {
+					return;
+				}
 			}
 			return;
 		case DUCKDB_TYPE_MAP:
 			t->children = ecalloc(2, sizeof(*t->children));
 			t->child_count = 2;
 			pdo_duckdb_appender_desc_child(&t->children[0], t->logical_type, t->type, 0);
+			if (EG(exception)) {
+				return;
+			}
 			pdo_duckdb_appender_desc_child(&t->children[1], t->logical_type, t->type, 1);
 			return;
 		default:
@@ -210,7 +264,7 @@ static bool pdo_duckdb_appender_probe_sql(duckdb_type tid, duckdb_logical_type l
 	return true;
 }
 
-static duckdb_prepared_statement pdo_duckdb_appender_prepare_probe(duckdb_connection conn, duckdb_type tid, duckdb_logical_type lt)
+static duckdb_prepared_statement pdo_duckdb_appender_prepare_probe(pdo_duckdb_db_handle *H, duckdb_type tid, duckdb_logical_type lt)
 {
 	duckdb_prepared_statement probe = NULL;
 	char *sql = NULL;
@@ -218,25 +272,35 @@ static duckdb_prepared_statement pdo_duckdb_appender_prepare_probe(duckdb_connec
 	if (!pdo_duckdb_appender_probe_sql(tid, lt, &sql)) {
 		return NULL;
 	}
-	if (duckdb_prepare(conn, sql, &probe) != DuckDBSuccess) {
+	if (!pdo_duckdb_appender_enter(H)) {
+		efree(sql);
+		return NULL;
+	}
+	if (duckdb_prepare(H->conn, sql, &probe) != DuckDBSuccess) {
 		/* Probe failure leaves validation to the native append. */
 		if (probe) {
 			duckdb_destroy_prepare(&probe);
 		}
+		pdo_duckdb_instance_unlock(H);
 		efree(sql);
 		return NULL;
 	}
+	pdo_duckdb_instance_unlock(H);
 	efree(sql);
 	return probe;
 }
 
 /* On failure stores an emalloc'd detail in *errp. */
-static bool pdo_duckdb_appender_probe_value(duckdb_prepared_statement probe, zval *v, char **errp)
+static bool pdo_duckdb_appender_probe_value(pdo_duckdb_db_handle *H,
+	duckdb_prepared_statement probe, zval *v, char **errp)
 {
 	duckdb_result res = {0};
 	duckdb_state bst;
 
 	*errp = NULL;
+	if (!pdo_duckdb_appender_enter(H)) {
+		return false;
+	}
 	switch (Z_TYPE_P(v)) {
 		case IS_TRUE:
 		case IS_FALSE:
@@ -253,16 +317,25 @@ static bool pdo_duckdb_appender_probe_value(duckdb_prepared_statement probe, zva
 			break;
 	}
 	if (bst != DuckDBSuccess) {
+		pdo_duckdb_instance_unlock(H);
 		*errp = estrdup("unable to bind the cast probe");
 		return false;
 	}
 	if (duckdb_execute_prepared(probe, &res) != DuckDBSuccess) {
 		const char *e = duckdb_result_error(&res);
-		*errp = estrdup(e ? e : "cast failed");
+		zend_try {
+			*errp = estrdup(e ? e : "cast failed");
+		} zend_catch {
+			duckdb_destroy_result(&res);
+			pdo_duckdb_instance_unlock(H);
+			zend_bailout();
+		} zend_end_try();
 		duckdb_destroy_result(&res);
+		pdo_duckdb_instance_unlock(H);
 		return false;
 	}
 	duckdb_destroy_result(&res);
+	pdo_duckdb_instance_unlock(H);
 	return true;
 }
 
@@ -328,9 +401,19 @@ static void pdo_duckdb_appender_unlink(pdo_duckdb_appender *a)
 static void pdo_duckdb_appender_release_native(pdo_duckdb_appender *a)
 {
 	pdo_duckdb_db_handle *H = a->H;
+	duckdb_error_data close_error = NULL;
+	bool close_failed = false;
+	bool destroy_failed = false;
+	bool allowed = false;
 
 	if (!H) {
 		return;
+	}
+	if (a->appender && !a->closed) {
+		allowed = pdo_duckdb_native_enter(H);
+	}
+	if (!allowed) {
+		pdo_duckdb_instance_lock(H);
 	}
 	pdo_duckdb_appender_unlink(a);
 	if (a->appender) {
@@ -340,22 +423,18 @@ static void pdo_duckdb_appender_release_native(pdo_duckdb_appender *a)
 
 		a->appender = NULL;
 		a->closed = true;
-		if (!was_closed) {
-			/* Sandbox first so a destruction-time close cannot write outside
-			 * a mid-request open_basedir tighten. */
-			(void)pdo_duckdb_enforce_sandbox(H);
+		if (!was_closed && allowed) {
 			close_state = duckdb_appender_close(ap);
 			if (close_state != DuckDBSuccess) {
-				pdo_duckdb_appender_warning(ap,
-					"Pdo\\Duckdb\\Appender close during destruction failed");
+				close_failed = true;
+				close_error = duckdb_appender_error_data(ap);
 			}
 		}
-		/* A failed append, flush, or close leaves its rows buffered, and
-		 * destroy closes again, which would flush them. */
+		/* Destroy closes again, so failed or sandbox-denied writes must be
+		 * discarded first. */
 		(void)duckdb_appender_clear(ap);
 		if (duckdb_appender_destroy(&ap) != DuckDBSuccess && !was_closed && close_state == DuckDBSuccess) {
-			php_error_docref(NULL, E_WARNING,
-				"Pdo\\Duckdb\\Appender destroy during destruction failed");
+			destroy_failed = true;
 		}
 	}
 	if (a->col_probes) {
@@ -365,8 +444,19 @@ static void pdo_duckdb_appender_release_native(pdo_duckdb_appender *a)
 				duckdb_destroy_prepare(&a->col_probes[c]);
 			}
 		}
+	}
+	pdo_duckdb_instance_unlock(H);
+	if (a->col_probes) {
 		efree(a->col_probes);
 		a->col_probes = NULL;
+	}
+	if (close_failed) {
+		pdo_duckdb_appender_report(close_error,
+			"Pdo\\Duckdb\\Appender close during destruction failed", true);
+	}
+	if (destroy_failed) {
+		php_error_docref(NULL, E_WARNING,
+			"Pdo\\Duckdb\\Appender destroy during destruction failed");
 	}
 }
 
@@ -386,6 +476,7 @@ void pdo_duckdb_appenders_discard_for_rollback(pdo_duckdb_db_handle *H)
 {
 	pdo_duckdb_appender *a;
 
+	pdo_duckdb_instance_lock(H);
 	for (a = H->appenders; a; a = a->next_live) {
 		/* A linked appender holds a reference to a->pdo, and neither GC nor
 		 * the shutdown sweep releases object memory before every free_obj
@@ -394,6 +485,7 @@ void pdo_duckdb_appenders_discard_for_rollback(pdo_duckdb_db_handle *H)
 			(void)duckdb_appender_clear(a->appender);
 		}
 	}
+	pdo_duckdb_instance_unlock(H);
 }
 
 static void pdo_duckdb_appender_free(zend_object *obj)
@@ -586,21 +678,26 @@ static void pdo_duckdb_appender_plan_checks(pdo_duckdb_appender *a, idx_t c)
 	chk[IS_TRUE - IS_FALSE] = *b;
 }
 
-/* {{{ duckdbAppender(string $table, ?string $schema = null, ?array $columns = null): Pdo\Duckdb\Appender */
+/* {{{ duckdbAppender(string $table, string|array|null $schema = null, ?array $columns = null): Pdo\Duckdb\Appender */
 static void pdo_duckdb_appender_create_impl(INTERNAL_FUNCTION_PARAMETERS)
 {
 	zend_string *table;
 	zend_string *schema = NULL;
+	HashTable *schema_path = NULL;
 	HashTable *columns = NULL;
+	pdd_bridge_bytes *segments = NULL;
+	pdd_bridge_error bridge_error = {0};
+	size_t schema_count = 0;
 	pdo_dbh_t *dbh;
 	pdo_duckdb_db_handle *H;
 	duckdb_appender ap = NULL;
+	duckdb_state create_state;
 	pdo_duckdb_appender *a;
 
 	ZEND_PARSE_PARAMETERS_START(1, 3)
 		Z_PARAM_STR(table)
 		Z_PARAM_OPTIONAL
-		Z_PARAM_STR_OR_NULL(schema)
+		Z_PARAM_ARRAY_HT_OR_STR_OR_NULL(schema_path, schema)
 		Z_PARAM_ARRAY_HT_OR_NULL(columns)
 	ZEND_PARSE_PARAMETERS_END();
 
@@ -610,8 +707,7 @@ static void pdo_duckdb_appender_create_impl(INTERNAL_FUNCTION_PARAMETERS)
 
 	if (!pdo_duckdb_enforce_sandbox(H)) {
 		zend_throw_exception_ex(php_pdo_get_exception(), PDO_DUCKDB_ERRCODE_SANDBOX,
-			"PDO::duckdbAppender(): %s",
-			H->sandbox_refused ? H->sandbox_refusal : "unable to apply the open_basedir sandbox");
+			"PDO::duckdbAppender(): %s", pdo_duckdb_sandbox_error(H));
 		RETURN_THROWS();
 	}
 
@@ -619,6 +715,28 @@ static void pdo_duckdb_appender_create_impl(INTERNAL_FUNCTION_PARAMETERS)
 	if (zend_str_has_nul_byte(table) || (schema && zend_str_has_nul_byte(schema))) {
 		zend_value_error("Pdo\\Duckdb\\Appender table and schema names must not contain a NUL byte");
 		RETURN_THROWS();
+	}
+	if (schema_path) {
+		zval *segment;
+		schema_count = zend_hash_num_elements(schema_path);
+		if (!schema_count || !zend_array_is_list(schema_path)) {
+			zend_value_error("Pdo\\Duckdb\\Appender schema path must be a nonempty list of identifier segments");
+			RETURN_THROWS();
+		}
+		ZEND_HASH_FOREACH_VAL(schema_path, segment) {
+			ZVAL_DEREF(segment);
+			if (Z_TYPE_P(segment) != IS_STRING) {
+				zend_type_error("Pdo\\Duckdb\\Appender schema path segments must be strings");
+				RETURN_THROWS();
+			}
+			if (!Z_STRLEN_P(segment) || zend_str_has_nul_byte(Z_STR_P(segment))) {
+				zend_value_error("Pdo\\Duckdb\\Appender schema path segments must be nonempty and must not contain a NUL byte");
+				RETURN_THROWS();
+			}
+			if (schema_count == 1) {
+				schema = Z_STR_P(segment);
+			}
+		} ZEND_HASH_FOREACH_END();
 	}
 
 	if (columns) {
@@ -647,11 +765,43 @@ static void pdo_duckdb_appender_create_impl(INTERNAL_FUNCTION_PARAMETERS)
 	a = pdo_duckdb_appender_from_obj(Z_OBJ_P(return_value));
 	a->pdo = Z_OBJ_P(ZEND_THIS);
 	GC_ADDREF(a->pdo);
+	if (schema_count > 1) {
+		zval *segment;
+		size_t i = 0;
+		segments = ecalloc(schema_count, sizeof(*segments));
+		ZEND_HASH_FOREACH_VAL(schema_path, segment) {
+			ZVAL_DEREF(segment);
+			segments[i].data = Z_STRVAL_P(segment);
+			segments[i++].length = Z_STRLEN_P(segment);
+		} ZEND_HASH_FOREACH_END();
+	}
 
-	if (duckdb_appender_create(H->conn, schema ? ZSTR_VAL(schema) : NULL, ZSTR_VAL(table), &ap) != DuckDBSuccess) {
-		pdo_duckdb_appender_throw(ap, "Unable to create DuckDB appender");
+	if (!pdo_duckdb_appender_enter(H)) {
+		if (segments) efree(segments);
+		zval_ptr_dtor(return_value);
+		ZVAL_NULL(return_value);
+		RETURN_THROWS();
+	}
+	if (segments) {
+		pdd_bridge_bytes table_name = {ZSTR_VAL(table), ZSTR_LEN(table)};
+		create_state = pdd_bridge_appender_create(H->conn, segments, schema_count, table_name, &ap, &bridge_error)
+			== PDD_BRIDGE_OK ? DuckDBSuccess : DuckDBError;
+		efree(segments);
+	} else {
+		create_state = duckdb_appender_create(H->conn, schema ? ZSTR_VAL(schema) : NULL, ZSTR_VAL(table), &ap);
+	}
+	if (create_state != DuckDBSuccess) {
+		duckdb_error_data ed = ap ? duckdb_appender_error_data(ap) : NULL;
+
 		if (ap) {
 			duckdb_appender_destroy(&ap);
+		}
+		pdo_duckdb_instance_unlock(H);
+		if (bridge_error.data) {
+			if (ed) duckdb_destroy_error_data(&ed);
+			pdo_duckdb_appender_bridge_error(&bridge_error);
+		} else {
+			pdo_duckdb_appender_report(ed, "Unable to create DuckDB appender", false);
 		}
 		zval_ptr_dtor(return_value);
 		ZVAL_NULL(return_value);
@@ -669,7 +819,8 @@ static void pdo_duckdb_appender_create_impl(INTERNAL_FUNCTION_PARAMETERS)
 			if (duckdb_appender_add_column(ap, Z_STRVAL_P(col)) != DuckDBSuccess) {
 				/* Nothing was appended; skip the destruction-time close. */
 				a->closed = true;
-				pdo_duckdb_appender_throw(ap, "Unable to add appender column");
+				pdo_duckdb_instance_unlock(H);
+				pdo_duckdb_appender_throw(H, ap, "Unable to add appender column");
 				zval_ptr_dtor(return_value);
 				ZVAL_NULL(return_value);
 				RETURN_THROWS();
@@ -681,6 +832,7 @@ static void pdo_duckdb_appender_create_impl(INTERNAL_FUNCTION_PARAMETERS)
 	 * free_obj walks ncols entries, and a memory_limit bailout in the
 	 * allocations below fires before the fill loop. */
 	a->ncols = duckdb_appender_column_count(ap);
+	pdo_duckdb_instance_unlock(H);
 	if (a->ncols) {
 		idx_t c;
 		a->col_types = ecalloc(a->ncols, sizeof(duckdb_logical_type));
@@ -689,7 +841,10 @@ static void pdo_duckdb_appender_create_impl(INTERNAL_FUNCTION_PARAMETERS)
 		a->col_num_bounds = ecalloc(a->ncols * 2, sizeof(double));
 		for (c = 0; c < a->ncols; c++) {
 			duckdb_type tid;
+
+			pdo_duckdb_instance_lock(H);
 			a->col_types[c] = duckdb_appender_column_type(ap, c);
+			pdo_duckdb_instance_unlock(H);
 			tid = duckdb_get_type_id(a->col_types[c]);
 			a->col_type_ids[c] = tid;
 			if (tid == DUCKDB_TYPE_LIST || tid == DUCKDB_TYPE_ARRAY ||
@@ -709,9 +864,19 @@ static void pdo_duckdb_appender_create_impl(INTERNAL_FUNCTION_PARAMETERS)
 			d->type = a->col_type_ids[c];
 			d->logical_type = a->col_types[c];
 			pdo_duckdb_appender_desc_fill(d);
+			if (EG(exception)) {
+				zval_ptr_dtor(return_value);
+				ZVAL_NULL(return_value);
+				RETURN_THROWS();
+			}
 			if (!(a->col_flags[c] & PDO_DUCKDB_APPENDER_COL_NESTED)) {
 				a->col_probes[c] = pdo_duckdb_appender_prepare_probe(
-					H->conn, a->col_type_ids[c], a->col_types[c]);
+					H, a->col_type_ids[c], a->col_types[c]);
+				if (EG(exception)) {
+					zval_ptr_dtor(return_value);
+					ZVAL_NULL(return_value);
+					RETURN_THROWS();
+				}
 			}
 		}
 		a->col_checks = emalloc(a->ncols * PDO_DUCKDB_CHK_KINDS);
@@ -750,8 +915,7 @@ static pdo_duckdb_appender *pdo_duckdb_appender_live(zval *zthis)
 	}
 	if (a->H && !pdo_duckdb_enforce_sandbox(a->H)) {
 		zend_throw_exception_ex(php_pdo_get_exception(), PDO_DUCKDB_ERRCODE_SANDBOX,
-			"Pdo\\Duckdb\\Appender: %s",
-			a->H->sandbox_refused ? a->H->sandbox_refusal : "unable to apply the open_basedir sandbox");
+			"Pdo\\Duckdb\\Appender: %s", pdo_duckdb_sandbox_error(a->H));
 		return NULL;
 	}
 	return a;
@@ -845,8 +1009,165 @@ static duckdb_value pdo_duckdb_make_leaf(zval *z, duckdb_type tid, uint32_t argp
 
 #define PDO_DUCKDB_APPENDER_MAX_DEPTH 128
 
+typedef struct {
+	HashTable *active;
+	duckdb_value value;
+	duckdb_value *children;
+	pdd_bridge_bytes *keys;
+	zend_string **numeric_keys;
+	idx_t count;
+} pdo_duckdb_variant_input_frame;
+
+typedef struct {
+	pdo_duckdb_variant_input_frame frames[PDO_DUCKDB_APPENDER_MAX_DEPTH + 1];
+	pdd_bridge_error error;
+} pdo_duckdb_variant_input;
+
+static void pdo_duckdb_variant_input_clear(pdo_duckdb_variant_input_frame *frame)
+{
+	idx_t i;
+	if (frame->value) {
+		duckdb_destroy_value(&frame->value);
+	}
+	for (i = 0; i < frame->count; i++) {
+		if (frame->children && frame->children[i]) {
+			duckdb_destroy_value(&frame->children[i]);
+		}
+		if (frame->numeric_keys && frame->numeric_keys[i]) {
+			zend_string_release(frame->numeric_keys[i]);
+		}
+	}
+	if (frame->children) efree(frame->children);
+	if (frame->keys) efree(frame->keys);
+	if (frame->numeric_keys) efree(frame->numeric_keys);
+	memset(frame, 0, sizeof(*frame));
+}
+
+static duckdb_value pdo_duckdb_variant_input_build(pdo_duckdb_variant_input *input, zval *z,
+	uint32_t argpos, int depth)
+{
+	pdo_duckdb_variant_input_frame *frame;
+	HashTable *ht;
+	bool object;
+	zend_string *key;
+	zend_ulong index;
+	zval *child;
+	idx_t i = 0;
+	duckdb_value result;
+
+	if (depth > PDO_DUCKDB_APPENDER_MAX_DEPTH) {
+		zend_value_error("Pdo\\Duckdb\\Appender::appendRow(): maximum nesting depth (128) exceeded");
+		return NULL;
+	}
+	frame = &input->frames[depth];
+	ZVAL_DEREF(z);
+	if (Z_TYPE_P(z) != IS_ARRAY && Z_TYPE_P(z) != IS_OBJECT) {
+		frame->value = pdo_duckdb_make_leaf(z, DUCKDB_TYPE_VARIANT, argpos);
+		if (!frame->value && !EG(exception)) {
+			zend_type_error("Pdo\\Duckdb\\Appender::appendRow(): argument #%u contains an unsupported VARIANT value or invalid UTF-8 string",
+				argpos);
+		}
+		result = frame->value;
+		frame->value = NULL;
+		return result;
+	}
+	if (Z_TYPE_P(z) == IS_OBJECT) {
+		if (Z_OBJCE_P(z) != zend_standard_class_def) {
+			zend_type_error("Pdo\\Duckdb\\Appender::appendRow(): argument #%u expects plain stdClass objects for VARIANT objects",
+				argpos);
+			return NULL;
+		}
+		ht = zend_std_get_properties(Z_OBJ_P(z));
+		object = true;
+	} else {
+		ht = Z_ARRVAL_P(z);
+		object = !zend_array_is_list(ht);
+	}
+	for (int ancestor = 0; ancestor < depth; ancestor++) {
+		if (input->frames[ancestor].active == ht) {
+			zend_value_error("Pdo\\Duckdb\\Appender::appendRow(): argument #%u contains a recursive VARIANT value", argpos);
+			return NULL;
+		}
+	}
+	frame->active = ht;
+	frame->count = zend_hash_num_elements(ht);
+	frame->children = ecalloc(frame->count ? frame->count : 1, sizeof(*frame->children));
+	if (object) {
+		frame->keys = ecalloc(frame->count ? frame->count : 1, sizeof(*frame->keys));
+		frame->numeric_keys = ecalloc(frame->count ? frame->count : 1, sizeof(*frame->numeric_keys));
+	}
+	ZEND_HASH_FOREACH_KEY_VAL(ht, index, key, child) {
+		if (object) {
+			if (!key) {
+				frame->numeric_keys[i] = zend_long_to_str((zend_long)index);
+				key = frame->numeric_keys[i];
+			}
+			frame->keys[i].data = ZSTR_VAL(key);
+			frame->keys[i].length = ZSTR_LEN(key);
+		}
+		frame->children[i] = pdo_duckdb_variant_input_build(input, child, argpos, depth + 1);
+		if (!frame->children[i]) {
+			return NULL;
+		}
+		i++;
+	} ZEND_HASH_FOREACH_END();
+	if ((object ? pdd_bridge_variant_object(frame->keys, frame->children, frame->count, &frame->value, &input->error)
+		: pdd_bridge_variant_array(frame->children, frame->count, &frame->value, &input->error)) != PDD_BRIDGE_OK) {
+		pdo_duckdb_appender_bridge_error(&input->error);
+		return NULL;
+	}
+	result = frame->value;
+	frame->value = NULL;
+	pdo_duckdb_variant_input_clear(frame);
+	return result;
+}
+
+static duckdb_value pdo_duckdb_build_variant(zval *z, uint32_t argpos, int depth)
+{
+	pdo_duckdb_variant_input *input = ecalloc(1, sizeof(*input));
+	duckdb_value result = NULL;
+
+	zend_try {
+		result = pdo_duckdb_variant_input_build(input, z, argpos, depth);
+	} zend_catch {
+		for (int i = 0; i <= PDO_DUCKDB_APPENDER_MAX_DEPTH; i++) {
+			pdo_duckdb_variant_input_clear(&input->frames[i]);
+		}
+		pdd_bridge_error_free(&input->error);
+		efree(input);
+		zend_bailout();
+	} zend_end_try();
+	for (int i = 0; i <= PDO_DUCKDB_APPENDER_MAX_DEPTH; i++) {
+		pdo_duckdb_variant_input_clear(&input->frames[i]);
+	}
+	pdd_bridge_error_free(&input->error);
+	efree(input);
+	return result;
+}
+
+typedef struct {
+	duckdb_value *keys;
+	duckdb_value *values;
+	idx_t count;
+} pdo_duckdb_cell_input;
+
+static duckdb_value pdo_duckdb_build_value(zval *z, const pdo_duckdb_nested_render_type *t,
+	uint32_t argpos, int depth);
+
+static void pdo_duckdb_cell_input_free(pdo_duckdb_cell_input *input)
+{
+	for (idx_t i = 0; i < input->count; i++) {
+		if (input->keys && input->keys[i]) duckdb_destroy_value(&input->keys[i]);
+		if (input->values && input->values[i]) duckdb_destroy_value(&input->values[i]);
+	}
+	if (input->keys) efree(input->keys);
+	if (input->values) efree(input->values);
+	efree(input);
+}
+
 /* depth starts at zero; argpos is the 1-based appendRow() argument number. */
-static duckdb_value pdo_duckdb_build_value(zval *z, const pdo_duckdb_nested_render_type *t, uint32_t argpos, int depth)
+static duckdb_value pdo_duckdb_build_value_impl(zval *z, const pdo_duckdb_nested_render_type *t,
+	uint32_t argpos, int depth, pdo_duckdb_cell_input *input)
 {
 	duckdb_type tid = t->type;
 	HashTable *ht;
@@ -858,6 +1179,9 @@ static duckdb_value pdo_duckdb_build_value(zval *z, const pdo_duckdb_nested_rend
 	}
 
 	ZVAL_DEREF(z);
+	if (tid == DUCKDB_TYPE_VARIANT && (Z_TYPE_P(z) == IS_ARRAY || Z_TYPE_P(z) == IS_OBJECT)) {
+		return pdo_duckdb_build_variant(z, argpos, depth);
+	}
 
 	if (Z_TYPE_P(z) == IS_NULL) {
 		return duckdb_create_null_value();
@@ -902,7 +1226,8 @@ static duckdb_value pdo_duckdb_build_value(zval *z, const pdo_duckdb_nested_rend
 			}
 			/* create_list_value rejects a NULL values pointer, even for an empty
 			 * list. */
-			duckdb_value *vals = emalloc(sizeof(duckdb_value) * (n ? n : 1));
+			input->count = n;
+			duckdb_value *vals = input->values = ecalloc(n ? n : 1, sizeof(duckdb_value));
 			idx_t built = 0;
 			duckdb_value ret = NULL;
 			bool ok = true;
@@ -933,41 +1258,39 @@ static duckdb_value pdo_duckdb_build_value(zval *z, const pdo_duckdb_nested_rend
 					zend_value_error("Pdo\\Duckdb\\Appender::appendRow(): argument #%u could not be built as a nested value", argpos);
 				}
 			}
-			while (built > 0) {
-				duckdb_destroy_value(&vals[--built]);
-			}
-			efree(vals);
 			return ret;
 		}
 
 		case DUCKDB_TYPE_STRUCT: {
+			const pdo_duckdb_appender_desc *desc = (const pdo_duckdb_appender_desc *)t;
 			idx_t cnt = t->child_count;
 			duckdb_value *vals;
 			idx_t i, built = 0;
 			duckdb_value ret = NULL;
 			bool ok = true;
 
+			if (desc->tuple && !zend_array_is_list(ht)) {
+				zend_value_error("Pdo\\Duckdb\\Appender::appendRow(): argument #%u expects a list-shaped array for a tuple",
+					argpos);
+				return NULL;
+			}
 			if (zend_hash_num_elements(ht) != cnt) {
 				zend_value_error("Pdo\\Duckdb\\Appender::appendRow(): argument #%u expects exactly %u struct field(s), got %u",
 					argpos, (uint32_t)cnt, (uint32_t)zend_hash_num_elements(ht));
 				return NULL;
 			}
-#ifdef HAVE_DUCKDB_V2
-			/* create_struct_value() returns NULL for a NULL values pointer, which
-			 * a zero-field STRUCT would otherwise pass. */
-			vals = emalloc(sizeof(duckdb_value) * (cnt ? cnt : 1));
-#else
-			vals = cnt ? emalloc(sizeof(duckdb_value) * cnt) : NULL;
-#endif
+			input->count = cnt;
+			vals = input->values = ecalloc(cnt ? cnt : 1, sizeof(duckdb_value));
 
 			for (i = 0; i < cnt; i++) {
-				const char *fname = (t->child_names && t->child_names[i]) ? t->child_names[i] : NULL;
-				zval *fv = fname ? zend_symtable_str_find(ht, fname, strlen(fname)) : NULL;
+				const pdd_bridge_bytes *name = &desc->names[i];
+				zval *fv = desc->tuple ? zend_hash_index_find(ht, i)
+					: zend_symtable_str_find(ht, name->data, name->length);
 				duckdb_value cv;
 
 				if (!fv) {
 					zend_value_error("Pdo\\Duckdb\\Appender::appendRow(): argument #%u is missing struct field \"%s\"",
-						argpos, fname ? fname : "");
+						argpos, name->data ? name->data : "");
 					ok = false;
 					break;
 				}
@@ -982,19 +1305,14 @@ static duckdb_value pdo_duckdb_build_value(zval *z, const pdo_duckdb_nested_rend
 					zend_value_error("Pdo\\Duckdb\\Appender::appendRow(): argument #%u could not be built as a struct", argpos);
 				}
 			}
-			while (built > 0) {
-				duckdb_destroy_value(&vals[--built]);
-			}
-			if (vals) {
-				efree(vals);
-			}
 			return ret;
 		}
 
 		case DUCKDB_TYPE_MAP: {
 			idx_t n = zend_hash_num_elements(ht);
-			duckdb_value *keys = emalloc(sizeof(duckdb_value) * (n ? n : 1));
-			duckdb_value *vals = emalloc(sizeof(duckdb_value) * (n ? n : 1));
+			input->count = n;
+			duckdb_value *keys = input->keys = ecalloc(n ? n : 1, sizeof(duckdb_value));
+			duckdb_value *vals = input->values = ecalloc(n ? n : 1, sizeof(duckdb_value));
 			idx_t built = 0;
 			duckdb_value ret = NULL;
 			bool ok = true;
@@ -1011,12 +1329,10 @@ static duckdb_value pdo_duckdb_build_value(zval *z, const pdo_duckdb_nested_rend
 				} else {
 					ZVAL_LONG(&ztmp, (zend_long)nkey);
 				}
-				kv = pdo_duckdb_build_value(&ztmp, t->children[0], argpos, depth + 1);
+				kv = keys[built] = pdo_duckdb_build_value(&ztmp, t->children[0], argpos, depth + 1);
 				if (!kv) { ok = false; break; }
-				vv = pdo_duckdb_build_value(val, t->children[1], argpos, depth + 1);
-				if (!vv) { duckdb_destroy_value(&kv); ok = false; break; }
-				keys[built] = kv;
-				vals[built] = vv;
+				vv = vals[built] = pdo_duckdb_build_value(val, t->children[1], argpos, depth + 1);
+				if (!vv) { ok = false; break; }
 				built++;
 			} ZEND_HASH_FOREACH_END();
 
@@ -1026,13 +1342,6 @@ static duckdb_value pdo_duckdb_build_value(zval *z, const pdo_duckdb_nested_rend
 					zend_value_error("Pdo\\Duckdb\\Appender::appendRow(): argument #%u could not be built as a map", argpos);
 				}
 			}
-			while (built > 0) {
-				--built;
-				duckdb_destroy_value(&keys[built]);
-				duckdb_destroy_value(&vals[built]);
-			}
-			efree(keys);
-			efree(vals);
 			return ret;
 		}
 
@@ -1040,6 +1349,27 @@ static duckdb_value pdo_duckdb_build_value(zval *z, const pdo_duckdb_nested_rend
 			zend_type_error("Pdo\\Duckdb\\Appender::appendRow(): argument #%u is an array but the target column is not a nested type", argpos);
 			return NULL;
 	}
+}
+
+static duckdb_value pdo_duckdb_build_value(zval *z, const pdo_duckdb_nested_render_type *t,
+	uint32_t argpos, int depth)
+{
+	pdo_duckdb_cell_input *input;
+	duckdb_value value = NULL;
+	zval *const dereferenced = Z_ISREF_P(z) ? Z_REFVAL_P(z) : z;
+
+	if (Z_TYPE_P(dereferenced) != IS_ARRAY || t->type == DUCKDB_TYPE_VARIANT) {
+		return pdo_duckdb_build_value_impl(z, t, argpos, depth, NULL);
+	}
+	input = ecalloc(1, sizeof(*input));
+	zend_try {
+		value = pdo_duckdb_build_value_impl(z, t, argpos, depth, input);
+	} zend_catch {
+		pdo_duckdb_cell_input_free(input);
+		zend_bailout();
+	} zend_end_try();
+	pdo_duckdb_cell_input_free(input);
+	return value;
 }
 
 /* Smallest magnitude that rounds to FLOAT infinity (2^128 - 2^103), which is
@@ -1051,43 +1381,34 @@ static bool pdo_duckdb_appender_probe_row_value(pdo_duckdb_appender *a, uint32_t
 {
 	char *perr = NULL;
 
-	if (pdo_duckdb_appender_probe_value(a->col_probes[i], v, &perr)) {
+	if (pdo_duckdb_appender_probe_value(a->H, a->col_probes[i], v, &perr)) {
 		return true;
 	}
-	zend_throw_exception_ex(php_pdo_get_exception(), 0,
-		"Failed to append value: %s", perr ? perr : "unknown error");
+	if (!EG(exception)) {
+		zend_throw_exception_ex(php_pdo_get_exception(), 0,
+			"Failed to append value: %s", perr ? perr : "unknown error");
+	}
 	if (perr) {
 		efree(perr);
 	}
 	return false;
 }
 
-ZEND_METHOD(Pdo_Duckdb_Appender, appendRow)
+static void pdo_duckdb_appender_row_values_free(duckdb_value *built, uint32_t count)
 {
-	zval *args = NULL;
-	uint32_t argc = 0, i;
-	pdo_duckdb_appender *a;
-
-	ZEND_PARSE_PARAMETERS_START(0, -1)
-		Z_PARAM_VARIADIC('*', args, argc)
-	ZEND_PARSE_PARAMETERS_END();
-
-	a = pdo_duckdb_appender_live(ZEND_THIS);
-	if (!a) {
-		RETURN_THROWS();
+	if (built) {
+		for (uint32_t i = 0; i < count; i++) {
+			if (built[i]) duckdb_destroy_value(&built[i]);
+		}
+		efree(built);
 	}
+}
 
-	/* Validate the whole row first: DuckDB cannot roll back a partial append,
-	 * and a mid-row failure makes the appender unusable. */
-	if (argc != a->ncols) {
-		zend_value_error("Pdo\\Duckdb\\Appender::appendRow(): appender expects %u column(s), but %u value(s) were given",
-			(uint32_t)a->ncols, argc);
-		RETURN_THROWS();
-	}
-
-	/* built[i] holds a constructed duckdb_value for nested (array) cells, NULL for
-	 * scalars handled directly on the append fast path below. */
+static bool pdo_duckdb_appender_append_row(pdo_duckdb_appender *a, zval *args, uint32_t argc,
+	duckdb_value *volatile *built_out)
+{
 	duckdb_value *built = NULL;
+	uint32_t i;
 
 	for (i = 0; i < argc; i++) {
 		zval *v = &args[i];
@@ -1104,7 +1425,7 @@ ZEND_METHOD(Pdo_Duckdb_Appender, appendRow)
 						break;
 					case PDO_DUCKDB_CHK_INT_RANGE:
 						if (!pdo_duckdb_validate_integer_range(Z_LVAL_P(v), a->col_type_ids[i], i + 1)) {
-							goto build_failed;
+							return false;
 						}
 						break;
 					case PDO_DUCKDB_CHK_FLOAT:
@@ -1113,7 +1434,7 @@ ZEND_METHOD(Pdo_Duckdb_Appender, appendRow)
 							zend_throw_exception_ex(php_pdo_get_exception(), 0,
 								"Failed to append value: argument #%u value %.17G is out of range for FLOAT",
 								i + 1, Z_DVAL_P(v));
-							goto build_failed;
+							return false;
 						}
 						break;
 					case PDO_DUCKDB_CHK_BOUNDS:
@@ -1124,43 +1445,48 @@ ZEND_METHOD(Pdo_Duckdb_Appender, appendRow)
 							break;
 						}
 						if (!pdo_duckdb_appender_probe_row_value(a, i, v)) {
-							goto build_failed;
+							return false;
 						}
 						break;
 					case PDO_DUCKDB_CHK_PROBE:
 						if (!pdo_duckdb_appender_probe_row_value(a, i, v)) {
-							goto build_failed;
+							return false;
 						}
 						break;
 					case PDO_DUCKDB_CHK_NOT_STRING:
 						zend_type_error("Pdo\\Duckdb\\Appender::appendRow(): argument #%u expects a string for a BLOB column",
 							i + 1);
-						goto build_failed;
+						return false;
 					case PDO_DUCKDB_CHK_NESTED:
 						zend_type_error("Pdo\\Duckdb\\Appender::appendRow(): argument #%u expects an array for a nested column",
 							i + 1);
-						goto build_failed;
+						return false;
 				}
 				break;
 			}
 			case IS_NULL:
 				break;
 			case IS_ARRAY:
+			case IS_OBJECT:
 				if (!built) {
 					built = ecalloc(argc, sizeof(duckdb_value));
+					*built_out = built;
 				}
 				built[i] = pdo_duckdb_build_value(v, a->col_desc[i], i + 1, 0);
 				if (!built[i]) {
-					goto build_failed;
+					return false;
 				}
 				break;
 			default:
 				zend_type_error("Pdo\\Duckdb\\Appender::appendRow(): argument #%u is of unsupported type %s",
 					i + 1, zend_zval_value_name(v));
-				goto build_failed;
+				return false;
 		}
 	}
 
+	if (!pdo_duckdb_appender_enter(a->H)) {
+		return false;
+	}
 	for (i = 0; i < argc; i++) {
 		zval *v = &args[i];
 		duckdb_state st;
@@ -1196,38 +1522,59 @@ ZEND_METHOD(Pdo_Duckdb_Appender, appendRow)
 		if (st != DuckDBSuccess) {
 			/* DuckDB invalidates the appender after a failed append. */
 			a->closed = true;
-			pdo_duckdb_appender_throw(a->appender, "Failed to append value");
-			goto build_failed;
+			pdo_duckdb_instance_unlock(a->H);
+			pdo_duckdb_appender_throw(a->H, a->appender, "Failed to append value");
+			return false;
 		}
 	}
-
-	for (i = 0; i < argc; i++) {
-		if (built && built[i]) {
-			duckdb_destroy_value(&built[i]);
-		}
-	}
-	if (built) {
-		efree(built);
-	}
-
 	if (duckdb_appender_end_row(a->appender) != DuckDBSuccess) {
 		a->closed = true;
-		pdo_duckdb_appender_throw(a->appender, "Failed to end appender row");
+		pdo_duckdb_instance_unlock(a->H);
+		pdo_duckdb_appender_throw(a->H, a->appender, "Failed to end appender row");
+		return false;
+	}
+	pdo_duckdb_instance_unlock(a->H);
+
+	return true;
+}
+
+ZEND_METHOD(Pdo_Duckdb_Appender, appendRow)
+{
+	zval *args = NULL;
+	uint32_t argc = 0;
+	pdo_duckdb_appender *a;
+
+	ZEND_PARSE_PARAMETERS_START(0, -1)
+		Z_PARAM_VARIADIC('*', args, argc)
+	ZEND_PARSE_PARAMETERS_END();
+
+	a = pdo_duckdb_appender_live(ZEND_THIS);
+	if (!a) {
 		RETURN_THROWS();
 	}
 
-	RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
-
-build_failed:
-	if (built) {
-		for (i = 0; i < argc; i++) {
-			if (built[i]) {
-				duckdb_destroy_value(&built[i]);
-			}
-		}
-		efree(built);
+	/* Validate the whole row first: DuckDB cannot roll back a partial append,
+	 * and a mid-row failure makes the appender unusable. */
+	if (argc != a->ncols) {
+		zend_value_error("Pdo\\Duckdb\\Appender::appendRow(): appender expects %u column(s), but %u value(s) were given",
+			(uint32_t)a->ncols, argc);
+		RETURN_THROWS();
 	}
-	RETURN_THROWS();
+
+	duckdb_value *volatile built = NULL;
+	bool ok;
+
+	zend_try {
+		ok = pdo_duckdb_appender_append_row(a, args, argc, &built);
+	} zend_catch {
+		pdo_duckdb_appender_row_values_free(built, argc);
+		zend_bailout();
+	} zend_end_try();
+	pdo_duckdb_appender_row_values_free(built, argc);
+	if (!ok) {
+		RETURN_THROWS();
+	}
+	RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
 }
 
 ZEND_METHOD(Pdo_Duckdb_Appender, flush)
@@ -1240,12 +1587,17 @@ ZEND_METHOD(Pdo_Duckdb_Appender, flush)
 	if (!a) {
 		RETURN_THROWS();
 	}
+	if (!pdo_duckdb_appender_enter(a->H)) {
+		RETURN_THROWS();
+	}
 	if (duckdb_appender_flush(a->appender) != DuckDBSuccess) {
 		/* DuckDB invalidates the appender after a failed flush. */
 		a->closed = true;
-		pdo_duckdb_appender_throw(a->appender, "Failed to flush appender");
+		pdo_duckdb_instance_unlock(a->H);
+		pdo_duckdb_appender_throw(a->H, a->appender, "Failed to flush appender");
 		RETURN_THROWS();
 	}
+	pdo_duckdb_instance_unlock(a->H);
 }
 
 ZEND_METHOD(Pdo_Duckdb_Appender, close)
@@ -1258,10 +1610,15 @@ ZEND_METHOD(Pdo_Duckdb_Appender, close)
 	if (!a) {
 		RETURN_THROWS();
 	}
+	if (!pdo_duckdb_appender_enter(a->H)) {
+		RETURN_THROWS();
+	}
 	if (duckdb_appender_close(a->appender) != DuckDBSuccess) {
 		a->closed = true;
-		pdo_duckdb_appender_throw(a->appender, "Failed to close appender");
+		pdo_duckdb_instance_unlock(a->H);
+		pdo_duckdb_appender_throw(a->H, a->appender, "Failed to close appender");
 		RETURN_THROWS();
 	}
 	a->closed = true;
+	pdo_duckdb_instance_unlock(a->H);
 }

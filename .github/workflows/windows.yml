@@ -1,20 +1,11 @@
 name: Windows Build
 
-# Verifies the extension compiles and links against libduckdb on MSVC across
-# the supported PHP versions (x64, NTS + TS). The phpt suite SKIPs under
-# php-windows-builder's test phase because the external duckdb.dll isn't on the
-# loader path there, matching other external-library extensions such as
-# php_excel/LibXL.
-#
-# This lane attaches no assets. Publishing with the bundled duckdb.dll lives in
-# release-windows.yml; its runtime validation lives in
-# binary-validate-windows.yml.
-
 on:
   push:
     branches: [master]
   pull_request:
     branches: [master]
+  workflow_dispatch:
 
 permissions: {}
 
@@ -22,67 +13,22 @@ concurrency:
   group: windows-${{ github.ref }}
   cancel-in-progress: true
 
-env:
-  # Keep in sync with DUCKDB_VERSION in tests.yml.
-  DUCKDB_VERSION: "1.5.6"
-
 jobs:
-  windows-matrix:
-    name: Generate Windows build matrix
-    runs-on: ubuntu-latest
-    outputs:
-      matrix: ${{ steps.filter.outputs.matrix }}
-    steps:
-      - id: gen
-        uses: php/php-windows-builder/extension-matrix@29352c0ef9e8ce65264ea9e287881a6f7758a953 # 1.9.0
-        with:
-          extension-url: ${{ github.event.repository.html_url }}
-          php-version-list: '8.1, 8.2, 8.3, 8.4, 8.5'
-
-      - id: filter
-        shell: bash
-        run: |
-          # DuckDB ships no 32-bit Windows C library (only amd64 / arm64), so
-          # drop x86 from the matrix; those builds can't link libduckdb.
-          printf '%s\n' "$STEPS_GEN_OUTPUTS_MATRIX" > matrix.json
-          cat matrix.json
-          if jq -e 'has("include")' matrix.json >/dev/null 2>&1; then
-            out=$(jq -c '{include: [.include[] | select(.arch == "x64")]}' matrix.json)
-          else
-            out=$(jq -c '[.[] | select(.arch == "x64")]' matrix.json)
-          fi
-          echo "matrix=$out" >> "$GITHUB_OUTPUT"
-          echo "filtered: $out"
-        env:
-          STEPS_GEN_OUTPUTS_MATRIX: ${{ steps.gen.outputs.matrix }}
-
   windows-build:
-    name: Build ${{ matrix.php-version }} ${{ matrix.arch }} ${{ matrix.ts }}
-    needs: windows-matrix
-    runs-on: ${{ matrix.os }}
+    name: Build and validate Windows archives
     permissions:
       contents: read
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJson(needs.windows-matrix.outputs.matrix) }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
+    uses: ./.github/workflows/binary-validate-windows.yml
+    with:
+      include-source-floor: true
 
-      - name: Download and stage libduckdb (x64)
-        shell: pwsh
-        run: |
-          $url = "https://github.com/duckdb/duckdb/releases/download/v$env:DUCKDB_VERSION/libduckdb-windows-amd64.zip"
-          Invoke-WebRequest -Uri $url -OutFile duckdb.zip
-          Expand-Archive duckdb.zip -DestinationPath duckdb-deps -Force
-          # Bundle layout is flat: duckdb.h, duckdb.lib, duckdb.dll (+ duckdb.hpp).
-          Get-ChildItem duckdb-deps | Select-Object Name, Length
-
-      - name: Build extension
-        uses: php/php-windows-builder/extension@29352c0ef9e8ce65264ea9e287881a6f7758a953 # 1.9.0
-        with:
-          php-version: ${{ matrix.php-version }}
-          ts: ${{ matrix.ts }}
-          arch: ${{ matrix.arch }}
-          args: --with-pdo-duckdb=${{ github.workspace }}\duckdb-deps
+  legacy-source:
+    name: DuckDB 1.5.3 and PHP 8.1 source compatibility
+    permissions:
+      contents: read
+    uses: ./.github/workflows/release-windows.yml
+    with:
+      duckdb-version: '1.5.3'
+      source-compatibility-only: true
+      package-version: validation-${{ github.sha }}
+      artifact-prefix: validation-windows-legacy

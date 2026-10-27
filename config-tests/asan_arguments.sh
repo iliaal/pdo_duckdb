@@ -90,7 +90,7 @@ check 'preserve runner failure status' "$work/Duck DB/modules" '' 42
 RUNNER_STATUS=0 FAKE_EMPTY=1 check 'missing summary' "$work/plain/modules" '' 1
 RUNNER_STATUS=0 FAKE_TOTAL=0 FAKE_EXECUTED=0 check 'zero tests' "$work/plain/modules" '' 1
 RUNNER_STATUS=0 FAKE_TOTAL=100 FAKE_EXECUTED=0 check 'all tests skipped' "$work/plain/modules" '' 1
-RUNNER_STATUS=0 FAKE_EXECUTED= check 'missing executed count' "$work/plain/modules" '' 1
+RUNNER_STATUS=0 FAKE_EXECUTED='' check 'missing executed count' "$work/plain/modules" '' 1
 RUNNER_STATUS=0 FAKE_TOTAL=100 FAKE_EXECUTED=1 check 'partial skips still execute' "$work/plain/modules" '' 0
 RUNNER_STATUS=0 FAKE_TOTAL=1 FAKE_EXECUTED=1 check 'one executed test' "$work/plain/modules" '' 0
 RUNNER_STATUS=0 FAKE_TEE_STATUS=42 check 'preserve logging failure status' "$work/plain/modules" '' 42
@@ -140,24 +140,58 @@ summary_check 'no final newline' 0 'Number of tests : 1 1'
 ci_body=$(sed -n '/^          test_status=/,$p' <<< "$asan_step")
 [ -n "$ci_body" ]
 ci_body=${ci_body//\/tmp\/test-output.txt/\"\$SUMMARY_LOG\"}
+common_required=(
+    tests/117_sandbox_loaded_quack_lazy.phpt
+    tests/118_sandbox_loaded_quack_persistent.phpt
+    tests/119_sandbox_uncontained_extension.phpt
+    tests/136_sandbox_quack_listener_nul_uri.phpt
+)
+ga_required=(
+    tests/166_remote_prepared_values.phpt
+    tests/167_remote_prepared_streaming.phpt
+    tests/207_legacy_parser_parameters.phpt
+)
+# These files exercise the real log gates; the fixture does not run PHPTs.
+mkdir -p "${work}/ci/scripts" "${work}/ci/tests"
+cp "${repo}/scripts/check-executed-tests.sh" "${repo}/scripts/check-required-tests.sh" "${work}/ci/scripts/"
+for required in "${common_required[@]}" "${ga_required[@]}"; do
+    touch "${work}/ci/${required}"
+done
 ci_status_check() {
-    local label="$1" expected="$2" runner="$3" logger="$4" extra="${5:-}" status=0
-    printf 'Number of tests : 100 98\n%s\n' "$extra" > "$work/summary.log"
-    (cd "$repo" && SUMMARY_LOG="$work/summary.log" RUNNER_STATUS="$runner" LOGGER_STATUS="$logger" \
+    local label="$1" version="$2" expected="$3" runner="$4" logger="$5" extra="${6:-}" status=0
+    printf 'Number of tests : 100 98\n%s\n' "${extra}" > "${work}/summary.log"
+    (cd "${work}/ci" && SUMMARY_LOG="${work}/summary.log" RUNNER_STATUS="${runner}" LOGGER_STATUS="${logger}" \
+        DUCKDB_VERSION="${version}" \
         bash -uo pipefail -c '(exit "$RUNNER_STATUS") | (cat; exit "$LOGGER_STATUS")
-'"$ci_body") > "$work/output" 2>&1 || status=$?
-    if [ "$status" -ne "$expected" ]; then
-        echo "FAIL: CI $label (expected $expected, got $status)" >&2
-        cat "$work/output" >&2
+'"${ci_body}") > "${work}/output" 2>&1 || status=$?
+    if [[ "${status}" -ne "${expected}" ]]; then
+        echo "FAIL: CI DuckDB ${version} ${label} (expected ${expected}, got ${status})" >&2
+        cat "${work}/output" >&2
         exit 1
     fi
-    echo "PASS: CI $label"
+    echo "PASS: CI DuckDB ${version} ${label}"
 }
-ci_status_check 'successful runner and logger' 0 0 0
-ci_status_check 'ordinary runner failure' 1 1 0
-ci_status_check 'runner crash' 42 42 0
-ci_status_check 'runner interruption' 143 143 0
-ci_status_check 'logger failure' 42 0 42
-ci_status_check 'runner failure takes precedence' 143 143 42
-ci_status_check 'existing XFAIL allowed' 0 0 0 'Expected fail : 2'
-ci_status_check 'existing XLEAK rejected' 1 0 0 'Expected leak : 1'
+for version in 2.0.0 1.5.3; do
+    ci_status_check 'successful runner and logger' "${version}" 0 0 0
+    ci_status_check 'ordinary runner failure' "${version}" 1 1 0
+    ci_status_check 'runner crash' "${version}" 42 42 0
+    ci_status_check 'runner interruption' "${version}" 143 143 0
+    ci_status_check 'logger failure' "${version}" 42 0 42
+    ci_status_check 'runner failure takes precedence' "${version}" 143 143 42
+    ci_status_check 'existing XFAIL allowed' "${version}" 0 0 0 'Expected fail : 2'
+    ci_status_check 'existing XLEAK rejected' "${version}" 1 0 0 'Expected leak : 1'
+    for required in "${common_required[@]}"; do
+        ci_status_check "required ${required} cannot skip" "${version}" 1 0 0 "SKIP fixture [${required}]"
+    done
+    if [[ "${version}" = 2.0.0 ]]; then
+        ga_status=1
+    else
+        ga_status=0
+    fi
+    for required in "${ga_required[@]}"; do
+        ci_status_check "GA-only ${required} skip scope" "${version}" "${ga_status}" 0 0 "SKIP fixture [${required}]"
+        rm "${work}/ci/${required}"
+        ci_status_check "GA-only ${required} missing scope" "${version}" "${ga_status}" 0 0
+        touch "${work}/ci/${required}"
+    done
+done

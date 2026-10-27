@@ -14,6 +14,8 @@
 #define PHP_PDO_DUCKDB_INT_H
 
 #include <duckdb.h>
+#include "pdo_duckdb_bridge_query.h"
+#include "pdo_duckdb_sql.h"
 
 /* Older PHP uses coarser type names in argument errors. */
 #if PHP_VERSION_ID < 80300
@@ -42,6 +44,7 @@ static zend_always_inline zend_class_entry *zend_register_internal_class_with_fl
  * driver. */
 #define PDO_DUCKDB_ATTR_CONFIG     (PDO_ATTR_DRIVER_SPECIFIC)      /* array, connect-time */
 #define PDO_DUCKDB_ATTR_UNBUFFERED (PDO_ATTR_DRIVER_SPECIFIC + 1)  /* bool, default false */
+#define PDO_DUCKDB_ATTR_NATIVE_STRUCTURES (PDO_ATTR_DRIVER_SPECIFIC + 2)
 
 /* errorInfo[1] codes. SQLSTATE follows the code: CONNECT is 08000, SYNTAX is
  * 42000, the rest HY000. Exec-time SQL errors such as a missing table are
@@ -60,30 +63,19 @@ typedef struct {
 } pdo_duckdb_error_info;
 
 struct _pdo_duckdb_appender;
+struct _pdo_duckdb_instance;
 
-typedef struct {
+typedef struct _pdo_duckdb_db_handle {
 	duckdb_database db;
 	duckdb_connection conn;
 	pdo_duckdb_error_info einfo;
-	/* Persistent handles are escalated in place on reuse, not discarded when
-	 * the request policy tightens. */
-	bool external_access_disabled;
-	/* PG(open_basedir) as of sandbox apply (NULL when unset). DuckDB allowlists
-	 * are frozen after escalate, so a re-narrowed basedir no longer matches and
-	 * enforce_sandbox fails closed. Stored as a string, not a hash, because the
-	 * compare sits on the appender's per-row gate and strcmp is cheaper and
-	 * collision-free. */
-	char *sandbox_basedir;
-	/* Mirrors dbh->is_persistent for sandbox_basedir allocation; the sandbox
-	 * helpers only see H. */
+	struct _pdo_duckdb_instance *instance;
+	struct _pdo_duckdb_db_handle *instance_next;
+	char sandbox_error[256];
 	bool persistent;
-	/* Latched when the sandbox profile cannot contain this instance (a loaded
-	 * extension it does not govern, or no extension list). Every later SQL
-	 * entry point refuses, with sandbox_refusal as the reason. */
-	bool sandbox_refused;
-	char sandbox_refusal[256];
 	/* PDO::DUCKDB_ATTR_UNBUFFERED */
 	bool unbuffered;
+	bool native_structures;
 	/* PDO core re-applies constructor driver_options through set_attribute()
 	 * after handle_factory. Accept DUCKDB_ATTR_CONFIG exactly for that reapply;
 	 * later runtime calls cannot change an already-open DuckDB database. */
@@ -129,6 +121,16 @@ typedef struct {
 	pdo_duckdb_db_handle *H;
 	duckdb_prepared_statement prepared;
 	duckdb_result result;
+	pdo_duckdb_sql_plan *sql_plan;
+	pdd_bridge_result *bridge_result;
+	pdo_duckdb_sql_binding *expanded_bindings;
+	size_t expanded_binding_count;
+	bool deferred_query;
+	bool native_structures;
+	zval *row_values;
+	zval *row_canonical;
+	idx_t row_value_count;
+	bool row_native;
 	pdo_duckdb_error_info einfo;
 	/* result holds a materialized rowset that must be destroyed */
 	bool has_result;
@@ -204,8 +206,19 @@ void pdo_duckdb_tls_caches_shutdown(void);
  * required but could not be applied. */
 bool pdo_duckdb_enforce_sandbox(pdo_duckdb_db_handle *H);
 
+zend_result pdo_duckdb_instances_minit(void);
+void pdo_duckdb_instances_mshutdown(void);
+void pdo_duckdb_instance_lock(pdo_duckdb_db_handle *H);
+void pdo_duckdb_instance_unlock(pdo_duckdb_db_handle *H);
+/* Success leaves the instance locked; failure leaves it unlocked. No PHP
+ * callbacks may run before the caller releases the successful entry. */
+bool pdo_duckdb_native_enter(pdo_duckdb_db_handle *H);
+/* Leaves the instance locked after stopping local writers before native
+ * destruction; runs no SQL and performs no PHP allocations. */
+void pdo_duckdb_native_cleanup_enter(pdo_duckdb_db_handle *H);
+
 /* Error text for a failed pdo_duckdb_enforce_sandbox(). */
-const char *pdo_duckdb_sandbox_error(const pdo_duckdb_db_handle *H);
+const char *pdo_duckdb_sandbox_error(pdo_duckdb_db_handle *H);
 
 /* Keep PDO's transaction flag aligned when SQL executes transaction control
  * outside beginTransaction()/commit()/rollBack(). */

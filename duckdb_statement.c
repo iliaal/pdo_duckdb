@@ -23,6 +23,8 @@
 #include "zend_smart_str.h"
 #include "php_pdo_duckdb.h"
 #include "php_pdo_duckdb_int.h"
+#include "pdo_duckdb_bridge_types.h"
+#include "duckdb_value.h"
 #include <inttypes.h>
 
 #if defined(__SIZEOF_INT128__) && !defined(_MSC_VER)
@@ -35,13 +37,9 @@ static pdo_duckdb_nested_render_type *pdo_duckdb_nested_render_type_build(
 	duckdb_type tid, duckdb_logical_type lt, bool owns_lt);
 static void pdo_duckdb_nested_render_type_destroy(pdo_duckdb_nested_render_type *type);
 #define PDO_DUCKDB_LOB_MAX_BYTES ((size_t)67108864)
-#define PDO_DUCKDB_VARIANT_ERRMSG \
-	"DuckDB VARIANT values are not supported by the C result API; cast the value to VARCHAR in SQL"
 
 #ifdef HAVE_DUCKDB_V2
-/* Type ids cell_to_value_typed can decode. Anything else (a type newer than
- * these headers) has an unknown vector layout, so the fetcher rejects its
- * non-NULL cells like VARIANT instead of reading the memory. */
+/* Unknown vector layouts must be rejected before PDO reads any column. */
 static bool pdo_duckdb_type_decodable(duckdb_type tid)
 {
 #ifdef PDO_DUCKDB_TEST_UNDECODABLE_TYPE
@@ -82,6 +80,7 @@ static bool pdo_duckdb_type_decodable(duckdb_type tid)
 		case DUCKDB_TYPE_BIT:
 		case DUCKDB_TYPE_BIGNUM:
 		case DUCKDB_TYPE_GEOMETRY:
+		case DUCKDB_TYPE_VARIANT:
 		case DUCKDB_TYPE_LIST:
 		case DUCKDB_TYPE_ARRAY:
 		case DUCKDB_TYPE_STRUCT:
@@ -95,9 +94,9 @@ static bool pdo_duckdb_type_decodable(duckdb_type tid)
 	}
 }
 
-# define PDO_DUCKDB_TYPE_OPAQUE(tid) ((tid) == DUCKDB_TYPE_VARIANT || !pdo_duckdb_type_decodable(tid))
+# define PDO_DUCKDB_TYPE_OPAQUE(tid) (!pdo_duckdb_type_decodable(tid))
 #else
-# define PDO_DUCKDB_TYPE_OPAQUE(tid) ((tid) == DUCKDB_TYPE_VARIANT)
+# define PDO_DUCKDB_TYPE_OPAQUE(tid) false
 #endif
 
 /* Avoid per-cell vector lookups. Publish only complete entries; invalidate on
@@ -266,16 +265,16 @@ void pdo_duckdb_tls_caches_shutdown(void)
 static void pdo_duckdb_stmt_cache_col_aux(pdo_duckdb_stmt *S);
 static int pdo_duckdb_stmt_bind_failure(pdo_stmt_t *stmt);
 
-/* {{{ VARIANT probes
+/* {{{ Unsupported-type probes
  *
- * The C result API cannot read a non-NULL VARIANT. get_col runs inside PDO
+ * get_col runs inside PDO
  * core's column loop, where reporting the error can run userland while core
- * still holds fetch state, so the fetcher rejects such a row before any
- * column is read. Probes mirror the cell_to_value_typed traversal and use
+ * still holds fetch state, so the fetcher rejects unknown non-NULL types before
+ * any column is read. Probes mirror the nested vector traversal and use
  * malloc, so building them cannot bail out on memory_limit. */
 
 /* Stands in for a subtree whose probe could not be allocated: any non-NULL
- * cell is treated as holding a VARIANT. */
+ * cell is treated as unsupported. */
 #ifdef HAVE_DUCKDB_V2
 static pdo_duckdb_variant_probe pdo_duckdb_variant_probe_any = { DUCKDB_TYPE_VARIANT, 0, 0, NULL, DUCKDB_TYPE_INVALID };
 
@@ -499,8 +498,41 @@ static bool pdo_duckdb_stmt_row_has_variant(pdo_duckdb_stmt *S)
 }
 /* }}} */
 
+static void pdo_duckdb_stmt_clear_converted_row(pdo_duckdb_stmt *S, bool release)
+{
+	S->row_native = false;
+	if (!S->row_values && !S->row_canonical) { return; }
+	/* Releasing shared array payloads can collect unrelated user destructors. */
+	bool gc_was_enabled = gc_enable(false);
+	zend_try {
+		for (idx_t c = 0; c < S->row_value_count; c++) {
+			zval value;
+			if (S->row_values && !Z_ISUNDEF(S->row_values[c])) {
+				ZVAL_COPY_VALUE(&value, &S->row_values[c]);
+				ZVAL_UNDEF(&S->row_values[c]);
+				zval_ptr_dtor(&value);
+			}
+			if (S->row_canonical && !Z_ISUNDEF(S->row_canonical[c])) {
+				ZVAL_COPY_VALUE(&value, &S->row_canonical[c]);
+				ZVAL_UNDEF(&S->row_canonical[c]);
+				zval_ptr_dtor(&value);
+			}
+		}
+		if (release) {
+			if (S->row_values) { efree(S->row_values); S->row_values = NULL; }
+			if (S->row_canonical) { efree(S->row_canonical); S->row_canonical = NULL; }
+			S->row_value_count = 0;
+		}
+	} zend_catch {
+		gc_enable(gc_was_enabled);
+		zend_bailout();
+	} zend_end_try();
+	gc_enable(gc_was_enabled);
+}
+
 static void pdo_duckdb_stmt_reset_result(pdo_duckdb_stmt *S)
 {
+	pdo_duckdb_stmt_clear_converted_row(S, true);
 	if (S->variant_cols) {
 		efree(S->variant_cols);
 		S->variant_cols = NULL;
@@ -543,7 +575,13 @@ static void pdo_duckdb_stmt_reset_result(pdo_duckdb_stmt *S)
 		S->chunk = NULL;
 	}
 	if (S->has_result) {
-		duckdb_destroy_result(&S->result);
+		pdo_duckdb_native_cleanup_enter(S->H);
+		if (S->bridge_result) {
+			pdd_bridge_result_destroy(&S->bridge_result);
+		} else {
+			duckdb_destroy_result(&S->result);
+		}
+		pdo_duckdb_instance_unlock(S->H);
 		S->has_result = false;
 	}
 	S->chunk_size = 0;
@@ -565,13 +603,38 @@ static zend_long pdo_duckdb_stmt_rows_changed(duckdb_result *result)
 		: 0;
 }
 
-static void pdo_duckdb_stmt_cache_columns(pdo_duckdb_stmt *S)
+static int pdo_duckdb_stmt_bridge_error(pdo_stmt_t *stmt, pdd_bridge_error *error,
+		unsigned int code)
 {
-	idx_t c, n, flagged = 0;
+	zend_try {
+		pdo_duckdb_error_stmt_code(stmt, code,
+			error->data ? error->data : "DuckDB query bridge failed");
+	} zend_catch {
+		pdd_bridge_error_free(error);
+		zend_bailout();
+	} zend_end_try();
+	pdd_bridge_error_free(error);
+	return 0;
+}
 
-	n = duckdb_column_count(&S->result);
+static bool pdo_duckdb_stmt_cache_columns(pdo_stmt_t *stmt)
+{
+	pdo_duckdb_stmt *S = (pdo_duckdb_stmt *)stmt->driver_data;
+	idx_t c, n, flagged = 0;
+	pdd_bridge_error error = {0};
+
+	if (S->bridge_result) {
+		idx_t rows_changed;
+		bool streaming;
+		if (pdd_bridge_result_info(S->bridge_result, &n, &rows_changed, &streaming, &error) != PDD_BRIDGE_OK) {
+			pdo_duckdb_stmt_bridge_error(stmt, &error, PDO_DUCKDB_ERRCODE_GENERAL);
+			return false;
+		}
+	} else {
+		n = duckdb_column_count(&S->result);
+	}
 	if (n == 0) {
-		return;
+		return true;
 	}
 
 	/* A memory_limit bailout can unwind from any allocation below into
@@ -581,8 +644,18 @@ static void pdo_duckdb_stmt_cache_columns(pdo_duckdb_stmt *S)
 	S->col_nested_renderers = ecalloc(n, sizeof(pdo_duckdb_nested_render_type *));
 	S->col_variant_probes = ecalloc(n, sizeof(pdo_duckdb_variant_probe *));
 	for (c = 0; c < n; c++) {
-		S->col_types[c] = duckdb_column_type(&S->result, c);
-		S->col_logical_types[c] = duckdb_column_logical_type(&S->result, c);
+		if (S->bridge_result) {
+			pdd_bridge_bytes name = {0};
+			if (pdd_bridge_result_column(S->bridge_result, c, &name, &S->col_logical_types[c], &error) != PDD_BRIDGE_OK) {
+				pdo_duckdb_stmt_bridge_error(stmt, &error, PDO_DUCKDB_ERRCODE_GENERAL);
+				return false;
+			}
+			pdd_bridge_bytes_free(&name);
+			S->col_types[c] = duckdb_get_type_id(S->col_logical_types[c]);
+		} else {
+			S->col_types[c] = duckdb_column_type(&S->result, c);
+			S->col_logical_types[c] = duckdb_column_logical_type(&S->result, c);
+		}
 		S->col_count = c + 1;
 		S->col_variant_probes[c] = pdo_duckdb_variant_probe_build(S->col_logical_types[c]);
 		if (S->col_variant_probes[c]) {
@@ -610,6 +683,20 @@ static void pdo_duckdb_stmt_cache_columns(pdo_duckdb_stmt *S)
 		}
 	}
 	pdo_duckdb_stmt_cache_col_aux(S);
+	return true;
+}
+
+static void pdo_duckdb_stmt_clear_expanded_bindings(pdo_duckdb_stmt *S)
+{
+	if (!S->expanded_bindings) {
+		return;
+	}
+	for (size_t i = 0; i < S->expanded_binding_count; i++) {
+		if (S->expanded_bindings[i].value) {
+			zend_string_release(S->expanded_bindings[i].value);
+			S->expanded_bindings[i].value = NULL;
+		}
+	}
 }
 
 static int pdo_duckdb_stmt_dtor(pdo_stmt_t *stmt)
@@ -618,79 +705,163 @@ static int pdo_duckdb_stmt_dtor(pdo_stmt_t *stmt)
 
 	pdo_duckdb_stmt_reset_result(S);
 	if (S->prepared) {
+		pdo_duckdb_native_cleanup_enter(S->H);
 		duckdb_destroy_prepare(&S->prepared);
+		pdo_duckdb_instance_unlock(S->H);
 		S->prepared = NULL;
 	}
+	pdo_duckdb_stmt_clear_expanded_bindings(S);
+	if (S->expanded_bindings) {
+		efree(S->expanded_bindings);
+	}
+	pdo_duckdb_sql_plan_destroy(S->sql_plan);
 	pdo_duckdb_clear_einfo(&S->einfo, false);
 	efree(S);
 	return 1;
 }
 
+/* The caller holds the instance lock; a PHP allocation bailout must release
+ * the native result and that lock before request shutdown destroys the PDO. */
+static zend_string *pdo_duckdb_stmt_copy_error_locked(pdo_duckdb_stmt *S,
+		duckdb_pending_result *pending, const char *message)
+{
+	zend_string *error = NULL;
+
+	zend_try {
+		error = zend_string_init(message, strlen(message), 0);
+	} zend_catch {
+		if (pending) {
+			duckdb_destroy_pending(pending);
+		}
+		duckdb_destroy_result(&S->result);
+		S->has_result = false;
+		pdo_duckdb_instance_unlock(S->H);
+		zend_bailout();
+	} zend_end_try();
+	return error;
+}
+
 static int pdo_duckdb_stmt_execute(pdo_stmt_t *stmt)
 {
 	pdo_duckdb_stmt *S = (pdo_duckdb_stmt *)stmt->driver_data;
+	duckdb_pending_result pending = NULL;
+	duckdb_state execute_state;
+	unsigned int error_code = S->H->unbuffered
+		? PDO_DUCKDB_ERRCODE_STREAMING : PDO_DUCKDB_ERRCODE_GENERAL;
+	const char *native_error = NULL;
+	zend_string *error = NULL, *expanded = NULL;
+	pdd_bridge_error bridge_error = {0};
+	pdd_bridge_status status;
+	bool remote = false, attached = false;
 
 	pdo_duckdb_stmt_reset_result_full(stmt);
-	/* Zero before any failure return so re-execute errors do not leave a stale rowCount. */
 	stmt->row_count = 0;
+	if (!S->binds_cleared) {
+		pdo_duckdb_stmt_clear_expanded_bindings(S);
+		if (S->prepared) {
+			pdo_duckdb_instance_lock(S->H);
+			duckdb_clear_bindings(S->prepared);
+			pdo_duckdb_instance_unlock(S->H);
+		}
+	}
+	S->binds_cleared = false;
 
-	/* open_basedir may have tightened since prepare. EXEC_PRE may already have
-	 * set binds_cleared, so reset it on failure or the next execute skips
-	 * duckdb_clear_bindings. */
-	if (!pdo_duckdb_enforce_sandbox(S->H)) {
-		S->binds_cleared = false;
+	if (!pdo_duckdb_native_enter(S->H)) {
+		pdo_duckdb_error_stmt_code(stmt, PDO_DUCKDB_ERRCODE_SANDBOX, pdo_duckdb_sandbox_error(S->H));
+		return 0;
+	}
+	status = pdd_bridge_connection_is_remote(S->H->conn, &remote, &bridge_error);
+	if (status == PDD_BRIDGE_OK) {
+		status = pdd_bridge_connection_has_remote_catalogs(S->H->conn, &attached, &bridge_error);
+	}
+	pdo_duckdb_instance_unlock(S->H);
+	if (status != PDD_BRIDGE_OK) {
+		return pdo_duckdb_stmt_bridge_error(stmt, &bridge_error, error_code);
+	}
+	S->deferred_query = S->deferred_query || remote || attached;
+	if (S->deferred_query) {
+		expanded = pdo_duckdb_sql_expand(S->sql_plan, S->expanded_bindings,
+			S->expanded_binding_count, &error);
+		if (!expanded) {
+			pdo_duckdb_stmt_clear_expanded_bindings(S);
+			pdo_duckdb_error_stmt(stmt, ZSTR_VAL(error));
+			zend_string_release(error);
+			return 0;
+		}
+	}
+	pdo_duckdb_stmt_clear_expanded_bindings(S);
+	if (!pdo_duckdb_native_enter(S->H)) {
+		if (expanded) {
+			zend_string_release(expanded);
+		}
 		pdo_duckdb_error_stmt_code(stmt, PDO_DUCKDB_ERRCODE_SANDBOX, pdo_duckdb_sandbox_error(S->H));
 		return 0;
 	}
 
-	/* No parameter was bound this round (execute([]) or a params-less
-	 * re-execute), so EXEC_PRE never cleared the previous bindings. */
-	if (!S->binds_cleared) {
-		duckdb_clear_bindings(S->prepared);
-	}
-	S->binds_cleared = false;
+	if (S->deferred_query) {
+		idx_t columns, rows_changed;
+		bool streaming;
 
-	if (S->H->unbuffered) {
-		/* The pending-result API produces chunks lazily as fetch_chunk() pulls
-		 * them. Interleaved unbuffered statements are allowed. */
-		duckdb_pending_result pending = NULL;
-
-		if (duckdb_pending_prepared_streaming(S->prepared, &pending) != DuckDBSuccess) {
-			pdo_duckdb_error_stmt_code(stmt, PDO_DUCKDB_ERRCODE_STREAMING, pending ? duckdb_pending_error(pending) : "Unable to create streaming result");
-			duckdb_destroy_pending(&pending);
-			return 0;
+		status = pdd_bridge_query_execute(S->H->conn, ZSTR_VAL(expanded), ZSTR_LEN(expanded),
+			S->H->unbuffered, &S->bridge_result, &bridge_error);
+		S->has_result = S->bridge_result != NULL;
+		if (status == PDD_BRIDGE_OK) {
+			status = pdd_bridge_result_info(S->bridge_result, &columns, &rows_changed,
+				&streaming, &bridge_error);
 		}
-		if (duckdb_execute_pending(pending, &S->result) != DuckDBSuccess) {
-			pdo_duckdb_error_stmt_code(stmt, PDO_DUCKDB_ERRCODE_STREAMING, duckdb_result_error(&S->result));
-			duckdb_destroy_result(&S->result);
+		pdo_duckdb_instance_unlock(S->H);
+		zend_string_release(expanded);
+		if (status != PDD_BRIDGE_OK) {
+			pdo_duckdb_stmt_reset_result_full(stmt);
+			return pdo_duckdb_stmt_bridge_error(stmt, &bridge_error, error_code);
+		}
+		stmt->row_count = (zend_long)rows_changed;
+	} else {
+		if (S->H->unbuffered) {
+			execute_state = duckdb_pending_prepared_streaming(S->prepared, &pending);
+			if (execute_state != DuckDBSuccess) {
+				native_error = pending ? duckdb_pending_error(pending) : "Unable to create streaming result";
+			} else {
+				execute_state = duckdb_execute_pending(pending, &S->result);
+				if (execute_state != DuckDBSuccess) {
+					native_error = duckdb_result_error(&S->result);
+				}
+			}
+		} else {
+			execute_state = duckdb_execute_prepared(S->prepared, &S->result);
+			if (execute_state != DuckDBSuccess) {
+				native_error = duckdb_result_error(&S->result);
+			}
+		}
+		if (execute_state != DuckDBSuccess) {
+			const char *message = native_error ? native_error : "Unable to execute DuckDB statement";
+			error = pdo_duckdb_stmt_copy_error_locked(S, &pending, message);
 			duckdb_destroy_pending(&pending);
+			duckdb_destroy_result(&S->result);
+			pdo_duckdb_instance_unlock(S->H);
+			pdo_duckdb_error_stmt_code(stmt, error_code, ZSTR_VAL(error));
+			zend_string_release(error);
 			return 0;
 		}
 		duckdb_destroy_pending(&pending);
-	} else {
-		/* Materialized: DuckDB buffers the whole result set here, and
-		 * duckdb_fetch_chunk() reads chunks out of that buffer. */
-		if (duckdb_execute_prepared(S->prepared, &S->result) != DuckDBSuccess) {
-			pdo_duckdb_error_stmt(stmt, duckdb_result_error(&S->result));
-			duckdb_destroy_result(&S->result);
-			return 0;
-		}
+		S->has_result = true;
+		stmt->row_count = pdo_duckdb_stmt_rows_changed(&S->result);
+		pdo_duckdb_instance_unlock(S->H);
 	}
-
-	S->has_result = true;
 	if (UNEXPECTED(S->transaction_effect != PDO_DUCKDB_TRANSACTION_NONE)) {
 		pdo_duckdb_apply_transaction_effect(stmt->dbh, S->transaction_effect);
 	}
-	pdo_duckdb_stmt_cache_columns(S);
+	if (!pdo_duckdb_stmt_cache_columns(stmt)) {
+		pdo_duckdb_stmt_reset_result_full(stmt);
+		stmt->row_count = 0;
+		return 0;
+	}
 	php_pdo_stmt_set_column_count(stmt, (int)S->col_count);
-	/* reset_result_full freed the columns, and PDO only auto-describes when
-	 * !stmt->executed; without this, getColumnMeta() SEGVs after re-execute. */
+	/* PDO only auto-describes when !stmt->executed, including after re-execute. */
 	if (S->col_count > 0) {
 		stmt->executed = 0;
 	}
-	stmt->row_count = pdo_duckdb_stmt_rows_changed(&S->result);
 	pdo_duckdb_clear_einfo(&S->einfo, false);
-
 	return 1;
 }
 
@@ -818,6 +989,23 @@ static bool pdo_duckdb_decimal_meta_ok(uint8_t width, uint8_t scale)
 	return width >= 1 && width <= 38 && scale <= width;
 }
 
+static bool pdo_duckdb_enum_label(duckdb_logical_type type, idx_t index,
+		pdd_bridge_bytes *bytes)
+{
+	duckdb_value scalar = duckdb_create_enum_value(type, index);
+	pdd_bridge_value *value = NULL;
+	pdd_bridge_error error = {0};
+	bool is_null = false;
+	bool ok = scalar && pdd_bridge_value_from_c(scalar, &value, &error) == PDD_BRIDGE_OK
+		&& pdd_bridge_value_render(value, NULL, bytes, &is_null, &error) == PDD_BRIDGE_OK
+		&& !is_null;
+
+	pdd_bridge_value_destroy(&value);
+	if (scalar) { duckdb_destroy_value(&scalar); }
+	pdd_bridge_error_free(&error);
+	return ok;
+}
+
 /* Invalid metadata or allocation failure leaves the column unflagged so the
  * generic renderer handles it. */
 static void pdo_duckdb_stmt_cache_col_aux(pdo_duckdb_stmt *S)
@@ -882,23 +1070,23 @@ static void pdo_duckdb_stmt_cache_col_aux(pdo_duckdb_stmt *S)
 					continue;
 				}
 				for (i = 0; i < n; i++) {
-					char *s = duckdb_enum_dictionary_value(lt, i);
-					size_t len;
+					pdd_bridge_bytes label = {0};
 
-					if (!s) {
+					if (!pdo_duckdb_enum_label(lt, i, &label) || label.length == SIZE_MAX) {
+						pdd_bridge_bytes_free(&label);
 						ok = false;
 						break;
 					}
-					len = strlen(s);
-					vals[i] = malloc(len + 1);
+					vals[i] = malloc(label.length + 1);
 					if (!vals[i]) {
-						duckdb_free(s);
+						pdd_bridge_bytes_free(&label);
 						ok = false;
 						break;
 					}
-					memcpy(vals[i], s, len + 1);
-					lens[i] = len;
-					duckdb_free(s);
+					memcpy(vals[i], label.data, label.length);
+					vals[i][label.length] = '\0';
+					lens[i] = label.length;
+					pdd_bridge_bytes_free(&label);
 				}
 				if (!ok) {
 					for (j = 0; j < i; j++) {
@@ -1360,26 +1548,6 @@ static bool pdo_duckdb_fast_col_to_string(duckdb_type tid, duckdb_logical_type l
 		}
 		case DUCKDB_TYPE_INTERVAL:
 			return pdo_duckdb_interval_to_string(((duckdb_interval *)data)[row], result);
-		case DUCKDB_TYPE_ENUM: {
-			uint64_t idx;
-			char *s;
-			switch (duckdb_enum_internal_type(lt)) {
-				case DUCKDB_TYPE_USMALLINT: idx = ((uint16_t *)data)[row]; break;
-				case DUCKDB_TYPE_UINTEGER:  idx = ((uint32_t *)data)[row]; break;
-				case DUCKDB_TYPE_UTINYINT:
-				default:                    idx = ((uint8_t *)data)[row];  break;
-			}
-			if (idx >= duckdb_enum_dictionary_size(lt)) {
-				return false;
-			}
-			s = duckdb_enum_dictionary_value(lt, idx);
-			if (!s) {
-				return false;
-			}
-			ZVAL_STRING(result, s);
-			duckdb_free(s);
-			return true;
-		}
 		case DUCKDB_TYPE_UUID: {
 			duckdb_uhugeint u = ((duckdb_uhugeint *)data)[row];
 			uint64_t tail;
@@ -1426,14 +1594,17 @@ static void pdo_duckdb_smart_append_i64(smart_str *out, int64_t value)
  * NestedToVarcharCast::LOOKUP_TABLE (nested_to_varchar_cast.cpp). A value is
  * single-quoted (backslash-escaping only '\'' and '\\') when empty, padded
  * with recognized whitespace, case-insensitively "null", or containing one
- * of "'(),:=[]{}; otherwise it is emitted bare. The engine applies the same
- * test to the VARCHAR rendering of every LIST/STRUCT/MAP child, so a TIME or
+ * of "'(),:=[]{} (plus '\\' on 2.0). The engine applies the same test to
+ * the VARCHAR rendering of every LIST/STRUCT/MAP child, so a TIME or
  * TIMESTAMP leaf (its ':') is quoted too. UNION members render raw in the
  * engine, so the recursion below passes escape=false for those. */
 static const bool pdo_duckdb_varchar_quote_table[256] = {
 	['"'] = true, ['\''] = true, ['('] = true, [')'] = true, [','] = true,
 	[':'] = true, ['='] = true, ['['] = true, [']'] = true, ['{'] = true,
 	['}'] = true,
+#ifdef HAVE_DUCKDB_V2
+	['\\'] = true,
+#endif
 };
 
 static bool pdo_duckdb_nested_varchar_is_space(char c)
@@ -1467,9 +1638,6 @@ static bool pdo_duckdb_nested_varchar_needs_quotes(const char *p, size_t len)
 	return false;
 }
 
-/* needs_quotes is decided on the full value, as in the engine, but emission
- * stops at the first NUL to match duckdb_get_varchar's C-string truncation
- * byte-for-byte (no closing quote after a truncation). */
 static void pdo_duckdb_smart_append_escaped_varchar(smart_str *out, const char *p, size_t len)
 {
 	size_t i;
@@ -1479,21 +1647,17 @@ static void pdo_duckdb_smart_append_escaped_varchar(smart_str *out, const char *
 		return;
 	}
 	if (!pdo_duckdb_nested_varchar_needs_quotes(p, len)) {
-		const char *nul = memchr(p, '\0', len);
-
-		smart_str_appendl(out, p, nul ? (size_t)(nul - p) : len);
+		smart_str_appendl(out, p, len);
 		return;
 	}
 	smart_str_appendc(out, '\'');
-	for (i = 0; i < len && p[i] != '\0'; i++) {
+	for (i = 0; i < len; i++) {
 		if (p[i] == '\'' || p[i] == '\\') {
 			smart_str_appendc(out, '\\');
 		}
 		smart_str_appendc(out, p[i]);
 	}
-	if (i == len) {
-		smart_str_appendc(out, '\'');
-	}
+	smart_str_appendc(out, '\'');
 }
 
 /* Use DuckDB's scalar renderer to preserve its exact float formatting. */
@@ -1583,9 +1747,7 @@ static bool pdo_duckdb_smart_append_fast_scalar(duckdb_type tid, duckdb_logical_
 			if (escape_varchar) {
 				pdo_duckdb_smart_append_escaped_varchar(out, p, len);
 			} else {
-				const char *nul = memchr(p, '\0', len);
-
-				smart_str_appendl(out, p, nul ? (size_t)(nul - p) : len);
+				smart_str_appendl(out, p, len);
 			}
 			return true;
 		}
@@ -1671,6 +1833,16 @@ static pdo_duckdb_nested_render_type *pdo_duckdb_nested_render_type_build(
 	type->type = tid;
 	type->logical_type = lt;
 	type->owns_logical_type = owns_lt;
+	if (tid == DUCKDB_TYPE_STRUCT) {
+		bool tuple = false;
+		pdd_bridge_error error = {0};
+		pdd_bridge_status status = pdd_bridge_type_is_tuple(lt, &tuple, &error);
+		pdd_bridge_error_free(&error);
+		if (status != PDD_BRIDGE_OK || tuple) {
+			pdo_duckdb_nested_render_type_destroy(type);
+			return NULL;
+		}
+	}
 
 	switch (tid) {
 		case DUCKDB_TYPE_LIST: {
@@ -1719,7 +1891,13 @@ static pdo_duckdb_nested_render_type *pdo_duckdb_nested_render_type_build(
 			for (i = 0; i < type->child_count; i++) {
 				duckdb_logical_type child = duckdb_struct_type_child_type(lt, i);
 				char *name = duckdb_struct_type_child_name(lt, i);
-				if (!pdo_duckdb_struct_name_is_fast_safe(name)) {
+				pdd_bridge_bytes full_name = {0};
+				pdd_bridge_error error = {0};
+				pdd_bridge_status status = pdd_bridge_type_field_name(lt, i, &full_name, &error);
+				bool complete = status == PDD_BRIDGE_OK && name && full_name.length == strlen(name);
+				pdd_bridge_bytes_free(&full_name);
+				pdd_bridge_error_free(&error);
+				if (!complete || !pdo_duckdb_struct_name_is_fast_safe(name)) {
 					if (name) {
 						duckdb_free(name);
 					}
@@ -1850,8 +2028,12 @@ static bool pdo_duckdb_fast_nested_cell_to_smart_str(duckdb_vector vec, idx_t ro
 			return true;
 		}
 		case DUCKDB_TYPE_ARRAY: {
-			/* Unlike LIST, the engine's ArrayToVarcharCast joins pre-cast
-			 * children with a raw memcpy (no quoting), so members render raw. */
+			/* DuckDB 2.0 quotes ARRAY leaves like LIST; 1.5 joins them raw. */
+#ifdef HAVE_DUCKDB_V2
+			const bool escape_children = true;
+#else
+			const bool escape_children = false;
+#endif
 			idx_t n = duckdb_array_type_array_size(type->logical_type);
 			duckdb_vector child = duckdb_array_vector_get_child(vec);
 			idx_t base, i;
@@ -1867,7 +2049,7 @@ static bool pdo_duckdb_fast_nested_cell_to_smart_str(duckdb_vector vec, idx_t ro
 					smart_str_appends(out, ", ");
 				}
 				if (!pdo_duckdb_fast_nested_cell_to_smart_str(
-						child, base + i, type->children[0], out, false)) {
+						child, base + i, type->children[0], out, escape_children)) {
 					return false;
 				}
 			}
@@ -2452,27 +2634,96 @@ static duckdb_value pdo_duckdb_cell_to_value_typed(duckdb_vector vec, idx_t row,
 }
 /* }}} */
 
+static bool pdo_duckdb_stmt_column_has_scalar_binding(pdo_stmt_t *stmt, idx_t column)
+{
+	struct pdo_bound_param_data *param;
+	if (!stmt->bound_columns) { return false; }
+	ZEND_HASH_FOREACH_PTR(stmt->bound_columns, param) {
+		if (param->paramno < 0 || (idx_t)param->paramno != column) { continue; }
+		switch (PDO_PARAM_TYPE(param->param_type)) {
+			case PDO_PARAM_NULL:
+			case PDO_PARAM_BOOL:
+			case PDO_PARAM_INT:
+			case PDO_PARAM_STR:
+			case PDO_PARAM_LOB:
+				return true;
+			default:
+				break;
+		}
+	} ZEND_HASH_FOREACH_END();
+	return false;
+}
+
 static int pdo_duckdb_stmt_fetched_row(pdo_stmt_t *stmt)
 {
 	pdo_duckdb_stmt *S = (pdo_duckdb_stmt *)stmt->driver_data;
+	zend_string *error = NULL;
 
-	if (EXPECTED(S->variant_col_count == 0) || !pdo_duckdb_stmt_row_has_variant(S)) {
-		return 1;
-	}
+	pdo_duckdb_stmt_clear_converted_row(S, false);
+	S->row_native = S->native_structures && !stmt->dbh->stringify;
+	if (S->variant_col_count && pdo_duckdb_stmt_row_has_variant(S)) {
 #ifdef HAVE_DUCKDB_V2
-	if (pdo_duckdb_tls_probe_hit_type != DUCKDB_TYPE_VARIANT
-			&& pdo_duckdb_tls_probe_hit_type != DUCKDB_TYPE_INVALID) {
-		char msg[128];
-
-		snprintf(msg, sizeof(msg), "DuckDB type id %d is not supported by this pdo_duckdb build;"
+		error = strpprintf(0, "DuckDB type id %d is not supported by this pdo_duckdb build;"
 			" cast the value to VARCHAR in SQL", (int)pdo_duckdb_tls_probe_hit_type);
-		pdo_duckdb_error_stmt_code(stmt, PDO_DUCKDB_ERRCODE_STREAMING, msg);
-	} else {
-		pdo_duckdb_error_stmt_code(stmt, PDO_DUCKDB_ERRCODE_STREAMING, PDO_DUCKDB_VARIANT_ERRMSG);
-	}
-#else
-	pdo_duckdb_error_stmt_code(stmt, PDO_DUCKDB_ERRCODE_STREAMING, PDO_DUCKDB_VARIANT_ERRMSG);
+		goto failed;
 #endif
+	}
+	for (idx_t c = 0; c < S->col_count; c++) {
+		bool canonical = S->col_types[c] == DUCKDB_TYPE_LIST || S->col_types[c] == DUCKDB_TYPE_ARRAY
+			|| S->col_types[c] == DUCKDB_TYPE_STRUCT || S->col_types[c] == DUCKDB_TYPE_MAP
+			|| S->col_types[c] == DUCKDB_TYPE_UNION || S->col_types[c] == DUCKDB_TYPE_VARIANT
+			|| S->col_types[c] == DUCKDB_TYPE_ENUM;
+		bool native = false;
+		if (S->row_native && !pdo_duckdb_stmt_column_has_scalar_binding(stmt, c)
+				&& pdo_duckdb_value_is_structured(S->col_logical_types[c], &native, &error) == FAILURE) {
+			goto failed;
+		}
+		if (!canonical && !native) {
+			continue;
+		}
+		if (!S->row_canonical) {
+			S->row_canonical = ecalloc(S->col_count, sizeof(zval));
+			S->row_values = ecalloc(S->col_count, sizeof(zval));
+			S->row_value_count = S->col_count;
+		}
+		duckdb_vector vector = duckdb_data_chunk_get_vector(S->chunk, c);
+		uint64_t *validity = duckdb_vector_get_validity(vector);
+		if (validity && !duckdb_validity_row_is_valid(validity, S->cur)) {
+			ZVAL_NULL(&S->row_canonical[c]);
+			if (native) { ZVAL_NULL(&S->row_values[c]); }
+			continue;
+		}
+		if (S->col_types[c] == DUCKDB_TYPE_ENUM) {
+			pdo_duckdb_col_aux *aux = pdo_duckdb_col_aux_for(S, c);
+			if (aux && aux->is_enum && pdo_duckdb_cached_enum_to_zval(aux,
+					duckdb_vector_get_data(vector), S->cur, &S->row_canonical[c])) {
+				continue;
+			}
+		}
+		if (canonical && !(S->col_nested_renderers[c]
+				&& pdo_duckdb_fast_nested_col_to_string(vector, S->cur,
+					S->col_nested_renderers[c], &S->row_canonical[c]))
+				&& pdo_duckdb_value_render(vector, S->cur, S->chunk_size,
+					&S->row_canonical[c], &error) == FAILURE) {
+			goto failed;
+		}
+		if (native && pdo_duckdb_value_native_column(vector, S->cur, S->chunk_size,
+				&S->row_values[c], &error) == FAILURE) {
+			goto failed;
+		}
+	}
+	return 1;
+
+failed:
+	zend_try {
+		pdo_duckdb_error_stmt_code(stmt, PDO_DUCKDB_ERRCODE_STREAMING,
+			error ? ZSTR_VAL(error) : "Unable to convert DuckDB row");
+	} zend_catch {
+		if (error) { zend_string_release(error); }
+		zend_bailout();
+	} zend_end_try();
+	if (error) { zend_string_release(error); }
+	pdo_duckdb_stmt_clear_converted_row(S, false);
 	/* PHP < 8.5 fetchAll() only reports a failure of its first row, so a
 	 * later rejected row would end the result silently. Throwing runs no
 	 * userland and nothing is mid-row yet; warning mode is left to PDO core,
@@ -2505,26 +2756,42 @@ static int pdo_duckdb_stmt_fetch(pdo_stmt_t *stmt,
 	/* Unbuffered scans can open files during a chunk pull, and open_basedir may
 	 * have tightened since execute. Rows served from a loaded chunk touch no
 	 * filesystem, so checking per chunk is enough. */
-	if (!pdo_duckdb_enforce_sandbox(S->H)) {
-		pdo_duckdb_error_stmt_code(stmt, PDO_DUCKDB_ERRCODE_SANDBOX, pdo_duckdb_sandbox_error(S->H));
-		pdo_duckdb_stmt_reset_result_full(stmt);
-		S->done = true;
-		return 0;
-	}
-
 	for (;;) {
+		if (!pdo_duckdb_native_enter(S->H)) {
+			pdo_duckdb_error_stmt_code(stmt, PDO_DUCKDB_ERRCODE_SANDBOX, pdo_duckdb_sandbox_error(S->H));
+			pdo_duckdb_stmt_reset_result_full(stmt);
+			S->done = true;
+			return 0;
+		}
 		if (S->chunk) {
 			pdo_duckdb_chunk_cache_invalidate(S->chunk);
 			duckdb_destroy_data_chunk(&S->chunk);
 			S->chunk = NULL;
 		}
-		S->chunk = duckdb_fetch_chunk(S->result);
+		if (S->bridge_result) {
+			pdd_bridge_error error = {0};
+			if (pdd_bridge_result_fetch(S->bridge_result, &S->chunk, &error) != PDD_BRIDGE_OK) {
+				pdo_duckdb_instance_unlock(S->H);
+				pdo_duckdb_stmt_reset_result_full(stmt);
+				S->done = true;
+				return pdo_duckdb_stmt_bridge_error(stmt, &error, PDO_DUCKDB_ERRCODE_STREAMING);
+			}
+		} else {
+			S->chunk = duckdb_fetch_chunk(S->result);
+		}
 		if (!S->chunk) {
-			const char *err = duckdb_result_error(&S->result);
+			const char *err = S->bridge_result ? NULL : duckdb_result_error(&S->result);
+			zend_string *error = NULL;
+
 			if (err && *err) {
+				error = pdo_duckdb_stmt_copy_error_locked(S, NULL, err);
+			}
+			pdo_duckdb_instance_unlock(S->H);
+			if (error) {
 				/* Release the native result (esp. unbuffered streams) so the
 				 * connection is not pinned until a later re-execute/dtor. */
-				pdo_duckdb_error_stmt_code(stmt, PDO_DUCKDB_ERRCODE_STREAMING, err);
+				pdo_duckdb_error_stmt_code(stmt, PDO_DUCKDB_ERRCODE_STREAMING, ZSTR_VAL(error));
+				zend_string_release(error);
 				pdo_duckdb_stmt_reset_result_full(stmt);
 				S->done = true;
 				return 0;
@@ -2532,6 +2799,7 @@ static int pdo_duckdb_stmt_fetch(pdo_stmt_t *stmt,
 			S->done = true;
 			return 0;
 		}
+		pdo_duckdb_instance_unlock(S->H);
 		pdo_duckdb_chunk_cache_load(S);
 		S->chunk_size = duckdb_data_chunk_get_size(S->chunk);
 		S->cur = 0;
@@ -2544,14 +2812,42 @@ static int pdo_duckdb_stmt_fetch(pdo_stmt_t *stmt,
 static int pdo_duckdb_stmt_describe(pdo_stmt_t *stmt, int colno)
 {
 	pdo_duckdb_stmt *S = (pdo_duckdb_stmt *)stmt->driver_data;
-	const char *name;
+	pdd_bridge_bytes column_name = {0};
+	pdd_bridge_error error = {0};
+	pdd_bridge_status status;
 
 	if (!S->has_result || (idx_t)colno >= S->col_count) {
 		return 0;
 	}
 
-	name = duckdb_column_name(&S->result, (idx_t)colno);
-	stmt->columns[colno].name = zend_string_init(name ? name : "", name ? strlen(name) : 0, 0);
+	if (S->bridge_result) {
+		duckdb_logical_type type = NULL;
+		status = pdd_bridge_result_column(S->bridge_result, (idx_t)colno, &column_name, &type, &error);
+		if (type) { duckdb_destroy_logical_type(&type); }
+	} else {
+		status = pdd_bridge_c_result_column_name(&S->result, (idx_t)colno, &column_name, &error);
+	}
+	if (status != PDD_BRIDGE_OK) {
+		pdd_bridge_bytes_free(&column_name);
+		return pdo_duckdb_stmt_bridge_error(stmt, &error, PDO_DUCKDB_ERRCODE_GENERAL);
+	}
+	zend_try {
+		stmt->columns[colno].name = zend_string_init(column_name.data, column_name.length, 0);
+		/* Older PDO core versions uppercase names only up to the first NUL. */
+		if (stmt->dbh->desired_case == PDO_CASE_UPPER
+				&& memchr(column_name.data, '\0', column_name.length)) {
+			unsigned char *name = (unsigned char *)ZSTR_VAL(stmt->columns[colno].name);
+			for (size_t i = 0; i < column_name.length; i++) {
+				if (name[i] >= 'a' && name[i] <= 'z') {
+					name[i] -= 'a' - 'A';
+				}
+			}
+		}
+	} zend_catch {
+		pdd_bridge_bytes_free(&column_name);
+		zend_bailout();
+	} zend_end_try();
+	pdd_bridge_bytes_free(&column_name);
 	stmt->columns[colno].maxlen = SIZE_MAX;
 	stmt->columns[colno].precision = 0;
 
@@ -2614,6 +2910,22 @@ static int pdo_duckdb_stmt_get_col(
 	 * bound by the cache anyway. */
 	if ((idx_t)colno >= S->col_count) {
 		return 0;
+	}
+	if ((idx_t)colno < S->row_value_count) {
+		if (S->row_native && !stmt->dbh->stringify && !type && S->row_values
+				&& !Z_ISUNDEF(S->row_values[colno])) {
+			/* PDO's GC handler cannot traverse driver-private cached zvals. */
+			if (Z_TYPE(S->row_values[colno]) == IS_OBJECT) {
+				ZVAL_OBJ(result, zend_objects_clone_obj(Z_OBJ(S->row_values[colno])));
+			} else {
+				ZVAL_COPY(result, &S->row_values[colno]);
+			}
+			return 1;
+		}
+		if (S->row_canonical && !Z_ISUNDEF(S->row_canonical[colno])) {
+			ZVAL_COPY(result, &S->row_canonical[colno]);
+			return 1;
+		}
 	}
 	/* A miss means another statement pulled a chunk since fetch(); refresh, and
 	 * fall back to direct reads only if the cache is unavailable. */
@@ -2685,8 +2997,7 @@ static int pdo_duckdb_stmt_get_col(
 		}
 
 		case DUCKDB_TYPE_VARIANT:
-			/* Non-NULL cells are rejected by the fetcher; never report from
-			 * here, PDO core is mid-row. */
+			/* Non-NULL VARIANT cells are supplied by the converted-row cache. */
 			ZVAL_NULL(result);
 			return 1;
 
@@ -2774,6 +3085,9 @@ static int pdo_duckdb_stmt_col_meta(pdo_stmt_t *stmt, zend_long colno, zval *ret
 	pdo_duckdb_stmt *S = (pdo_duckdb_stmt *)stmt->driver_data;
 	duckdb_logical_type lt;
 	duckdb_type tid;
+	pdd_bridge_bytes declaration = {0};
+	pdd_bridge_annotations annotations = {0};
+	pdd_bridge_error error = {0};
 	enum pdo_param_type pdo_type;
 
 	if (!S->has_result || (idx_t)colno >= S->col_count) {
@@ -2782,8 +3096,46 @@ static int pdo_duckdb_stmt_col_meta(pdo_stmt_t *stmt, zend_long colno, zval *ret
 
 	lt = S->col_logical_types[colno];
 	tid = S->col_types[colno];
+	if (pdd_bridge_type_declaration(lt, &declaration, &error) != PDD_BRIDGE_OK
+			|| pdd_bridge_type_annotations(lt, &annotations, &error) != PDD_BRIDGE_OK) {
+		zend_try {
+			pdo_duckdb_error_stmt(stmt, error.data ? error.data : "Unable to read DuckDB logical type");
+		} zend_catch {
+			pdd_bridge_bytes_free(&declaration);
+			pdd_bridge_annotations_free(&annotations);
+			pdd_bridge_error_free(&error);
+			zend_bailout();
+		} zend_end_try();
+		pdd_bridge_bytes_free(&declaration);
+		pdd_bridge_annotations_free(&annotations);
+		pdd_bridge_error_free(&error);
+		return FAILURE;
+	}
 
-	array_init(return_value);
+	zend_try {
+		array_init(return_value);
+		add_assoc_stringl(return_value, "duckdb:decl_type", declaration.data, declaration.length);
+		zval *items = zend_hash_str_add_empty_element(Z_ARRVAL_P(return_value),
+			"duckdb:type_annotations", sizeof("duckdb:type_annotations") - 1);
+		array_init(items);
+		for (idx_t i = 0; i < annotations.count; i++) {
+			const pdd_bridge_type_annotation *annotation = &annotations.entries[i];
+			zval *entry = zend_hash_index_add_empty_element(Z_ARRVAL_P(items), (zend_ulong)i);
+			array_init(entry);
+			zval *path = zend_hash_str_add_empty_element(Z_ARRVAL_P(entry), "path", sizeof("path") - 1);
+			array_init(path);
+			for (idx_t j = 0; j < annotation->path_length; j++) {
+				add_next_index_long(path, (zend_long)annotation->path[j]);
+			}
+			add_assoc_stringl(entry, "collation", annotation->collation.data, annotation->collation.length);
+		}
+	} zend_catch {
+		pdd_bridge_bytes_free(&declaration);
+		pdd_bridge_annotations_free(&annotations);
+		zend_bailout();
+	} zend_end_try();
+	pdd_bridge_bytes_free(&declaration);
+	pdd_bridge_annotations_free(&annotations);
 	add_assoc_string(return_value, "native_type", (char *)pdo_duckdb_type_name(tid));
 
 	switch (tid) {
@@ -2834,6 +3186,7 @@ static int pdo_duckdb_stmt_bind_failure(pdo_stmt_t *stmt)
 	pdo_duckdb_stmt_reset_result_full(stmt);
 	stmt->row_count = 0;
 	S->binds_cleared = false;
+	pdo_duckdb_stmt_clear_expanded_bindings(S);
 	return 0;
 }
 
@@ -2852,6 +3205,72 @@ static bool pdo_duckdb_stmt_is_executing(pdo_stmt_t *stmt)
 		&& Z_OBJ(execute_data->This) == &stmt->std;
 }
 
+static void pdo_duckdb_stmt_store_binding(pdo_duckdb_stmt *S, size_t slot,
+		zend_string *value, bool quote, bool blob)
+{
+	if (S->expanded_bindings[slot].value) {
+		zend_string_release(S->expanded_bindings[slot].value);
+	}
+	S->expanded_bindings[slot] = (pdo_duckdb_sql_binding){value, quote, blob};
+}
+
+static duckdb_state pdo_duckdb_stmt_bind_null(pdo_duckdb_stmt *S, idx_t idx)
+{
+	duckdb_state state;
+	size_t slot = pdo_duckdb_sql_binding_slot(S->sql_plan, (zend_ulong)(idx - 1));
+
+	if (slot != SIZE_MAX) {
+		pdo_duckdb_stmt_store_binding(S, slot, zend_string_init("NULL", sizeof("NULL") - 1, 0), false, false);
+	}
+	if (S->deferred_query) {
+		return slot != SIZE_MAX ? DuckDBSuccess : DuckDBError;
+	}
+	pdo_duckdb_instance_lock(S->H);
+	state = duckdb_bind_null(S->prepared, idx);
+	pdo_duckdb_instance_unlock(S->H);
+	return state;
+}
+
+static duckdb_state pdo_duckdb_stmt_bind_integer(pdo_duckdb_stmt *S, idx_t idx,
+		int64_t value, bool boolean)
+{
+	duckdb_state state;
+	size_t slot = pdo_duckdb_sql_binding_slot(S->sql_plan, (zend_ulong)(idx - 1));
+
+	if (slot != SIZE_MAX) {
+		pdo_duckdb_stmt_store_binding(S, slot, boolean
+			? zend_string_init(value ? "TRUE" : "FALSE", value ? sizeof("TRUE") - 1 : sizeof("FALSE") - 1, 0)
+			: strpprintf(0, "CAST(%" PRId64 " AS BIGINT)", value), false, false);
+	}
+	if (S->deferred_query) {
+		return slot != SIZE_MAX ? DuckDBSuccess : DuckDBError;
+	}
+	pdo_duckdb_instance_lock(S->H);
+	state = boolean ? duckdb_bind_boolean(S->prepared, idx, value != 0)
+		: duckdb_bind_int64(S->prepared, idx, value);
+	pdo_duckdb_instance_unlock(S->H);
+	return state;
+}
+
+static duckdb_state pdo_duckdb_stmt_bind_bytes(pdo_duckdb_stmt *S, idx_t idx,
+		zend_string *value, bool blob)
+{
+	duckdb_state state;
+	size_t slot = pdo_duckdb_sql_binding_slot(S->sql_plan, (zend_ulong)(idx - 1));
+
+	if (slot != SIZE_MAX) {
+		pdo_duckdb_stmt_store_binding(S, slot, zend_string_copy(value), true, blob);
+	}
+	if (S->deferred_query) {
+		return slot != SIZE_MAX ? DuckDBSuccess : DuckDBError;
+	}
+	pdo_duckdb_instance_lock(S->H);
+	state = blob ? duckdb_bind_blob(S->prepared, idx, ZSTR_VAL(value), (idx_t)ZSTR_LEN(value))
+		: duckdb_bind_varchar_length(S->prepared, idx, ZSTR_VAL(value), (idx_t)ZSTR_LEN(value));
+	pdo_duckdb_instance_unlock(S->H);
+	return state;
+}
+
 static int pdo_duckdb_stmt_param_hook(pdo_stmt_t *stmt, struct pdo_bound_param_data *param,
 		enum pdo_param_event event_type)
 {
@@ -2863,21 +3282,15 @@ static int pdo_duckdb_stmt_param_hook(pdo_stmt_t *stmt, struct pdo_bound_param_d
 		return 1;
 	}
 
-	/* Resolve the rewritten "$N" placeholder name into a 0-based paramno.
-	 * Positional binds arrive with name == NULL and paramno already set. */
 	if (event_type == PDO_PARAM_EVT_NORMALIZE) {
 		if (param->name) {
-			if (ZSTR_VAL(param->name)[0] == '$') {
-				param->paramno = ZEND_ATOL(ZSTR_VAL(param->name) + 1) - 1;
-			} else if (stmt->bound_param_map) {
-				zend_string *nv = zend_hash_find_ptr(stmt->bound_param_map, param->name);
-				if (nv == NULL) {
-					pdo_duckdb_error_stmt(stmt, "parameter was not defined");
-					return pdo_duckdb_stmt_is_executing(stmt)
-						? pdo_duckdb_stmt_bind_failure(stmt) : 0;
-				}
-				param->paramno = ZEND_ATOL(ZSTR_VAL(nv) + 1) - 1;
+			zval *index = zend_hash_find(&S->sql_plan->names, param->name);
+			if (!index) {
+				pdo_duckdb_error_stmt(stmt, "parameter was not defined");
+				return pdo_duckdb_stmt_is_executing(stmt)
+					? pdo_duckdb_stmt_bind_failure(stmt) : 0;
 			}
+			param->paramno = Z_LVAL_P(index);
 		}
 		return 1;
 	}
@@ -2894,7 +3307,12 @@ static int pdo_duckdb_stmt_param_hook(pdo_stmt_t *stmt, struct pdo_bound_param_d
 	/* DuckDB keeps bindings across executes; an omitted param would reuse a
 	 * stale value. */
 	if (!S->binds_cleared) {
-		duckdb_clear_bindings(S->prepared);
+		pdo_duckdb_stmt_clear_expanded_bindings(S);
+		if (S->prepared) {
+			pdo_duckdb_instance_lock(S->H);
+			duckdb_clear_bindings(S->prepared);
+			pdo_duckdb_instance_unlock(S->H);
+		}
 		S->binds_cleared = true;
 	}
 
@@ -2925,7 +3343,7 @@ static int pdo_duckdb_stmt_param_hook(pdo_stmt_t *stmt, struct pdo_bound_param_d
 				break;
 
 			case PDO_PARAM_NULL:
-				if (duckdb_bind_null(S->prepared, idx) == DuckDBSuccess) {
+				if (pdo_duckdb_stmt_bind_null(S, idx) == DuckDBSuccess) {
 					bind_ok = 1;
 				} else {
 					pdo_duckdb_error_stmt(stmt, "Failed to bind NULL parameter");
@@ -2935,19 +3353,19 @@ static int pdo_duckdb_stmt_param_hook(pdo_stmt_t *stmt, struct pdo_bound_param_d
 			case PDO_PARAM_INT:
 			case PDO_PARAM_BOOL:
 				if (Z_TYPE_P(parameter) == IS_NULL) {
-					if (duckdb_bind_null(S->prepared, idx) == DuckDBSuccess) {
+					if (pdo_duckdb_stmt_bind_null(S, idx) == DuckDBSuccess) {
 						bind_ok = 1;
 					}
 				} else if (PDO_PARAM_TYPE(param->param_type) == PDO_PARAM_BOOL) {
 					bool v = zend_is_true(parameter);
 					if (stmt->bound_params == bound_at_start && !EG(exception)
-							&& duckdb_bind_boolean(S->prepared, idx, v) == DuckDBSuccess) {
+							&& pdo_duckdb_stmt_bind_integer(S, idx, v, true) == DuckDBSuccess) {
 						bind_ok = 1;
 					}
 				} else {
 					convert_to_long(parameter);
 					if (stmt->bound_params == bound_at_start && !EG(exception)
-							&& duckdb_bind_int64(S->prepared, idx, (int64_t)Z_LVAL_P(parameter)) == DuckDBSuccess) {
+							&& pdo_duckdb_stmt_bind_integer(S, idx, (int64_t)Z_LVAL_P(parameter), false) == DuckDBSuccess) {
 						bind_ok = 1;
 					}
 				}
@@ -3011,21 +3429,25 @@ static int pdo_duckdb_stmt_param_hook(pdo_stmt_t *stmt, struct pdo_bound_param_d
 					php_stream_seek(stm, 0, SEEK_SET);
 					EG(error_reporting) = orig_reporting;
 				}
-					if (duckdb_bind_blob(S->prepared, idx, ZSTR_VAL(mem), (idx_t)ZSTR_LEN(mem)) == DuckDBSuccess) {
+					if (stmt->bound_params != bound_at_start || EG(exception)) {
+						zend_string_release(mem);
+						break;
+					}
+					if (pdo_duckdb_stmt_bind_bytes(S, idx, mem, true) == DuckDBSuccess) {
 						bind_ok = 1;
 					} else {
 						pdo_duckdb_error_stmt(stmt, "Failed to bind blob parameter");
 					}
 					zend_string_release(mem);
 				} else if (Z_TYPE_P(parameter) == IS_NULL) {
-					if (duckdb_bind_null(S->prepared, idx) == DuckDBSuccess) {
+					if (pdo_duckdb_stmt_bind_null(S, idx) == DuckDBSuccess) {
 						bind_ok = 1;
 					} else {
 						pdo_duckdb_error_stmt(stmt, "Failed to bind NULL parameter");
 					}
 				} else if (try_convert_to_string(parameter) && !EG(exception)
 						&& stmt->bound_params == bound_at_start) {
-					if (duckdb_bind_blob(S->prepared, idx, Z_STRVAL_P(parameter), (idx_t)Z_STRLEN_P(parameter)) == DuckDBSuccess) {
+					if (pdo_duckdb_stmt_bind_bytes(S, idx, Z_STR_P(parameter), true) == DuckDBSuccess) {
 						bind_ok = 1;
 					} else {
 						pdo_duckdb_error_stmt(stmt, "Failed to bind blob parameter");
@@ -3036,12 +3458,12 @@ static int pdo_duckdb_stmt_param_hook(pdo_stmt_t *stmt, struct pdo_bound_param_d
 			case PDO_PARAM_STR:
 			default:
 				if (Z_TYPE_P(parameter) == IS_NULL) {
-					if (duckdb_bind_null(S->prepared, idx) == DuckDBSuccess) {
+					if (pdo_duckdb_stmt_bind_null(S, idx) == DuckDBSuccess) {
 						bind_ok = 1;
 					}
 				} else if (try_convert_to_string(parameter) && !EG(exception)
 						&& stmt->bound_params == bound_at_start) {
-					if (duckdb_bind_varchar_length(S->prepared, idx, Z_STRVAL_P(parameter), (idx_t)Z_STRLEN_P(parameter)) == DuckDBSuccess) {
+					if (pdo_duckdb_stmt_bind_bytes(S, idx, Z_STR_P(parameter), false) == DuckDBSuccess) {
 						bind_ok = 1;
 					}
 				}
@@ -3054,6 +3476,25 @@ static int pdo_duckdb_stmt_param_hook(pdo_stmt_t *stmt, struct pdo_bound_param_d
 		zval_ptr_dtor(&tmp);
 		return bind_ok ? 1 : pdo_duckdb_stmt_bind_failure(stmt);
 	}
+}
+
+static int pdo_duckdb_stmt_set_attribute(pdo_stmt_t *stmt, zend_long attr, zval *value)
+{
+	if (attr == PDO_DUCKDB_ATTR_NATIVE_STRUCTURES) {
+		bool enabled = value && zend_is_true(value);
+		if (EG(exception)) { return 0; }
+		((pdo_duckdb_stmt *)stmt->driver_data)->native_structures = enabled;
+		return 1;
+	}
+	pdo_raise_impl_error(stmt->dbh, stmt, "IM001", "DuckDB does not support setting that statement attribute");
+	return 0;
+}
+
+static int pdo_duckdb_stmt_get_attribute(pdo_stmt_t *stmt, zend_long attr, zval *value)
+{
+	if (attr != PDO_DUCKDB_ATTR_NATIVE_STRUCTURES) { return 0; }
+	ZVAL_BOOL(value, ((pdo_duckdb_stmt *)stmt->driver_data)->native_structures);
+	return 1;
 }
 
 static int pdo_duckdb_stmt_cursor_closer(pdo_stmt_t *stmt)
@@ -3070,5 +3511,7 @@ const struct pdo_stmt_methods duckdb_stmt_methods = {
 	.get_col = pdo_duckdb_stmt_get_col,
 	.param_hook = pdo_duckdb_stmt_param_hook,
 	.get_column_meta = pdo_duckdb_stmt_col_meta,
+	.set_attribute = pdo_duckdb_stmt_set_attribute,
+	.get_attribute = pdo_duckdb_stmt_get_attribute,
 	.cursor_closer = pdo_duckdb_stmt_cursor_closer,
 };
