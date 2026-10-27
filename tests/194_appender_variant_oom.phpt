@@ -29,7 +29,7 @@ $types = ['a VARIANT,b VARIANT', 'v VARIANT[]', 's STRUCT(a VARIANT,b VARIANT)',
 $db->exec('CREATE TABLE t (' . $types[$mode] . ')');
 $app = $db->duckdbAppender('t');
 $first = (object)['payload' => str_repeat('x', 1 << 20)];
-$second = array_fill(0, 20000, 42);
+$second = array_fill(0, (int)$argv[2], 42);
 $row = match ($mode) {
     0 => [$first, $second],
     1 => [[$first, $second]],
@@ -59,21 +59,27 @@ $php = escapeshellarg(getenv('TEST_PHP_EXECUTABLE')) . ' ' . getenv('TEST_PHP_EX
 $env = getenv();
 $env['USE_ZEND_ALLOC'] = '0';
 $env['USE_TRACKED_ALLOC'] = '1';
-for ($mode = 0; $mode < 4; $mode++) {
-    $cmd = $php . ' -d display_errors=1 -r ' . escapeshellarg($child) . ' -- ' . $mode;
-    $p = proc_open($cmd, [1 => ['pipe', 'w'], 2 => ['redirect', 1]], $pipes, null, $env);
-    $output = stream_get_contents($pipes[1]);
-    fclose($pipes[1]);
-    $status = proc_close($p);
-    if ($status !== 255 || !str_contains($output, "appending\n") || !str_contains($output, 'Allowed memory size')
-        || !str_contains($output, "clean shutdown\n") || str_contains($output, 'unexpected success')) {
-        throw new Exception("mode $mode exit $status: $output");
+foreach ([20000, 200000] as $count) {
+    for ($mode = 0; $mode < 4; $mode++) {
+        $cmd = $php . ' -d display_errors=1 -r ' . escapeshellarg($child) . ' -- ' . $mode . ' ' . $count;
+        $p = proc_open($cmd, [1 => ['pipe', 'w'], 2 => ['redirect', 1]], $pipes, null, $env);
+        $output = stream_get_contents($pipes[1]);
+        fclose($pipes[1]);
+        $status = proc_close($p);
+        if ($status !== 255 || !str_contains($output, "appending\n") || !str_contains($output, 'Allowed memory size')
+            || !str_contains($output, "clean shutdown\n") || str_contains($output, 'unexpected success')) {
+            throw new Exception("mode $mode count $count exit $status: $output");
+        }
+        echo "mode $mode count $count cleanup OK\n";
     }
-    echo "mode $mode cleanup OK\n";
 }
 ?>
 --EXPECT--
-mode 0 cleanup OK
-mode 1 cleanup OK
-mode 2 cleanup OK
-mode 3 cleanup OK
+mode 0 count 20000 cleanup OK
+mode 1 count 20000 cleanup OK
+mode 2 count 20000 cleanup OK
+mode 3 count 20000 cleanup OK
+mode 0 count 200000 cleanup OK
+mode 1 count 200000 cleanup OK
+mode 2 count 200000 cleanup OK
+mode 3 count 200000 cleanup OK

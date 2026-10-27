@@ -17,6 +17,12 @@
 #include "pdo_duckdb_bridge_query.h"
 #include "pdo_duckdb_sql.h"
 
+#ifdef ZEND_HAS_OOM
+# define PDO_DUCKDB_HAS_OOM() ZEND_HAS_OOM()
+#else
+# define PDO_DUCKDB_HAS_OOM() false
+#endif
+
 /* Older PHP uses coarser type names in argument errors. */
 #if PHP_VERSION_ID < 80300
 # define zend_zval_value_name(zv) zend_zval_type_name(zv)

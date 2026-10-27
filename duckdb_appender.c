@@ -1009,6 +1009,16 @@ static duckdb_value pdo_duckdb_make_leaf(zval *z, duckdb_type tid, uint32_t argp
 
 #define PDO_DUCKDB_APPENDER_MAX_DEPTH 128
 
+static void *pdo_duckdb_appender_calloc(size_t count, size_t size)
+{
+#ifdef ZEND_HAS_OOM
+	if (count > (1U << 20) / size) {
+		return fecalloc(count, size, true);
+	}
+#endif
+	return ecalloc(count, size);
+}
+
 typedef struct {
 	HashTable *active;
 	duckdb_value value;
@@ -1029,7 +1039,7 @@ static void pdo_duckdb_variant_input_clear(pdo_duckdb_variant_input_frame *frame
 	if (frame->value) {
 		duckdb_destroy_value(&frame->value);
 	}
-	for (i = 0; i < frame->count; i++) {
+	for (i = 0; (frame->children || frame->numeric_keys) && i < frame->count; i++) {
 		if (frame->children && frame->children[i]) {
 			duckdb_destroy_value(&frame->children[i]);
 		}
@@ -1055,6 +1065,9 @@ static duckdb_value pdo_duckdb_variant_input_build(pdo_duckdb_variant_input *inp
 	idx_t i = 0;
 	duckdb_value result;
 
+	if (PDO_DUCKDB_HAS_OOM()) {
+		return NULL;
+	}
 	if (depth > PDO_DUCKDB_APPENDER_MAX_DEPTH) {
 		zend_value_error("Pdo\\Duckdb\\Appender::appendRow(): maximum nesting depth (128) exceeded");
 		return NULL;
@@ -1083,6 +1096,9 @@ static duckdb_value pdo_duckdb_variant_input_build(pdo_duckdb_variant_input *inp
 		ht = Z_ARRVAL_P(z);
 		object = !zend_array_is_list(ht);
 	}
+	if (PDO_DUCKDB_HAS_OOM()) {
+		return NULL;
+	}
 	for (int ancestor = 0; ancestor < depth; ancestor++) {
 		if (input->frames[ancestor].active == ht) {
 			zend_value_error("Pdo\\Duckdb\\Appender::appendRow(): argument #%u contains a recursive VARIANT value", argpos);
@@ -1091,15 +1107,27 @@ static duckdb_value pdo_duckdb_variant_input_build(pdo_duckdb_variant_input *inp
 	}
 	frame->active = ht;
 	frame->count = zend_hash_num_elements(ht);
-	frame->children = ecalloc(frame->count ? frame->count : 1, sizeof(*frame->children));
+	frame->children = pdo_duckdb_appender_calloc(frame->count ? frame->count : 1, sizeof(*frame->children));
+	if (!frame->children || PDO_DUCKDB_HAS_OOM()) {
+		return NULL;
+	}
 	if (object) {
-		frame->keys = ecalloc(frame->count ? frame->count : 1, sizeof(*frame->keys));
-		frame->numeric_keys = ecalloc(frame->count ? frame->count : 1, sizeof(*frame->numeric_keys));
+		frame->keys = pdo_duckdb_appender_calloc(frame->count ? frame->count : 1, sizeof(*frame->keys));
+		if (!frame->keys || PDO_DUCKDB_HAS_OOM()) {
+			return NULL;
+		}
+		frame->numeric_keys = pdo_duckdb_appender_calloc(frame->count ? frame->count : 1, sizeof(*frame->numeric_keys));
+		if (!frame->numeric_keys || PDO_DUCKDB_HAS_OOM()) {
+			return NULL;
+		}
 	}
 	ZEND_HASH_FOREACH_KEY_VAL(ht, index, key, child) {
 		if (object) {
 			if (!key) {
 				frame->numeric_keys[i] = zend_long_to_str((zend_long)index);
+				if (PDO_DUCKDB_HAS_OOM()) {
+					return NULL;
+				}
 				key = frame->numeric_keys[i];
 			}
 			frame->keys[i].data = ZSTR_VAL(key);
@@ -1172,6 +1200,9 @@ static duckdb_value pdo_duckdb_build_value_impl(zval *z, const pdo_duckdb_nested
 	duckdb_type tid = t->type;
 	HashTable *ht;
 
+	if (PDO_DUCKDB_HAS_OOM()) {
+		return NULL;
+	}
 	if (depth > PDO_DUCKDB_APPENDER_MAX_DEPTH) {
 		zend_throw_exception_ex(php_pdo_get_exception(), 0,
 			"Pdo\\Duckdb\\Appender::appendRow(): maximum nesting depth (128) exceeded");
@@ -1227,12 +1258,15 @@ static duckdb_value pdo_duckdb_build_value_impl(zval *z, const pdo_duckdb_nested
 			/* create_list_value rejects a NULL values pointer, even for an empty
 			 * list. */
 			input->count = n;
-			duckdb_value *vals = input->values = ecalloc(n ? n : 1, sizeof(duckdb_value));
+			duckdb_value *vals = input->values = pdo_duckdb_appender_calloc(n ? n : 1, sizeof(duckdb_value));
 			idx_t built = 0;
 			duckdb_value ret = NULL;
 			bool ok = true;
 			zval *elem;
 
+			if (!vals || PDO_DUCKDB_HAS_OOM()) {
+				return NULL;
+			}
 			if (tid == DUCKDB_TYPE_ARRAY) {
 				idx_t want = t->array_size;
 				if (n != want) {
@@ -1280,7 +1314,10 @@ static duckdb_value pdo_duckdb_build_value_impl(zval *z, const pdo_duckdb_nested
 				return NULL;
 			}
 			input->count = cnt;
-			vals = input->values = ecalloc(cnt ? cnt : 1, sizeof(duckdb_value));
+			vals = input->values = pdo_duckdb_appender_calloc(cnt ? cnt : 1, sizeof(duckdb_value));
+			if (!vals || PDO_DUCKDB_HAS_OOM()) {
+				return NULL;
+			}
 
 			for (i = 0; i < cnt; i++) {
 				const pdd_bridge_bytes *name = &desc->names[i];
@@ -1311,8 +1348,8 @@ static duckdb_value pdo_duckdb_build_value_impl(zval *z, const pdo_duckdb_nested
 		case DUCKDB_TYPE_MAP: {
 			idx_t n = zend_hash_num_elements(ht);
 			input->count = n;
-			duckdb_value *keys = input->keys = ecalloc(n ? n : 1, sizeof(duckdb_value));
-			duckdb_value *vals = input->values = ecalloc(n ? n : 1, sizeof(duckdb_value));
+			duckdb_value *keys = input->keys = pdo_duckdb_appender_calloc(n ? n : 1, sizeof(duckdb_value));
+			duckdb_value *vals;
 			idx_t built = 0;
 			duckdb_value ret = NULL;
 			bool ok = true;
@@ -1320,6 +1357,13 @@ static duckdb_value pdo_duckdb_build_value_impl(zval *z, const pdo_duckdb_nested
 			zend_ulong nkey;
 			zval *val;
 
+			if (!keys || PDO_DUCKDB_HAS_OOM()) {
+				return NULL;
+			}
+			vals = input->values = pdo_duckdb_appender_calloc(n ? n : 1, sizeof(duckdb_value));
+			if (!vals || PDO_DUCKDB_HAS_OOM()) {
+				return NULL;
+			}
 			ZEND_HASH_FOREACH_KEY_VAL(ht, nkey, skey, val) {
 				duckdb_value kv, vv;
 				zval ztmp;
@@ -1410,6 +1454,9 @@ static bool pdo_duckdb_appender_append_row(pdo_duckdb_appender *a, zval *args, u
 	duckdb_value *built = NULL;
 	uint32_t i;
 
+	if (PDO_DUCKDB_HAS_OOM()) {
+		return false;
+	}
 	for (i = 0; i < argc; i++) {
 		zval *v = &args[i];
 		ZVAL_DEREF(v);
@@ -1469,8 +1516,11 @@ static bool pdo_duckdb_appender_append_row(pdo_duckdb_appender *a, zval *args, u
 			case IS_ARRAY:
 			case IS_OBJECT:
 				if (!built) {
-					built = ecalloc(argc, sizeof(duckdb_value));
+					built = pdo_duckdb_appender_calloc(argc, sizeof(duckdb_value));
 					*built_out = built;
+					if (!built || PDO_DUCKDB_HAS_OOM()) {
+						return false;
+					}
 				}
 				built[i] = pdo_duckdb_build_value(v, a->col_desc[i], i + 1, 0);
 				if (!built[i]) {
@@ -1484,7 +1534,11 @@ static bool pdo_duckdb_appender_append_row(pdo_duckdb_appender *a, zval *args, u
 		}
 	}
 
-	if (!pdo_duckdb_appender_enter(a->H)) {
+	if (PDO_DUCKDB_HAS_OOM() || !pdo_duckdb_appender_enter(a->H)) {
+		return false;
+	}
+	if (PDO_DUCKDB_HAS_OOM()) {
+		pdo_duckdb_instance_unlock(a->H);
 		return false;
 	}
 	for (i = 0; i < argc; i++) {
@@ -1548,6 +1602,9 @@ ZEND_METHOD(Pdo_Duckdb_Appender, appendRow)
 		Z_PARAM_VARIADIC('*', args, argc)
 	ZEND_PARSE_PARAMETERS_END();
 
+	if (PDO_DUCKDB_HAS_OOM()) {
+		RETURN_NULL();
+	}
 	a = pdo_duckdb_appender_live(ZEND_THIS);
 	if (!a) {
 		RETURN_THROWS();
@@ -1572,6 +1629,9 @@ ZEND_METHOD(Pdo_Duckdb_Appender, appendRow)
 	} zend_end_try();
 	pdo_duckdb_appender_row_values_free(built, argc);
 	if (!ok) {
+		if (PDO_DUCKDB_HAS_OOM()) {
+			RETURN_NULL();
+		}
 		RETURN_THROWS();
 	}
 	RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
