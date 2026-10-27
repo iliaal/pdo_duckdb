@@ -1571,17 +1571,37 @@ static bool pdo_duckdb_fast_col_to_string(duckdb_type tid, duckdb_logical_type l
 	}
 }
 
+static zend_always_inline void pdo_duckdb_smart_appendl(smart_str *out, const char *text, size_t length)
+{
+	if (PDO_DUCKDB_HAS_OOM()) return;
+#ifdef ZEND_HAS_OOM
+	smart_str_fappendl_ex(out, text, length, false, true);
+#else
+	smart_str_appendl(out, text, length);
+#endif
+}
+
+static zend_always_inline void pdo_duckdb_smart_appendc(smart_str *out, char value)
+{
+	pdo_duckdb_smart_appendl(out, &value, 1);
+}
+
+static zend_always_inline void pdo_duckdb_smart_appends(smart_str *out, const char *text)
+{
+	pdo_duckdb_smart_appendl(out, text, strlen(text));
+}
+
 static void pdo_duckdb_smart_append_u64(smart_str *out, uint64_t value)
 {
 	char digits[40];
 	size_t len = pdo_duckdb_format_u128(0, value, digits);
-	smart_str_appendl(out, digits, len);
+	pdo_duckdb_smart_appendl(out, digits, len);
 }
 
 static void pdo_duckdb_smart_append_i64(smart_str *out, int64_t value)
 {
 	if (value < 0) {
-		smart_str_appendc(out, '-');
+		pdo_duckdb_smart_appendc(out, '-');
 		pdo_duckdb_smart_append_u64(out, pdo_duckdb_abs_i64(value));
 	} else {
 		pdo_duckdb_smart_append_u64(out, (uint64_t)value);
@@ -1643,21 +1663,21 @@ static void pdo_duckdb_smart_append_escaped_varchar(smart_str *out, const char *
 	size_t i;
 
 	if (len == 0) {
-		smart_str_appends(out, "''");
+		pdo_duckdb_smart_appends(out, "''");
 		return;
 	}
 	if (!pdo_duckdb_nested_varchar_needs_quotes(p, len)) {
-		smart_str_appendl(out, p, len);
+		pdo_duckdb_smart_appendl(out, p, len);
 		return;
 	}
-	smart_str_appendc(out, '\'');
-	for (i = 0; i < len; i++) {
+	pdo_duckdb_smart_appendc(out, '\'');
+	for (i = 0; i < len && !PDO_DUCKDB_HAS_OOM(); i++) {
 		if (p[i] == '\'' || p[i] == '\\') {
-			smart_str_appendc(out, '\\');
+			pdo_duckdb_smart_appendc(out, '\\');
 		}
-		smart_str_appendc(out, p[i]);
+		pdo_duckdb_smart_appendc(out, p[i]);
 	}
-	smart_str_appendc(out, '\'');
+	pdo_duckdb_smart_appendc(out, '\'');
 }
 
 /* Use DuckDB's scalar renderer to preserve its exact float formatting. */
@@ -1672,7 +1692,13 @@ static bool pdo_duckdb_nested_float_to_smart_str(duckdb_type tid, void *data, id
 		duckdb_destroy_value(&v);
 		return false;
 	}
-	smart_str_appends(out, s);
+	zend_try {
+		pdo_duckdb_smart_appends(out, s);
+	} zend_catch {
+		duckdb_free(s);
+		duckdb_destroy_value(&v);
+		zend_bailout();
+	} zend_end_try();
 	duckdb_free(s);
 	duckdb_destroy_value(&v);
 	return true;
@@ -1684,10 +1710,10 @@ static bool pdo_duckdb_smart_append_fast_scalar(duckdb_type tid, duckdb_logical_
 
 	switch (tid) {
 		case DUCKDB_TYPE_SQLNULL:
-			smart_str_appends(out, "NULL");
+			pdo_duckdb_smart_appends(out, "NULL");
 			return true;
 		case DUCKDB_TYPE_BOOLEAN:
-			smart_str_appends(out, ((bool *)data)[row] ? "true" : "false");
+			pdo_duckdb_smart_appends(out, ((bool *)data)[row] ? "true" : "false");
 			return true;
 		case DUCKDB_TYPE_TINYINT:
 			pdo_duckdb_smart_append_i64(out, ((int8_t *)data)[row]);
@@ -1735,7 +1761,7 @@ static bool pdo_duckdb_smart_append_fast_scalar(duckdb_type tid, duckdb_logical_
 					|| tid == DUCKDB_TYPE_TIME)) {
 				pdo_duckdb_smart_append_escaped_varchar(out, Z_STRVAL(tmp), Z_STRLEN(tmp));
 			} else {
-				smart_str_appendl(out, Z_STRVAL(tmp), Z_STRLEN(tmp));
+				pdo_duckdb_smart_appendl(out, Z_STRVAL(tmp), Z_STRLEN(tmp));
 			}
 			zval_ptr_dtor(&tmp);
 			return true;
@@ -1747,7 +1773,7 @@ static bool pdo_duckdb_smart_append_fast_scalar(duckdb_type tid, duckdb_logical_
 			if (escape_varchar) {
 				pdo_duckdb_smart_append_escaped_varchar(out, p, len);
 			} else {
-				smart_str_appendl(out, p, len);
+				pdo_duckdb_smart_appendl(out, p, len);
 			}
 			return true;
 		}
@@ -1996,8 +2022,10 @@ static bool pdo_duckdb_fast_nested_cell_to_smart_str(duckdb_vector vec, idx_t ro
 	uint64_t *validity = duckdb_vector_get_validity(vec);
 	void *data;
 
+	if (PDO_DUCKDB_HAS_OOM()) return false;
+
 	if (validity && !duckdb_validity_row_is_valid(validity, row)) {
-		smart_str_appends(out, "NULL");
+		pdo_duckdb_smart_appends(out, "NULL");
 		return true;
 	}
 
@@ -2014,17 +2042,17 @@ static bool pdo_duckdb_fast_nested_cell_to_smart_str(duckdb_vector vec, idx_t ro
 				return false;
 			}
 
-			smart_str_appendc(out, '[');
+			pdo_duckdb_smart_appendc(out, '[');
 			for (i = 0; i < e.length; i++) {
 				if (i) {
-					smart_str_appends(out, ", ");
+					pdo_duckdb_smart_appends(out, ", ");
 				}
 				if (!pdo_duckdb_fast_nested_cell_to_smart_str(
 						child, e.offset + i, type->children[0], out, true)) {
 					return false;
 				}
 			}
-			smart_str_appendc(out, ']');
+			pdo_duckdb_smart_appendc(out, ']');
 			return true;
 		}
 		case DUCKDB_TYPE_ARRAY: {
@@ -2043,38 +2071,38 @@ static bool pdo_duckdb_fast_nested_cell_to_smart_str(duckdb_vector vec, idx_t ro
 			}
 
 			base = row * n;
-			smart_str_appendc(out, '[');
+			pdo_duckdb_smart_appendc(out, '[');
 			for (i = 0; i < n; i++) {
 				if (i) {
-					smart_str_appends(out, ", ");
+					pdo_duckdb_smart_appends(out, ", ");
 				}
 				if (!pdo_duckdb_fast_nested_cell_to_smart_str(
 						child, base + i, type->children[0], out, escape_children)) {
 					return false;
 				}
 			}
-			smart_str_appendc(out, ']');
+			pdo_duckdb_smart_appendc(out, ']');
 			return true;
 		}
 		case DUCKDB_TYPE_STRUCT: {
 			idx_t i;
 
-			smart_str_appendc(out, '{');
+			pdo_duckdb_smart_appendc(out, '{');
 			for (i = 0; i < type->child_count; i++) {
 				duckdb_vector child = duckdb_struct_vector_get_child(vec, i);
 
 				if (i) {
-					smart_str_appends(out, ", ");
+					pdo_duckdb_smart_appends(out, ", ");
 				}
-				smart_str_appendc(out, '\'');
-				smart_str_appends(out, type->child_names[i]);
-				smart_str_appends(out, "': ");
+				pdo_duckdb_smart_appendc(out, '\'');
+				pdo_duckdb_smart_appends(out, type->child_names[i]);
+				pdo_duckdb_smart_appends(out, "': ");
 				if (!pdo_duckdb_fast_nested_cell_to_smart_str(
 						child, row, type->children[i], out, true)) {
 					return false;
 				}
 			}
-			smart_str_appendc(out, '}');
+			pdo_duckdb_smart_appendc(out, '}');
 			return true;
 		}
 		case DUCKDB_TYPE_MAP: {
@@ -2091,22 +2119,22 @@ static bool pdo_duckdb_fast_nested_cell_to_smart_str(duckdb_vector vec, idx_t ro
 			kvec = duckdb_struct_vector_get_child(entries, 0);
 			vvec = duckdb_struct_vector_get_child(entries, 1);
 
-			smart_str_appendc(out, '{');
+			pdo_duckdb_smart_appendc(out, '{');
 			for (i = 0; i < e.length; i++) {
 				if (i) {
-					smart_str_appends(out, ", ");
+					pdo_duckdb_smart_appends(out, ", ");
 				}
 				if (!pdo_duckdb_fast_nested_cell_to_smart_str(
 						kvec, e.offset + i, type->children[0], out, true)) {
 					return false;
 				}
-				smart_str_appendc(out, '=');
+				pdo_duckdb_smart_appendc(out, '=');
 				if (!pdo_duckdb_fast_nested_cell_to_smart_str(
 						vvec, e.offset + i, type->children[1], out, true)) {
 					return false;
 				}
 			}
-			smart_str_appendc(out, '}');
+			pdo_duckdb_smart_appendc(out, '}');
 			return true;
 		}
 		case DUCKDB_TYPE_UNION: {
@@ -2145,7 +2173,8 @@ static bool pdo_duckdb_fast_nested_col_to_string(duckdb_vector vec, idx_t row,
 			return false;
 	}
 
-	if (!pdo_duckdb_fast_nested_cell_to_smart_str(vec, row, type, &out, true)) {
+	if (!pdo_duckdb_fast_nested_cell_to_smart_str(vec, row, type, &out, true)
+			|| PDO_DUCKDB_HAS_OOM()) {
 		smart_str_free(&out);
 		return false;
 	}
@@ -2669,6 +2698,7 @@ static int pdo_duckdb_stmt_fetched_row(pdo_stmt_t *stmt)
 #endif
 	}
 	for (idx_t c = 0; c < S->col_count; c++) {
+		if (PDO_DUCKDB_HAS_OOM()) goto failed;
 		bool canonical = S->col_types[c] == DUCKDB_TYPE_LIST || S->col_types[c] == DUCKDB_TYPE_ARRAY
 			|| S->col_types[c] == DUCKDB_TYPE_STRUCT || S->col_types[c] == DUCKDB_TYPE_MAP
 			|| S->col_types[c] == DUCKDB_TYPE_UNION || S->col_types[c] == DUCKDB_TYPE_VARIANT
@@ -2712,9 +2742,15 @@ static int pdo_duckdb_stmt_fetched_row(pdo_stmt_t *stmt)
 			goto failed;
 		}
 	}
+	if (PDO_DUCKDB_HAS_OOM()) goto failed;
 	return 1;
 
 failed:
+	if (PDO_DUCKDB_HAS_OOM()) {
+		if (error) { zend_string_release(error); }
+		pdo_duckdb_stmt_clear_converted_row(S, false);
+		return 0;
+	}
 	zend_try {
 		pdo_duckdb_error_stmt_code(stmt, PDO_DUCKDB_ERRCODE_STREAMING,
 			error ? ZSTR_VAL(error) : "Unable to convert DuckDB row");
@@ -3114,20 +3150,31 @@ static int pdo_duckdb_stmt_col_meta(pdo_stmt_t *stmt, zend_long colno, zval *ret
 
 	zend_try {
 		array_init(return_value);
-		add_assoc_stringl(return_value, "duckdb:decl_type", declaration.data, declaration.length);
-		zval *items = zend_hash_str_add_empty_element(Z_ARRVAL_P(return_value),
-			"duckdb:type_annotations", sizeof("duckdb:type_annotations") - 1);
-		array_init(items);
-		for (idx_t i = 0; i < annotations.count; i++) {
-			const pdd_bridge_type_annotation *annotation = &annotations.entries[i];
-			zval *entry = zend_hash_index_add_empty_element(Z_ARRVAL_P(items), (zend_ulong)i);
-			array_init(entry);
-			zval *path = zend_hash_str_add_empty_element(Z_ARRVAL_P(entry), "path", sizeof("path") - 1);
-			array_init(path);
-			for (idx_t j = 0; j < annotation->path_length; j++) {
-				add_next_index_long(path, (zend_long)annotation->path[j]);
+		zval *decl = zend_hash_str_add_empty_element(Z_ARRVAL_P(return_value),
+			"duckdb:decl_type", sizeof("duckdb:decl_type") - 1);
+#ifdef ZEND_HAS_OOM
+		zend_string *text = zend_string_finit(declaration.data, declaration.length, false, true);
+		if (text) ZVAL_STR(decl, text);
+#else
+		ZVAL_STRINGL(decl, declaration.data, declaration.length);
+#endif
+		if (!PDO_DUCKDB_HAS_OOM()) {
+			zval *items = zend_hash_str_add_empty_element(Z_ARRVAL_P(return_value),
+				"duckdb:type_annotations", sizeof("duckdb:type_annotations") - 1);
+			array_init(items);
+			for (idx_t i = 0; i < annotations.count && !PDO_DUCKDB_HAS_OOM(); i++) {
+				const pdd_bridge_type_annotation *annotation = &annotations.entries[i];
+				zval *entry = zend_hash_index_add_empty_element(Z_ARRVAL_P(items), (zend_ulong)i);
+				array_init(entry);
+				zval *path = zend_hash_str_add_empty_element(Z_ARRVAL_P(entry), "path", sizeof("path") - 1);
+				array_init(path);
+				for (idx_t j = 0; j < annotation->path_length && !PDO_DUCKDB_HAS_OOM(); j++) {
+					add_next_index_long(path, (zend_long)annotation->path[j]);
+				}
+				if (!PDO_DUCKDB_HAS_OOM()) {
+					add_assoc_stringl(entry, "collation", annotation->collation.data, annotation->collation.length);
+				}
 			}
-			add_assoc_stringl(entry, "collation", annotation->collation.data, annotation->collation.length);
 		}
 	} zend_catch {
 		pdd_bridge_bytes_free(&declaration);
@@ -3136,6 +3183,7 @@ static int pdo_duckdb_stmt_col_meta(pdo_stmt_t *stmt, zend_long colno, zval *ret
 	} zend_end_try();
 	pdd_bridge_bytes_free(&declaration);
 	pdd_bridge_annotations_free(&annotations);
+	if (PDO_DUCKDB_HAS_OOM()) goto oom;
 	add_assoc_string(return_value, "native_type", (char *)pdo_duckdb_type_name(tid));
 
 	switch (tid) {
@@ -3173,7 +3221,13 @@ static int pdo_duckdb_stmt_col_meta(pdo_stmt_t *stmt, zend_long colno, zval *ret
 		add_assoc_long(return_value, "scale", duckdb_decimal_scale(lt));
 	}
 
+	if (PDO_DUCKDB_HAS_OOM()) goto oom;
 	return SUCCESS;
+
+oom:
+	zval_ptr_dtor(return_value);
+	ZVAL_UNDEF(return_value);
+	return FAILURE;
 }
 
 static int pdo_duckdb_stmt_bind_failure(pdo_stmt_t *stmt)

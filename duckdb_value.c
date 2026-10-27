@@ -33,6 +33,33 @@ typedef struct {
 	size_t position;
 } pdo_duckdb_json_input;
 
+static bool pdo_duckdb_value_has_oom(void)
+{
+#ifdef ZEND_HAS_OOM
+	return ZEND_HAS_OOM();
+#else
+	return false;
+#endif
+}
+
+static zend_string *pdo_duckdb_value_string_init(const char *data, size_t length)
+{
+	if (pdo_duckdb_value_has_oom()) return NULL;
+#ifdef ZEND_HAS_OOM
+	return zend_string_finit(data, length, false, true);
+#else
+	return zend_string_init(data, length, 0);
+#endif
+}
+
+static zend_result pdo_duckdb_value_set_string(zval *out, const char *data, size_t length)
+{
+	zend_string *value = pdo_duckdb_value_string_init(data, length);
+	if (!value) return FAILURE;
+	ZVAL_STR(out, value);
+	return SUCCESS;
+}
+
 static void pdo_duckdb_value_frame_clear(pdo_duckdb_value_frame *frame)
 {
 	if (frame->type) duckdb_destroy_logical_type(&frame->type);
@@ -64,6 +91,7 @@ static zend_result pdo_duckdb_value_fail(pdo_duckdb_value_context *context, cons
 
 static zend_result pdo_duckdb_value_depth(pdo_duckdb_value_context *context, unsigned depth)
 {
+	if (pdo_duckdb_value_has_oom()) return FAILURE;
 	return depth < PDO_DUCKDB_VALUE_DEPTH ? SUCCESS :
 		pdo_duckdb_value_fail(context, "DuckDB value exceeds the maximum nesting depth (128)");
 }
@@ -77,15 +105,21 @@ static zend_result pdo_duckdb_value_count(pdo_duckdb_value_context *context, idx
 static void pdo_duckdb_value_hash_insert(HashTable *table, const char *name, size_t length, zval *value)
 {
 	/* Allocating the key before insertion keeps the array destroyable after OOM. */
-	zend_string *key = zend_string_init(name, length, 0);
+	zend_string *key = pdo_duckdb_value_string_init(name, length);
+	if (!key) return;
+	bool inserted = true;
 	zend_try {
+#ifdef ZEND_HAS_OOM
+		inserted = zend_symtable_fupdate(table, key, value) != HASH_NOMEM;
+#else
 		zend_symtable_update(table, key, value);
+#endif
 	} zend_catch {
 		zend_string_release(key);
 		zend_bailout();
 	} zend_end_try();
 	zend_string_release(key);
-	ZVAL_UNDEF(value);
+	if (inserted) ZVAL_UNDEF(value);
 }
 
 static void pdo_duckdb_value_insert(zval *array, const char *name, size_t length, zval *value)
@@ -97,18 +131,24 @@ static void pdo_duckdb_value_insert_string(zval *array, const char *name, size_t
 		const char *data, size_t length)
 {
 	zval value;
-	ZVAL_STRINGL(&value, data, length);
+	if (pdo_duckdb_value_set_string(&value, data, length) == FAILURE) return;
 	zend_try {
 		pdo_duckdb_value_insert(array, name, name_length, &value);
 	} zend_catch {
 		zval_ptr_dtor(&value);
 		zend_bailout();
 	} zend_end_try();
+	if (!Z_ISUNDEF(value)) zval_ptr_dtor(&value);
 }
 
 static void pdo_duckdb_value_append(zval *array, zval *value)
 {
+	if (pdo_duckdb_value_has_oom()) return;
+#ifdef ZEND_HAS_OOM
+	if (zend_hash_next_index_finsert(Z_ARRVAL_P(array), value) == HASH_NOMEM) return;
+#else
 	zend_hash_next_index_insert(Z_ARRVAL_P(array), value);
+#endif
 	ZVAL_UNDEF(value);
 }
 
@@ -127,7 +167,7 @@ static zend_result pdo_duckdb_value_string(pdo_duckdb_value_context *context,
 	if (is_null) {
 		ZVAL_NULL(out);
 	} else {
-		ZVAL_STRINGL(out, frame->bytes[1].data, frame->bytes[1].length);
+		return pdo_duckdb_value_set_string(out, frame->bytes[1].data, frame->bytes[1].length);
 	}
 	return SUCCESS;
 }
@@ -136,7 +176,13 @@ static zend_result pdo_duckdb_value_geometry(pdo_duckdb_value_context *context,
 		const unsigned char *data, size_t length, zval *out)
 {
 	if (length > ZSTR_MAX_LEN / 2) return pdo_duckdb_value_fail(context, "DuckDB geometry exceeds PHP's string size limit");
+	if (pdo_duckdb_value_has_oom()) return FAILURE;
+#ifdef ZEND_HAS_OOM
+	zend_string *text = zend_string_falloc(length * 2, false, true);
+	if (!text) return FAILURE;
+#else
 	zend_string *text = zend_string_alloc(length * 2, 0);
+#endif
 	ZVAL_STR(out, text);
 	static const char hex[] = "0123456789ABCDEF";
 	for (size_t i = 0; i < length; i++) {
@@ -177,8 +223,7 @@ static zend_result pdo_duckdb_value_scalar(pdo_duckdb_value_context *context,
 		case DUCKDB_TYPE_VARCHAR:
 		case DUCKDB_TYPE_BLOB:
 			if (pdd_bridge_value_string(frame->value, &frame->bytes[1], &context->error) != PDD_BRIDGE_OK) return FAILURE;
-			ZVAL_STRINGL(out, frame->bytes[1].data, frame->bytes[1].length);
-			return SUCCESS;
+			return pdo_duckdb_value_set_string(out, frame->bytes[1].data, frame->bytes[1].length);
 		case DUCKDB_TYPE_GEOMETRY:
 			if (pdd_bridge_value_string(frame->value, &frame->bytes[1], &context->error) != PDD_BRIDGE_OK) return FAILURE;
 			return pdo_duckdb_value_geometry(context, (const unsigned char *)frame->bytes[1].data, frame->bytes[1].length, out);
@@ -229,7 +274,8 @@ static zend_result pdo_duckdb_json_string(pdo_duckdb_value_context *context,
 			input->position++;
 		} else if (c == '"') {
 			/* PHP's JSON scanner requires a NUL sentinel after this token. */
-			zend_string *token = zend_string_init(input->data + start, input->position - start, 0);
+			zend_string *token = pdo_duckdb_value_string_init(input->data + start, input->position - start);
+			if (!token) return FAILURE;
 			zend_result status;
 			zend_try {
 				status = php_json_decode_ex(out, ZSTR_VAL(token), ZSTR_LEN(token), 0, 2);
@@ -387,7 +433,7 @@ static zend_result pdo_duckdb_json_node(pdo_duckdb_value_context *context,
 	if (pdo_duckdb_value_depth(context, depth) == FAILURE) return FAILURE;
 	zend_result status = pdo_duckdb_json_node_impl(context, input, depth, out);
 	pdo_duckdb_value_frame_clear(&context->frames[depth]);
-	return status;
+	return pdo_duckdb_value_has_oom() ? FAILURE : status;
 }
 
 static zend_result pdo_duckdb_variant_native(pdo_duckdb_value_context *context,
@@ -449,7 +495,7 @@ static zend_result pdo_duckdb_variant_native(pdo_duckdb_value_context *context,
 	if (pdo_duckdb_value_depth(context, depth) == FAILURE) return FAILURE;
 	zend_result status = pdo_duckdb_variant_native_impl(context, node, depth, out);
 	pdo_duckdb_value_frame_clear(&context->frames[depth]);
-	return status;
+	return pdo_duckdb_value_has_oom() ? FAILURE : status;
 }
 
 static zend_result pdo_duckdb_value_native_at(pdo_duckdb_value_context *context, duckdb_vector vector,
@@ -573,7 +619,7 @@ static zend_result pdo_duckdb_value_native_at(pdo_duckdb_value_context *context,
 	if (pdo_duckdb_value_depth(context, depth) == FAILURE) return FAILURE;
 	zend_result status = pdo_duckdb_value_native_impl(context, vector, row, row_count, depth, out);
 	pdo_duckdb_value_frame_clear(&context->frames[depth]);
-	return status;
+	return pdo_duckdb_value_has_oom() ? FAILURE : status;
 }
 
 static zend_result pdo_duckdb_value_wrap_column(pdo_duckdb_value_context *context,
@@ -616,7 +662,7 @@ static zend_result pdo_duckdb_value_wrap_column(pdo_duckdb_value_context *contex
 		ZVAL_UNDEF(value);
 	} else {
 		if (pdd_bridge_type_declaration(frame->type, &frame->bytes[0], &context->error) != PDD_BRIDGE_OK) return FAILURE;
-		ZVAL_STRINGL(&frame->key, frame->bytes[0].data, frame->bytes[0].length);
+		if (pdo_duckdb_value_set_string(&frame->key, frame->bytes[0].data, frame->bytes[0].length) == FAILURE) return FAILURE;
 		ZVAL_COPY_VALUE(&frame->item, &frame->payload);
 		ZVAL_UNDEF(&frame->payload);
 	}
@@ -632,6 +678,7 @@ static zend_result pdo_duckdb_value_convert(duckdb_vector vector, idx_t row, idx
 {
 	ZVAL_UNDEF(out);
 	*error = NULL;
+	if (pdo_duckdb_value_has_oom()) return FAILURE;
 	pdo_duckdb_value_context *context = calloc(1, sizeof(*context));
 	if (!context) {
 		*error = zend_string_init("Unable to allocate DuckDB value conversion state", sizeof("Unable to allocate DuckDB value conversion state") - 1, 0);
@@ -648,7 +695,8 @@ static zend_result pdo_duckdb_value_convert(duckdb_vector vector, idx_t row, idx
 				status = pdo_duckdb_value_string(context, frame, out);
 			}
 		}
-		if (status == FAILURE) {
+		if (pdo_duckdb_value_has_oom()) status = FAILURE;
+		if (status == FAILURE && !pdo_duckdb_value_has_oom()) {
 			const char *message = context->error.data ? context->error.data : context->message;
 			size_t length = context->error.data ? context->error.length : (message ? strlen(message) : 0);
 			if (!message) {
