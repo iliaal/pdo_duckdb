@@ -153,23 +153,28 @@ jobs:
           for header in duckdb.h duckdb_v2.h duckdb_extension.h duckdb_extension_v2.h duckdb_static_extension.h; do
             test -r "duckdb-static/$header"
           done
-      - name: Set up the Linux image builder
+      - name: Cache Linux toolchain layers
         if: runner.os == 'Linux'
-        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/pdo-duckdb-buildx-cache
+          key: duckdb-toolchain-${{ matrix.platform }}-${{ matrix.image-key }}-${{ hashFiles('scripts/Dockerfile.binary-*') }}
       - name: Build the cached Linux toolchain image
         if: runner.os == 'Linux'
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
-        env:
-          DOCKER_BUILD_RECORD_UPLOAD: 'false'
-        with:
-          context: scripts
-          file: scripts/Dockerfile.binary-${{ matrix.libc }}
-          build-args: PHP_IMAGE=${{ matrix.image }}
-          tags: pdo-duckdb-builder
-          load: true
-          push: false
-          cache-from: type=gha,scope=duckdb-toolchain-${{ matrix.platform }}-${{ matrix.image-key }}
-          cache-to: type=gha,scope=duckdb-toolchain-${{ matrix.platform }}-${{ matrix.image-key }},mode=max
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker buildx create --name pdo-duckdb-toolchain --driver docker-container
+          trap 'docker buildx rm pdo-duckdb-toolchain' EXIT
+          cache_args=()
+          if [ -f "$RUNNER_TEMP/pdo-duckdb-buildx-cache/index.json" ]; then
+            cache_args+=(--cache-from "type=local,src=$RUNNER_TEMP/pdo-duckdb-buildx-cache")
+          fi
+          docker buildx build --builder pdo-duckdb-toolchain --load \
+            --build-arg "PHP_IMAGE=$PHP_BASELINE_IMAGE" \
+            --file "scripts/Dockerfile.binary-$TARGET_LIBC" \
+            --tag pdo-duckdb-builder "${cache_args[@]}" \
+            --cache-to "type=local,dest=$RUNNER_TEMP/pdo-duckdb-buildx-cache,mode=max" scripts
       - name: Cache exact PHP development runtime
         if: matrix.source-build
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
