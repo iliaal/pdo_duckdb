@@ -624,6 +624,15 @@ jobs:
           import json
           import pathlib
           import shutil
+          import subprocess
+          php = shutil.which('php')
+          if php is None:
+              raise SystemExit('PHP executable is unavailable')
+          command = [php, '-n']
+          pdo_probe = ['-r', 'exit(extension_loaded("PDO") ? 0 : 1);']
+          if subprocess.run(command + pdo_probe, check=False).returncode != 0:
+              command += ['-d', 'extension=pdo']
+          subprocess.run(command + pdo_probe, check=True)
           runners = {}
           for version in ('1.5.3', '1.5.6', '2.0.0'):
               root = pathlib.Path('storage-modules', version).resolve()
@@ -632,7 +641,7 @@ jobs:
               if not module.is_file() or not library.is_file():
                   raise SystemExit(f'Missing runtime artifact for {version}')
               runners[version] = {
-                  'command': [shutil.which('php'), '-n', '-d', f'extension={module}'],
+                  'command': command + ['-d', f'extension={module}'],
                   'env': {'LD_LIBRARY_PATH': str(library.parent)},
               }
           pathlib.Path('storage-runners.json').write_text(json.dumps(runners))
