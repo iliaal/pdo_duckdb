@@ -124,7 +124,7 @@ jobs:
         env:
           ENGINE_SHA256: ${{ needs.prepare.outputs.duckdb-sha256 }}
           SOURCE_CACHE_KEY: ${{ steps.bridge.outputs.cache-key }}
-          BRIDGE_BUILD_HASH: ${{ hashFiles('pdo_duckdb_bridge*', 'duckdb_static_extensions.*', 'scripts/build-windows-duckdb.ps1', 'scripts/windows-duckdb-source/CMakeLists.txt', 'config.w32') }}
+          BRIDGE_BUILD_HASH: ${{ hashFiles('pdo_duckdb_bridge*', 'duckdb_static_extensions.*', 'scripts/build-windows-duckdb.ps1', 'scripts/windows-duckdb-source/CMakeLists.txt') }}
         run: |
           $ErrorActionPreference = 'Stop'
           $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
