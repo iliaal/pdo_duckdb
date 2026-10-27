@@ -148,10 +148,10 @@ jobs:
           checksum=$(awk -v asset="$DUCKDB_ASSET" '$2 == asset { print $0 }' .github/duckdb-sha256.txt)
           test "$(printf '%s\n' "$checksum" | wc -l)" -eq 1
           printf '%s\n' "$checksum" | shasum -a 256 --check --strict -
-          mkdir duckdb-static
-          tar -xzf "$DUCKDB_ASSET" -C duckdb-static
+          mkdir "$RUNNER_TEMP/duckdb-static"
+          tar -xzf "$DUCKDB_ASSET" -C "$RUNNER_TEMP/duckdb-static"
           for header in duckdb.h duckdb_v2.h duckdb_extension.h duckdb_extension_v2.h duckdb_static_extension.h; do
-            test -r "duckdb-static/$header"
+            test -r "$RUNNER_TEMP/duckdb-static/$header"
           done
       - name: Cache Linux toolchain layers
         if: runner.os == 'Linux'
@@ -221,13 +221,14 @@ jobs:
           if [ "$RUNNER_OS" = Linux ]; then
             mkdir -p "$PHP_RUNTIME_DIR"
             docker run --rm --network none -v "$GITHUB_WORKSPACE:/work" \
+              -v "$RUNNER_TEMP/duckdb-static:/duckdb:ro" \
               -v "$PHP_RUNTIME_DIR:/opt/pdo-duckdb-php:ro" -w /work \
               -e PHP_SOURCE_BUILD -e PHP_EXPECT_VERSION -e PHP_THREAD_SAFETY \
               pdo-duckdb-builder bash -euo pipefail -c '
                 if [ "$PHP_SOURCE_BUILD" = true ]; then export PATH="/opt/pdo-duckdb-php/bin:$PATH"; fi
                 php -n scripts/php-build-probe.php --version "$PHP_EXPECT_VERSION" --thread-safety "$PHP_THREAD_SAFETY"
                 phpize
-                ./configure --with-pdo-duckdb-static=/work/duckdb-static \
+                ./configure --with-pdo-duckdb-static=/duckdb \
                   --with-pdo-duckdb-bridge-source=/work/duckdb-bridge --enable-pdo-duckdb-dev
                 grep -qx "#define HAVE_DUCKDB_V2 1" config.h
                 grep -qx "#define HAVE_PDO_DUCKDB_BRIDGE 1" config.h
@@ -239,7 +240,7 @@ jobs:
             if [ "$PHP_SOURCE_BUILD" = true ]; then export PATH="$PHP_RUNTIME_DIR/bin:$PATH"; fi
             php -n scripts/php-build-probe.php --version "$PHP_EXPECT_VERSION" --thread-safety "$PHP_THREAD_SAFETY"
             phpize
-            ./configure --with-pdo-duckdb-static="$GITHUB_WORKSPACE/duckdb-static" \
+            ./configure --with-pdo-duckdb-static="$RUNNER_TEMP/duckdb-static" \
               --with-pdo-duckdb-bridge-source="$GITHUB_WORKSPACE/duckdb-bridge" --enable-pdo-duckdb-dev
             grep -qx '#define HAVE_DUCKDB_V2 1' config.h
             grep -qx '#define HAVE_PDO_DUCKDB_BRIDGE 1' config.h
