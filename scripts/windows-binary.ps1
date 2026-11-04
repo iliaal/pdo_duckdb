@@ -112,7 +112,7 @@ echo json_encode([PHP_VERSION, PHP_MAJOR_VERSION . '.' . PHP_MINOR_VERSION, PHP_
         }
         if ($version -ne $sdkVersion) { throw "PHP runtime $version differs from SDK $sdkVersion" }
         if ($Channel -eq 'development') {
-            if ($version -cne '8.6.0RC4') { throw "expected pinned development PHP 8.6.0RC4, got $version" }
+            if ($version -cne '8.6.0RC5') { throw "expected pinned development PHP 8.6.0RC5, got $version" }
         } elseif ($version -notmatch '^8\.[1-5]\.\d+$') {
             throw "expected stable PHP, got $version"
         }
