@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Windows PHP 8.6 development binaries now target 8.6.0RC5, the current QA
+  release that the PHP Windows builder downloads. Linux and macOS 8.6 binaries
+  stay on 8.6.0RC4 until the RC5 source tarball is published.
+
 ## [0.9.0] - 2026-10-27
 
 ### Fixed
