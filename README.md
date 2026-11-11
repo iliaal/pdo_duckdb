@@ -27,7 +27,8 @@ foreach ($stmt as $row) {
 - PHP 8.1 or newer with the `pdo` extension for source builds
 - Prebuilt binaries require PHP 8.2.35+, 8.3.36+, 8.4.27+, or 8.5.12+ in their
   respective series. PHP 8.6 binaries are development builds that target
-  8.6.0RC4 on Linux and macOS and 8.6.0RC5 on Windows.
+  8.6.0RC4 on Linux and macOS and the current 8.6.0 release candidate on
+  Windows.
 - For a source build only: DuckDB 1.5.3 or newer (`libduckdb`, complete C
   headers, and matching verified bridge sources; see [BUILDING.md](BUILDING.md)),
   available as a prebuilt bundle from the [DuckDB installation page](https://duckdb.org/docs/installation/)

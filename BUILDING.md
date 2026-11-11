@@ -149,11 +149,11 @@ replace the combined DLL: it does not export the bridge entry points.
 
 ## Binary targets and verification
 
-The binary workflows build PHP 8.2–8.5 as stable targets and an explicitly
-pinned PHP 8.6 release candidate as a development target: 8.6.0RC4 on Linux
-and macOS, where the source tarball is pinned, and 8.6.0RC5 on Windows, where
-the PHP Windows builder downloads the current QA release. PHP 8.1 remains a
-source target.
+The binary workflows build PHP 8.2–8.5 as stable targets and a PHP 8.6
+release candidate as a development target. Linux and macOS build the pinned
+8.6.0RC4 source tarball. On Windows, the PHP Windows builder downloads the
+current QA release, so the build accepts any 8.6.0 release candidate and logs
+the exact version it validated. PHP 8.1 remains a source target.
 Stable binaries require PHP 8.2.35+, 8.3.36+, 8.4.27+, or 8.5.12+ in their
 respective series. They use the newer PHP allocation APIs to stop safely after
 a pending memory-limit error. Older patches remain supported through source
