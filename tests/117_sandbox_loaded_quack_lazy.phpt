@@ -17,6 +17,19 @@ try {
 ?>
 --FILE--
 <?php
+function thread_count($status): int {
+    rewind($status);
+    return preg_match('/^Threads:\s+(\d+)/m', stream_get_contents($status), $m) ? (int) $m[1] : 0;
+}
+
+// quack_stop closes the listening socket before it returns, but destroys the
+// server and joins its connection threads on a detached thread. A process that
+// exits first loses those threads' OpenSSL state, which LeakSanitizer reports,
+// so the end of the test waits for the thread count to drop back. The handle is
+// opened before open_basedir is tightened.
+$status = @fopen('/proc/self/status', 'r');
+$baseline = $status ? thread_count($status) : 0;
+
 function free_port(): int {
     $s = stream_socket_server('tcp://127.0.0.1:0', $errno, $errstr);
     $port = (int) substr(strrchr(stream_socket_get_name($s, false), ':'), 1);
@@ -112,6 +125,14 @@ try {
     var_dump(str_contains($e->getMessage(), 'disabled through configuration'));
 }
 var_dump((int) $fresh->query('SELECT 42')->fetchColumn());
+
+$prepared = $fresh = $db = $client = $server = null;
+if ($status) {
+    $deadline = hrtime(true) + 10_000_000_000;
+    while (thread_count($status) > $baseline && hrtime(true) < $deadline) {
+        usleep(10000);
+    }
+}
 ?>
 --EXPECT--
 listening: yes
