@@ -36,8 +36,10 @@ function list_files(string $dir): array {
 $db = new PDO('duckdb::memory:;threads=1', null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
 $db->exec("CALL enable_logging(storage='file', storage_path='$control/log')");
 $db->exec("SELECT 'logged'");
+// No table on the DIRECT_IO attach: DuckDB 2.0.0 checkpoints a data block from
+// a buffer that is not page-aligned, which O_DIRECT rejects with EINVAL on
+// disks that need aligned DMA. The attach alone creates the file.
 $db->exec("ATTACH '$control/direct.db' AS d (IO_MODE 'DIRECT_IO')");
-$db->exec('CREATE TABLE d.t AS SELECT 1 AS v');
 $db->exec('DETACH d');
 $db->exec("ATTACH '$control/mmap.db' AS m (IO_MODE 'MMAP')");
 $db->exec('CREATE TABLE m.t AS SELECT 1 AS v');
