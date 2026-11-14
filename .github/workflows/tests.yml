@@ -26,6 +26,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Required-test evidence regression tests
+        run: bash config-tests/required_tests.sh
       - name: ASan argument forwarding regression tests
         run: bash config-tests/asan_arguments.sh
       - name: macOS minimum-version probe regression tests
@@ -287,7 +289,7 @@ jobs:
           # tee keeps the --show-diff output inline; set +e keeps a failing run
           # from aborting before its exit status is read.
           set +e
-          php run-tests.php --show-diff -g FAIL,BORK,LEAK,XLEAK,SKIP tests/ 2>&1 | tee "$RUNNER_TEMP/test-output.txt"
+          php run-tests.php --show-diff -g PASS,FAIL,BORK,LEAK,XLEAK,SKIP tests/ 2>&1 | tee "$RUNNER_TEMP/test-output.txt"
           test_status=("${PIPESTATUS[@]}")
           set -e
           if [ "${test_status[0]}" -ne 0 ]; then
@@ -497,7 +499,7 @@ jobs:
           export NO_INTERACTION=1
           export PDO_DUCKDB_TEST_EXTENSION_DIR="$PWD/duckdb-test-extensions"
           set +e
-          /tmp/php-branch/bin/php run-tests.php --show-diff -g FAIL,BORK,LEAK,XLEAK,SKIP tests/ 2>&1 | tee "$RUNNER_TEMP/test-output.txt"
+          /tmp/php-branch/bin/php run-tests.php --show-diff -g PASS,FAIL,BORK,LEAK,XLEAK,SKIP tests/ 2>&1 | tee "$RUNNER_TEMP/test-output.txt"
           test_status=("${PIPESTATUS[@]}")
           set -e
           if [ "${test_status[0]}" -ne 0 ]; then
@@ -709,7 +711,7 @@ jobs:
           export TEST_PHP_ARGS="-d extension=$PWD/modules/pdo_duckdb.so"
           export NO_INTERACTION=1
           set +e
-          php run-tests.php --show-diff -g FAIL,BORK,LEAK,XLEAK,SKIP \
+          php run-tests.php --show-diff -g PASS,FAIL,BORK,LEAK,XLEAK,SKIP \
             tests/147_v2_undecodable_type_rejected.phpt 2>&1 | tee "$RUNNER_TEMP/test-hook-output.txt"
           test_status=("${PIPESTATUS[@]}")
           set -e
@@ -918,7 +920,7 @@ jobs:
           export NO_INTERACTION=1
           export PDO_DUCKDB_TEST_EXTENSION_DIR="$PWD/duckdb-test-extensions"
           set +e
-          /tmp/php-asan/bin/php run-tests.php --show-diff --asan -g FAIL,BORK,LEAK,XLEAK,SKIP tests/ 2>&1 | tee /tmp/test-output.txt
+          /tmp/php-asan/bin/php run-tests.php --show-diff --asan -g PASS,FAIL,BORK,LEAK,XLEAK,SKIP tests/ 2>&1 | tee /tmp/test-output.txt
           test_status=("${PIPESTATUS[@]}")
           set -e
           if [ "${test_status[0]}" -ne 0 ]; then

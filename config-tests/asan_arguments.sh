@@ -160,6 +160,9 @@ done
 ci_status_check() {
     local label="$1" version="$2" expected="$3" runner="$4" logger="$5" extra="${6:-}" status=0
     printf 'Number of tests : 100 98\n%s\n' "${extra}" > "${work}/summary.log"
+    for required in "${common_required[@]}" "${ga_required[@]}"; do
+        printf 'PASS fixture [%s]\n' "${required}" >> "${work}/summary.log"
+    done
     (cd "${work}/ci" && SUMMARY_LOG="${work}/summary.log" RUNNER_STATUS="${runner}" LOGGER_STATUS="${logger}" \
         DUCKDB_VERSION="${version}" \
         bash -uo pipefail -c '(exit "$RUNNER_STATUS") | (cat; exit "$LOGGER_STATUS")
