@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Fail if a required test is missing or was skipped. LOG is run-tests.php output
-# produced with SKIP in -g, so skipped tests are listed.
+# Require a PASS result for each required test. LOG is run-tests.php output
+# produced with PASS and SKIP in -g, so both results are listed.
 #
 # Usage: scripts/check-required-tests.sh LOG tests/117_x.phpt [...]
 set -euo pipefail
@@ -13,17 +13,20 @@ for t in "$@"; do
         status=1
         continue
     fi
-    if awk -v t="[$t]" '
+    if ! awk -v t="[$t]" '
         {
             gsub(/\033\[[0-9;]*m/, "")
             n = split($0, lines, "\r")
             for (i = 1; i <= n; i++) {
-                if (lines[i] ~ /^SKIP / && index(lines[i], t)) found = 1
+                if (index(lines[i], t)) {
+                    if (lines[i] ~ /^PASS /) passed = 1
+                    if (lines[i] ~ /^SKIP /) skipped = 1
+                }
             }
         }
-        END { exit !found }
+        END { exit !(passed && !skipped) }
     ' "$log"; then
-        echo "::error::Required test $t was skipped." >&2
+        echo "::error::Required test $t has no verified PASS result (missing, skipped, or unreadable log)." >&2
         status=1
     fi
 done
