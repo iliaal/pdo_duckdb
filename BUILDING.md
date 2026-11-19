@@ -152,7 +152,7 @@ replace the combined DLL: it does not export the bridge entry points.
 The binary workflows build PHP 8.2–8.6 as stable targets. Linux and macOS
 build the PHP 8.6 runtime from the checksum-pinned 8.6.0 release tarball; the
 other series use pinned PHP images or setup-php. PHP 8.1 remains a source target.
-Stable binaries require PHP 8.2.35+, 8.3.36+, 8.4.27+, 8.5.12+, or 8.6.0+ in
+Stable binaries require PHP 8.2.36+, 8.3.37+, 8.4.28+, 8.5.13+, or 8.6.0+ in
 their respective series. They use the newer PHP allocation APIs to stop safely after
 a pending memory-limit error. Older patches remain supported through source
 builds; do not load these binaries on them. PIE selects archives by minor, so

@@ -37,10 +37,10 @@ if ($sdkVersionLine.Count -ne 1 -or $sdkVersionLine[0] -notmatch '^#define PHP_V
 }
 $sdkVersion = $Matches[1]
 $stableVersions = @{
-    '8.2' = '8.2.35'
-    '8.3' = '8.3.36'
-    '8.4' = '8.4.27'
-    '8.5' = '8.5.12'
+    '8.2' = '8.2.36'
+    '8.3' = '8.3.37'
+    '8.4' = '8.4.28'
+    '8.5' = '8.5.13'
     '8.6' = '8.6.0'
 }
 if ($Channel -eq 'stable' -and $sdkVersion -cne $stableVersions[$PhpSeries]) {
