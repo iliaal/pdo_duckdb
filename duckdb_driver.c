@@ -51,6 +51,12 @@ typedef struct _pdo_duckdb_instance {
 	bool has_identity;
 	uint64_t device;
 	uint64_t file;
+	/* The directory and final component of path, for matching another
+	 * spelling of a file that does not exist until the engine creates it. */
+	bool has_parent;
+	uint64_t parent_device;
+	uint64_t parent_file;
+	const char *leaf;
 	bool external_access_disabled;
 	bool sandbox_refused;
 	char *sandbox_basedir;
@@ -346,6 +352,43 @@ static bool pdo_duckdb_same_path(const char *left, const char *right)
 #endif
 }
 
+/* Identifies the directory holding path; *leaf points into path at the final
+ * component. */
+static bool pdo_duckdb_parent_identity(const char *path, uint64_t *device, uint64_t *file, const char **leaf)
+{
+	const char *slash = strrchr(path, '/');
+	size_t length;
+	char *dir;
+	bool found;
+
+#ifdef PHP_WIN32
+	const char *backslash = strrchr(path, '\\');
+
+	if (!slash || (backslash && backslash > slash)) {
+		slash = backslash;
+	}
+#endif
+	if (!slash) {
+		*leaf = path;
+		return pdo_duckdb_file_identity(".", device, file);
+	}
+	*leaf = slash + 1;
+	length = (size_t)(slash - path);
+	/* Keep a root's separator, as in "/" and "C:\". */
+	if (length == 0 || slash[-1] == ':') {
+		length++;
+	}
+	dir = malloc(length + 1);
+	if (!dir) {
+		return false;
+	}
+	memcpy(dir, path, length);
+	dir[length] = '\0';
+	found = pdo_duckdb_file_identity(dir, device, file);
+	free(dir);
+	return found;
+}
+
 static void pdo_duckdb_instance_free(pdo_duckdb_instance *instance)
 {
 #ifdef ZTS
@@ -406,9 +449,10 @@ static duckdb_state pdo_duckdb_open_instance(pdo_duckdb_db_handle *H, const char
 {
 	pdo_duckdb_instance *instance = NULL;
 	uint64_t device = 0, file = 0;
-	bool identified;
+	uint64_t parent_device = 0, parent_file = 0;
+	const char *leaf = NULL;
+	bool identified, parented;
 	bool created = false;
-	bool hold_registry;
 	duckdb_state state = DuckDBError;
 	pdd_bridge_error bridge_error = {0};
 
@@ -420,6 +464,7 @@ static duckdb_state pdo_duckdb_open_instance(pdo_duckdb_db_handle *H, const char
 
 	pdo_duckdb_registry_lock();
 	identified = path && pdo_duckdb_file_identity(path, &device, &file);
+	parented = path && pdo_duckdb_parent_identity(path, &parent_device, &parent_file, &leaf);
 	if (path) {
 		for (instance = pdo_duckdb_instances; instance; instance = instance->next) {
 			if (!instance->path) {
@@ -436,6 +481,15 @@ static duckdb_state pdo_duckdb_open_instance(pdo_duckdb_db_handle *H, const char
 			}
 			if (identified && instance->has_identity && instance->device == device && instance->file == file) {
 				*error = pdo_duckdb_open_error_copy("A hard-link alias of this database file is already open; use the original database path");
+				goto cleanup;
+			}
+			/* An instance still creating its file has no identity yet; its
+			 * directory and file name stand in for it, so a second spelling
+			 * cannot open another engine on the same new file. */
+			if (parented && !instance->has_identity && instance->has_parent
+					&& instance->parent_device == parent_device && instance->parent_file == parent_file
+					&& pdo_duckdb_same_path(leaf, instance->leaf)) {
+				*error = pdo_duckdb_open_error_copy("Another spelling of this database path is still being opened; use the same database path");
 				goto cleanup;
 			}
 		}
@@ -472,19 +526,17 @@ static duckdb_state pdo_duckdb_open_instance(pdo_duckdb_db_handle *H, const char
 			instance->device = device;
 			instance->file = file;
 		}
+		if (parented) {
+			instance->has_parent = true;
+			instance->parent_device = parent_device;
+			instance->parent_file = parent_file;
+			instance->leaf = instance->path + (leaf - path);
+		}
 		instance->next = pdo_duckdb_instances;
 		pdo_duckdb_instances = instance;
 	}
 	instance->refs++;
-	/* A file that does not exist yet has no identity to claim, so another
-	 * spelling of its path that expand_filepath() does not canonicalize (a bind
-	 * mount, for example) could publish a competing instance and open a second
-	 * engine on the same file. Keep other opens out until this one records the
-	 * identity. */
-	hold_registry = created && path && !identified;
-	if (!hold_registry) {
-		pdo_duckdb_registry_unlock();
-	}
+	pdo_duckdb_registry_unlock();
 
 	H->instance = instance;
 	pdo_duckdb_instance_lock(H);
@@ -511,10 +563,7 @@ static duckdb_state pdo_duckdb_open_instance(pdo_duckdb_db_handle *H, const char
 		bool opened = pdo_duckdb_file_identity(path, &opened_device, &opened_file);
 		const char *identity_error = NULL;
 
-		if (!hold_registry) {
-			pdo_duckdb_registry_lock();
-		}
-		hold_registry = false;
+		pdo_duckdb_registry_lock();
 		if (!opened || (created && identified && (opened_device != device || opened_file != file))
 				|| (instance->has_identity && (instance->device != opened_device || instance->file != opened_file))) {
 			identity_error = "Unable to verify the database file identity safely";
@@ -535,9 +584,6 @@ static duckdb_state pdo_duckdb_open_instance(pdo_duckdb_db_handle *H, const char
 			*error = pdo_duckdb_open_error_copy(identity_error);
 			state = DuckDBError;
 		}
-	}
-	if (hold_registry) {
-		pdo_duckdb_registry_unlock();
 	}
 	if (state == DuckDBSuccess) {
 		H->instance_next = instance->handles;

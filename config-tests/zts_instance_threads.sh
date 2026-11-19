@@ -44,6 +44,7 @@ scenarios=(
 	"instance zts_instance_threads.php 2 2 0 0"
 	"shared-reads zts_instance_latency.php 4 1 0 0"
 	"registry zts_instance_latency.php 3 1 0 0"
+	"aliases zts_instance_latency.php 2 1 0 0"
 	"timeout zts_instance_latency.php 1 2 2 1"
 )
 selected=("$@")
@@ -55,10 +56,22 @@ for entry in "${scenarios[@]}"; do
 	fi
 	ran=$((ran + 1))
 	dir="${work}/${name}"
-	mkdir "${dir}" "${dir}/inside" "${dir}/outside"
+	mkdir "${dir}" "${dir}/inside" "${dir}/outside" "${dir}/alias"
+	# The aliases scenario needs a bind mount, which an unprivileged user can
+	# make only in its own user and mount namespace.
+	namespace=()
+	if [[ "${name}" == aliases ]]; then
+		if ! LD_PRELOAD='' unshare -r -m true 2>/dev/null; then
+			printf '[%s]\nSKIP: unprivileged mount namespaces are unavailable\n' "${name}"
+			continue
+		fi
+		# shellcheck disable=SC2016 # expanded by the inner shell
+		namespace=(unshare -r -m bash -c 'mount --bind "$1/inside" "$1/alias" && shift && exec "$@"' _ "${dir}")
+	fi
 	status=0
 	PDO_DUCKDB_ZTS_DIR="${dir}" PDO_DUCKDB_ZTS_SCRIPT="${repo}/config-tests/${script}" \
-		PDO_DUCKDB_ZTS_SCENARIO="${name}" USE_ZEND_ALLOC="${zend_alloc}" LD_PRELOAD='' timeout -k 5s 90s env LD_PRELOAD="${preload}" \
+		PDO_DUCKDB_ZTS_SCENARIO="${name}" USE_ZEND_ALLOC="${zend_alloc}" LD_PRELOAD='' "${namespace[@]}" \
+		timeout -k 5s 90s env LD_PRELOAD="${preload}" \
 		"${work}/zts-instance-threads" "${EXT}" "${workers}" "${requests}" "${max_execution_time}" \
 		>"${dir}/output" 2>&1 || status=$?
 	output="$(<"${dir}/output")"

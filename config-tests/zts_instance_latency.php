@@ -16,12 +16,20 @@ function marked(string $name): int
     return (int) file_get_contents(getenv('PDO_DUCKDB_ZTS_DIR') . "/mark-$name");
 }
 
-/* Two DuckDB threads keep the slow join's duration similar across runners;
- * it has to outlast the sibling's start delay by a wide margin. */
 function slow_query(PDO $db, int $n): void
 {
     $sql = "SELECT count(*) FROM range($n) AS a(i) JOIN range($n) AS b(j) ON a.i < b.j";
     check($db->query($sql)->fetchColumn() === intdiv($n * ($n - 1), 2), 'slow query result');
+}
+
+/* Sizes the slow join to run about $seconds on this runner: its cost grows
+ * with the square of the row count, and runner speeds differ several-fold. */
+function slow_rows(PDO $db, float $seconds, int $min): int
+{
+    $start = hrtime(true);
+    slow_query($db, 4000);
+    $elapsed = max((hrtime(true) - $start) / 1e9, 0.001);
+    return min(max((int) (4000 * sqrt($seconds / $elapsed)), $min), 400000);
 }
 
 check(PHP_ZTS === true, 'PHP must be thread safe');
@@ -47,11 +55,12 @@ if ($scenario === 'shared-reads') {
     if ($worker === 0) {
         $db->exec('CREATE TABLE counter (id INTEGER PRIMARY KEY, n INTEGER)');
         $db->exec('INSERT INTO counter VALUES (1, 0)');
+        $rows = slow_rows($db, 4.0, 12000);
     }
     zts_instance_barrier();
     if ($worker === 0) {
         mark('slow-start');
-        slow_query($db, 12000);
+        slow_query($db, $rows);
         mark('slow-end');
     } elseif ($worker === 1) {
         usleep(300000);
@@ -75,7 +84,9 @@ if ($scenario === 'shared-reads') {
     }
     zts_instance_barrier();
     if ($worker === 0) {
-        check(marked('fast-start') > marked('slow-start'), 'the fast reader must start while the slow query runs');
+        check(marked('fast-start') > marked('slow-start') && marked('fast-start') < marked('slow-end')
+                && marked('checkout-start') < marked('slow-end'),
+            'the fast reader and the persistent checkouts must start while the slow query runs');
         check(marked('fast-end') < marked('slow-end'), 'a SELECT on the same file must not wait for a sibling SELECT');
         check(marked('checkout-start') > marked('slow-start'), 'the persistent checkouts must start while the slow query runs');
         check(marked('checkout-end') < marked('slow-end'),
@@ -105,10 +116,13 @@ if ($scenario === 'shared-reads') {
     if ($worker < 2) {
         $db = new PDO($a, null, null, $options);
     }
+    if ($worker === 0) {
+        $rows = slow_rows($db, 4.0, 12000);
+    }
     zts_instance_barrier();
     if ($worker === 0) {
         mark('slow-start');
-        slow_query($db, 12000);
+        slow_query($db, $rows);
         mark('slow-end');
     } elseif ($worker === 1) {
         usleep(300000);
@@ -124,10 +138,40 @@ if ($scenario === 'shared-reads') {
     }
     zts_instance_barrier();
     if ($worker === 0) {
-        check(marked('close-start') > marked('slow-start') && marked('open-start') > marked('close-start'),
+        check(marked('close-start') > marked('slow-start') && marked('open-start') > marked('close-start')
+                && marked('open-start') < marked('slow-end'),
             'the close and the open must start while the slow query runs');
         check(marked('open-end') < marked('slow-end'),
             'opening another file must not wait for a busy instance that another thread is closing');
+    }
+} elseif ($scenario === 'aliases') {
+    /* The runner bind-mounts inside/ at alias/, a second spelling of every
+     * path that expand_filepath() cannot canonicalize. */
+    check($workers === 2, 'aliases runs two workers');
+    $alias = getenv('PDO_DUCKDB_ZTS_DIR') . '/alias';
+    for ($round = 0; $round < 20; $round++) {
+        if ($worker === 0) {
+            mkdir("$dir/r$round");
+        }
+        zts_instance_barrier();
+        $path = $worker === 0 ? "$dir/r$round/new.db" : "$alias/r$round/new.db";
+        $db = null;
+        $refused = '';
+        try {
+            $db = new PDO("duckdb:$path", null, null, $options);
+            mark("alias-$round-$worker-open");
+        } catch (PDOException $e) {
+            $refused = $e->getMessage();
+        }
+        zts_instance_barrier();
+        $peer = file_exists(getenv('PDO_DUCKDB_ZTS_DIR') . "/mark-alias-$round-" . (1 - $worker) . '-open');
+        check(($db !== null) !== $peer, "round $round: exactly one spelling of a new file must open");
+        check($db !== null || str_contains($refused, 'Another spelling of this database path')
+                || str_contains($refused, 'hard-link alias'),
+            "round $round: the second spelling must be refused before the engine opens it: $refused");
+        zts_instance_barrier();
+        $db = null;
+        zts_instance_barrier();
     }
 } elseif ($scenario === 'timeout') {
     check($workers === 1, 'timeout runs one worker');
@@ -135,6 +179,7 @@ if ($scenario === 'shared-reads') {
     $db = new PDO("duckdb:$dir/timeout.db", null, null, $options + [PDO::ATTR_PERSISTENT => true]);
     if ($request === 0) {
         $db->exec('SET threads = 2');
+        $rows = slow_rows($db, 15.0, 40000);
         /* The shutdown function checks the fatal error instead of the output. */
         ini_set('display_errors', '0');
         $start = hrtime(true);
@@ -151,8 +196,8 @@ if ($scenario === 'shared-reads') {
                 $elapsed, connection_status(), $error['message'] ?? 'none'));
         });
         try {
-            /* Runs well over 10 s to completion, far past the 4 s bound. */
-            slow_query($db, 40000);
+            /* Runs about 15 s to completion, far past the 4 s bound. */
+            slow_query($db, $rows);
         } catch (PDOException $e) {
         }
         throw new RuntimeException('the query must end in a max_execution_time error');
