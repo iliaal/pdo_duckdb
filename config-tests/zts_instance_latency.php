@@ -26,10 +26,16 @@ function slow_query(PDO $db, int $n): void
  * with the square of the row count, and runner speeds differ several-fold. */
 function slow_rows(PDO $db, float $seconds, int $min): int
 {
-    $start = hrtime(true);
-    slow_query($db, 4000);
-    $elapsed = max((hrtime(true) - $start) / 1e9, 0.001);
-    return min(max((int) (4000 * sqrt($seconds / $elapsed)), $min), 400000);
+    /* Scale from a run long enough that per-query overhead doesn't dominate. */
+    for ($n = 4000; ; $n *= 2) {
+        $start = hrtime(true);
+        slow_query($db, $n);
+        $elapsed = (hrtime(true) - $start) / 1e9;
+        if ($elapsed >= 0.25 || $n >= 400000) {
+            break;
+        }
+    }
+    return min(max((int) ($n * sqrt($seconds / max($elapsed, 0.001))), $min), 400000);
 }
 
 check(PHP_ZTS === true, 'PHP must be thread safe');
