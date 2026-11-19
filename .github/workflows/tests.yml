@@ -36,7 +36,8 @@ jobs:
         run: bash config-tests/release_libduckdb_link.sh
       - name: Common-suite harness regression tests
         run: bash config-tests/pdo_common_status.sh
-      - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
+      # setup-php main until a release marks PHP 8.6 stable; return to a tagged release then.
+      - uses: shivammathur/setup-php@3c21e10268bafaf84c59e8f4e65b39acacb62ca4 # main # zizmor: ignore[stale-action-refs,ref-version-mismatch]
         with:
           php-version: '8.4'
           tools: composer
@@ -72,7 +73,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
+      - uses: shivammathur/setup-php@3c21e10268bafaf84c59e8f4e65b39acacb62ca4 # main # zizmor: ignore[stale-action-refs,ref-version-mismatch]
         with:
           php-version: '8.4'
           tools: phpize, php-config
@@ -119,7 +120,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        php: ['8.1', '8.2', '8.3', '8.4', '8.5']
+        php: ['8.1', '8.2', '8.3', '8.4', '8.5', '8.6']
         duckdb: ['2.0.0']
         include:
           - php: '8.4'
@@ -133,7 +134,7 @@ jobs:
           persist-credentials: false
 
       - name: Setup PHP
-        uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
+        uses: shivammathur/setup-php@3c21e10268bafaf84c59e8f4e65b39acacb62ca4 # main # zizmor: ignore[stale-action-refs,ref-version-mismatch]
         with:
           php-version: ${{ matrix.php }}
           tools: phpize, php-config
@@ -318,12 +319,12 @@ jobs:
           fi
 
       - name: PDO common tests
-        # Only on 8.4/8.5, where the suite runs clean apart from the 2
+        # Only on 8.4-8.6, where the suite runs clean apart from the 2
         # allowlisted DuckDB SQL-dialect fails. On 8.1-8.3 the older
         # ext/pdo/tests files have poor isolation (generic table names, no
         # --CLEAN--, unmarked XFAIL) and fail against a shared DSN for reasons
         # unrelated to the driver.
-        if: matrix.php == '8.4' || matrix.php == '8.5'
+        if: matrix.php == '8.4' || matrix.php == '8.5' || matrix.php == '8.6'
         env:
           PHP_VERSION: ${{ matrix.php }}
         run: |
@@ -339,7 +340,9 @@ jobs:
           esac
           git clone --depth=1 --branch="$ref" --filter=blob:none --sparse \
             https://github.com/php/php-src.git /tmp/php-src-common
-          git -C /tmp/php-src-common sparse-checkout set ext/pdo/tests
+          # PHP 8.6's pdo_test.inc requires the top-level tests/probe_cache.inc.
+          git -C /tmp/php-src-common sparse-checkout set --no-cone \
+            /ext/pdo/tests/ /tests/probe_cache.inc
           PHP="$(which php)" \
           RUN_TESTS="$PWD/run-tests.php" \
           COMMON_DIR=/tmp/php-src-common/ext/pdo/tests \
@@ -355,7 +358,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
+      - uses: shivammathur/setup-php@3c21e10268bafaf84c59e8f4e65b39acacb62ca4 # main # zizmor: ignore[stale-action-refs,ref-version-mismatch]
         timeout-minutes: 20
         env:
           # The released watchdog mistakes partial-line output for inactivity.
@@ -399,145 +402,6 @@ jobs:
     name: Static release build
     uses: ./.github/workflows/binary-validate.yml
 
-  linux-php-branch:
-    needs: bridge-sources
-    # setup-php's '8.6' is a php-src master snapshot, not the PHP-8.6 branch,
-    # so the 8.6 lane builds PHP itself (release mode, PDO static in the CLI).
-    name: PHP ${{ matrix.php }} - Linux (PHP-${{ matrix.php }} branch)
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        php: ['8.6']
-
-    env:
-      PHP_VERSION: ${{ matrix.php }}
-
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - name: Install dependencies
-        run: sudo apt-get update && sudo apt-get install -y re2c bison autoconf unzip
-
-      - name: Cache libduckdb
-        id: cache-duckdb
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: duckdb
-          key: duckdb-shared-linux-amd64-${{ env.DUCKDB_VERSION }}-${{ hashFiles('.github/duckdb-sha256.txt') }}-headers-v2
-
-      - name: Download libduckdb
-        if: steps.cache-duckdb.outputs.cache-hit != 'true'
-        run: |
-          case "$DUCKDB_VERSION" in
-            1.5.*) asset=libduckdb-linux-amd64.zip ;;
-            *) asset=duckdb-shared-libs-linux-amd64.tar.gz ;;
-          esac
-          curl -fsSL -o "$asset" \
-            "https://github.com/duckdb/duckdb/releases/download/v${DUCKDB_VERSION}/${asset}"
-          grep "  $asset$" .github/duckdb-sha256.txt | sha256sum --check --strict
-          mkdir -p duckdb/include duckdb/lib raw
-          case "$asset" in
-            *.zip) unzip -o "$asset" -d raw ;;
-            *.tar.gz) tar -xzf "$asset" -C raw ;;
-          esac
-          cp raw/*.h duckdb/include/
-          cp raw/libduckdb.so duckdb/lib/
-
-      - name: Build PHP from the PHP-${{ matrix.php }} branch
-        run: |
-          git clone --depth=1 --branch="PHP-${PHP_VERSION}" https://github.com/php/php-src.git /tmp/php-src
-          cd /tmp/php-src
-          ./buildconf --force
-          ./configure \
-            --disable-zts \
-            --disable-all \
-            --enable-cli \
-            --enable-pdo \
-            --prefix=/tmp/php-branch
-          make -j"$(nproc)"
-          make install
-          echo "/tmp/php-branch/bin" >> "$GITHUB_PATH"
-
-      - uses: ./.github/actions/duckdb-bridge
-        with:
-          version: ${{ env.DUCKDB_VERSION }}
-      - name: Build extension
-        shell: bash
-        run: |
-          phpize
-          ./configure --with-pdo-duckdb="$PWD/duckdb" --with-pdo-duckdb-bridge-source="$PWD/duckdb-bridge" --enable-pdo-duckdb-dev \
-            --with-php-config=/tmp/php-branch/bin/php-config
-          grep -qx '#define HAVE_DUCKDB_V2 1' config.h
-          make -j"$(nproc)" 2>&1 | tee "$RUNNER_TEMP/build.log"
-          if grep -q 'warning:' "$RUNNER_TEMP/build.log"; then
-            echo "::error::Build produced warnings"
-            exit 1
-          fi
-
-      - name: Cache DuckDB test extensions
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: duckdb-test-extensions
-          key: duckdb-test-extensions-linux-amd64-${{ env.DUCKDB_VERSION }}-${{ hashFiles('scripts/install-test-extensions.php') }}
-
-      - name: Install DuckDB test extensions
-        # Tests 117-119 SKIP when these can't be installed; installing here makes
-        # a failed download fail the job, and the run below rejects any SKIP.
-        run: |
-          export LD_LIBRARY_PATH="$PWD/duckdb/lib"
-          /tmp/php-branch/bin/php -d "extension=$PWD/modules/pdo_duckdb.so" \
-            scripts/install-test-extensions.php "$PWD/duckdb-test-extensions"
-
-      - name: Run tests
-        run: |
-          export LD_LIBRARY_PATH="$PWD/duckdb/lib"
-          export TEST_PHP_EXECUTABLE=/tmp/php-branch/bin/php
-          export TEST_PHP_ARGS="-d extension=$PWD/modules/pdo_duckdb.so"
-          export NO_INTERACTION=1
-          export PDO_DUCKDB_TEST_EXTENSION_DIR="$PWD/duckdb-test-extensions"
-          set +e
-          /tmp/php-branch/bin/php run-tests.php --show-diff -g PASS,FAIL,BORK,LEAK,XLEAK,SKIP tests/ 2>&1 | tee "$RUNNER_TEMP/test-output.txt"
-          test_status=("${PIPESTATUS[@]}")
-          set -e
-          if [ "${test_status[0]}" -ne 0 ]; then
-            echo "::error::run-tests.php failed (exit ${test_status[0]})"
-            exit "${test_status[0]}"
-          fi
-          if [ "${test_status[1]}" -ne 0 ]; then
-            echo "::error::Test output could not be recorded (exit ${test_status[1]})"
-            exit "${test_status[1]}"
-          fi
-          bash scripts/check-required-tests.sh "$RUNNER_TEMP/test-output.txt" \
-            tests/117_sandbox_loaded_quack_lazy.phpt \
-            tests/118_sandbox_loaded_quack_persistent.phpt \
-            tests/119_sandbox_uncontained_extension.phpt \
-            tests/136_sandbox_quack_listener_nul_uri.phpt \
-            tests/166_remote_prepared_values.phpt \
-            tests/167_remote_prepared_streaming.phpt \
-            tests/207_legacy_parser_parameters.phpt
-
-      - name: PDO common tests
-        run: |
-          full="$(php -r 'echo PHP_VERSION;')"
-          case "$full" in
-            *[!0-9.]*) ref="PHP-${PHP_VERSION}" ;;
-            *) ref="php-${full}" ;;
-          esac
-          git clone --depth=1 --branch="$ref" --filter=blob:none --sparse \
-            https://github.com/php/php-src.git /tmp/php-src-common
-          # PHP 8.6's pdo_test.inc requires the top-level tests/probe_cache.inc.
-          git -C /tmp/php-src-common sparse-checkout set --no-cone \
-            /ext/pdo/tests/ /tests/probe_cache.inc
-          PHP=/tmp/php-branch/bin/php \
-          RUN_TESTS="$PWD/run-tests.php" \
-          COMMON_DIR=/tmp/php-src-common/ext/pdo/tests \
-          DUCKDB_PREFIX="$PWD/duckdb" \
-          EXT="$PWD/modules/pdo_duckdb.so" \
-          bash scripts/pdo-common-tests.sh
-
   duckdb-floor:
     name: DuckDB 1.5.3 floor - PHP 8.4
     needs: bridge-sources
@@ -551,7 +415,7 @@ jobs:
           persist-credentials: false
 
       - name: Setup PHP
-        uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
+        uses: shivammathur/setup-php@3c21e10268bafaf84c59e8f4e65b39acacb62ca4 # main # zizmor: ignore[stale-action-refs,ref-version-mismatch]
         with:
           php-version: '8.4'
           tools: phpize, php-config
@@ -607,7 +471,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
+      - uses: shivammathur/setup-php@3c21e10268bafaf84c59e8f4e65b39acacb62ca4 # main # zizmor: ignore[stale-action-refs,ref-version-mismatch]
         with:
           php-version: '8.4'
           coverage: none
@@ -661,7 +525,7 @@ jobs:
           persist-credentials: false
 
       - name: Setup PHP
-        uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
+        uses: shivammathur/setup-php@3c21e10268bafaf84c59e8f4e65b39acacb62ca4 # main # zizmor: ignore[stale-action-refs,ref-version-mismatch]
         with:
           php-version: '8.4'
           tools: phpize, php-config
@@ -736,7 +600,7 @@ jobs:
           persist-credentials: false
 
       - name: Setup PHP
-        uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
+        uses: shivammathur/setup-php@3c21e10268bafaf84c59e8f4e65b39acacb62ca4 # main # zizmor: ignore[stale-action-refs,ref-version-mismatch]
         with:
           php-version: '8.4'
           tools: phpize, php-config

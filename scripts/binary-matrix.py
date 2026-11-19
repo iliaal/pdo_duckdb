@@ -9,10 +9,10 @@ from pathlib import Path
 
 
 PHP_IMAGES = {
-    "8.2": ("8.2.35", "58bd7cb60b690c01106084ce4a0a73eb01094ceb00904ebb4b8514516765292a", "0c0214799ed508e54fcfce246aec540f8d7a5754b0d4b1e935ccff310fcbab6b", "198ed9e076a5c6ad8c17b64c3ff874c276a5e86527a9888f07eee837bc862040"),
-    "8.3": ("8.3.36", "cdb77e306d6bb99db40e513fbe036ecc6c53b575cbcb7e581387845fef26d755", "adb3809d01b8b25030248b8ee456cf35fc6266b7faec1d156d59cea9dea3767d", "882668bff8ba882b01e7b2834565323ca24e4b97bec1ff47a948eb226dea0c32"),
-    "8.4": ("8.4.27", "496b5e02fe9fe44fcfb715023b931048111dc4e0bc719789d83c906be9f04b05", "4955d421a747523e09ca1b51d05b517f6ae8451ca8a3b9ee9296f28b7c0582d3", "05aa2edde7c3f828fef15b2508edfbac334dda7e1070de56d86a8b2c40b116a6"),
-    "8.5": ("8.5.12", "d4f6e10eb393de7e3a7a88e8b88e139072dd3ae297f6a5dada8257e6fe32c585", "be3a5190f1d9c4c1956619b263ce471b7987487038f03fdbddcfc0b99647916c", "dc60e039a84bc0e3d79335497f40b886d4084693b4b2544ff0736972f2f984d6"),
+    "8.2": ("8.2.36", "0a5ed0098915c11e1db8729b81bdb9a1bf12a998cc5e5b2f9a640afb6104dbe1", "d2bb14b56719d178369006200c4b1433a6f02738fb62b5359ea47e39a8790edc", "3de318631b4a0f3bbd31240871fceaa4f6c7e86e7be1c29baaf7ab6bbd30af74"),
+    "8.3": ("8.3.37", "a5edff11964286c30cd7dc5c29618624b6dac8b6583697ea6236a2dce44f1e2c", "2db4cff975a701e06a9d1a655101212c6c8bcf3872c205d7b099a0914e922f7e", "03c0c9c3a1cf15eac1e6097710e668a3e9414f070b740ec814a04d415e76470b"),
+    "8.4": ("8.4.28", "85da896b3eeb8bcd83fe612e51a529b7d5983a1fab92ef5f63c7ac6e2842fc46", "bffe87204f1fc00507a259494c5dd2ea5cb95e828f4c6f8f24e3b6d67c8bb0a1", "0bfae5e3a982afc3a182edb4a79e9bedebf01823f57c1762c23778fa061d57e0"),
+    "8.5": ("8.5.13", "d6991172c4282d2a09d6418073923a81664173bb0a0e07a16663a9a645746092", "25cea2c356f20545f828c9d987a0d0d9ce9ee597103eef699b2a05ba39466d93", "422f6b0307a9742e531c828c033f524b612548d2d9e8e67551a88b21609d0a18"),
 }
 PLATFORMS = (
     ("linux", "x86_64", "glibc", "ubuntu-24.04", "linux-amd64", ("nts", "zts")),
@@ -44,8 +44,8 @@ def targets():
                     "libc": libc, "runner": runner,
                     "platform": f"{os_name}-{arch}-{libc}",
                     "asset": f"duckdb-static-libs-{asset_suffix}.tar.gz",
-                    "channel": "development" if source_build else "stable",
-                    "runtime-version": "8.6.0RC4" if source_build else version,
+                    "channel": "stable",
+                    "runtime-version": "8.6.0" if source_build else version,
                     "source-build": source_build, "image": image,
                     "image-key": hashlib.sha256(image.encode()).hexdigest()[:16],
                 })

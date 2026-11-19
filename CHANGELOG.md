@@ -9,10 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Windows PHP 8.6 development binaries now target the current 8.6.0 release
-  candidate that the PHP Windows builder downloads, instead of one pinned
-  candidate that fails the build when the next one is published. Linux and
-  macOS 8.6 binaries stay on 8.6.0RC4 until a newer source tarball is pinned.
+- PHP 8.6 binaries are now stable builds against the PHP 8.6.0 release on
+  Linux, macOS, and Windows, replacing the 8.6.0 release-candidate builds.
+
+### Compatibility
+
+- Prebuilt binaries now require PHP 8.2.36+, 8.3.37+, 8.4.28+, 8.5.13+, or
+  8.6.0+, matching the 2026-11-19 PHP security releases they are built against.
+  Older patches require an explicit source build.
 
 ## [0.9.0] - 2026-10-27
 
