@@ -14,8 +14,11 @@ permissions: {}
 
 env:
   DUCKDB_VERSION: '2.0.0'
-  PHP_RC_URL: 'https://downloads.php.net/~mbeccati/php-8.6.0RC4.tar.xz'
-  PHP_RC_SHA256: '93f208da9ae059bf6863b0e1d101e6c6475a7b0f0acbf6c084950ab522f514d8'
+  # Official php:8.6 Docker images are ZTS-only and setup-php's macOS 8.6 build
+  # is not the 8.6.0 release, so the 8.6 runtime is built from the release
+  # tarball inside each lane's pinned baseline.
+  PHP_SOURCE_URL: 'https://www.php.net/distributions/php-8.6.0.tar.xz'
+  PHP_SOURCE_SHA256: '5f84beaa3d763aee1e4feed99bf54ec692c383b322e25626807b589238c3a087'
 
 jobs:
   prepare:
@@ -124,7 +127,8 @@ jobs:
         run: brew install autoconf
       - name: Setup stable PHP on macOS
         if: runner.os == 'macOS' && !matrix.source-build
-        uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
+        # setup-php main until a release marks PHP 8.6 stable; return to a tagged release then.
+        uses: shivammathur/setup-php@292f25acb388a711c0c758f382e5c3109a391dd7 # main # zizmor: ignore[stale-action-refs,ref-version-mismatch]
         timeout-minutes: 20
         env:
           SETUP_PHP_BREW_WATCHDOG: 'false'
@@ -180,14 +184,14 @@ jobs:
             --file "scripts/Dockerfile.binary-$TARGET_LIBC" \
             --tag pdo-duckdb-builder "${cache_args[@]}" \
             --cache-to "type=local,dest=$RUNNER_TEMP/pdo-duckdb-buildx-cache,mode=max" scripts
-      - name: Cache exact PHP development runtime
+      - name: Cache exact PHP source runtime
         if: matrix.source-build
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         id: php-cache
         with:
           path: ${{ env.PHP_RUNTIME_DIR }}
-          key: duckdb-php-${{ env.PHP_RC_SHA256 }}-${{ matrix.platform }}-${{ matrix.ts }}-${{ hashFiles('scripts/build-php-runtime.sh', 'scripts/php-build-probe.php', 'scripts/Dockerfile.binary-*') }}
-      - name: Build exact PHP development runtime
+          key: duckdb-php-${{ env.PHP_SOURCE_SHA256 }}-${{ matrix.platform }}-${{ matrix.ts }}-${{ hashFiles('scripts/build-php-runtime.sh', 'scripts/php-build-probe.php', 'scripts/Dockerfile.binary-*') }}
+      - name: Build exact PHP source runtime
         if: matrix.source-build && steps.php-cache.outputs.cache-hit != 'true'
         shell: bash
         run: |
@@ -196,19 +200,19 @@ jobs:
             mkdir -p "$PHP_RUNTIME_DIR"
             docker run --rm -v "$GITHUB_WORKSPACE:/work:ro" \
               -v "$PHP_RUNTIME_DIR:/opt/pdo-duckdb-php" -w /work \
-              -e PHP_RC_URL -e PHP_RC_SHA256 -e PHP_THREAD_SAFETY -e PHP_EXPECT_VERSION \
+              -e PHP_SOURCE_URL -e PHP_SOURCE_SHA256 -e PHP_THREAD_SAFETY -e PHP_EXPECT_VERSION \
               pdo-duckdb-builder bash -euo pipefail -c '
                 bash scripts/build-php-runtime.sh --prefix /opt/pdo-duckdb-php \
-                  --thread-safety "$PHP_THREAD_SAFETY" --url "$PHP_RC_URL" \
-                  --sha256 "$PHP_RC_SHA256" --version "$PHP_EXPECT_VERSION" --jobs 4
+                  --thread-safety "$PHP_THREAD_SAFETY" --url "$PHP_SOURCE_URL" \
+                  --sha256 "$PHP_SOURCE_SHA256" --version "$PHP_EXPECT_VERSION" --jobs 4
               '
             sudo chown -R "$(id -u):$(id -g)" "$PHP_RUNTIME_DIR"
           else
             sudo mkdir -p "$PHP_RUNTIME_DIR"
             sudo chown "$(id -u):$(id -g)" "$PHP_RUNTIME_DIR"
             bash scripts/build-php-runtime.sh --prefix "$PHP_RUNTIME_DIR" \
-              --thread-safety "$PHP_THREAD_SAFETY" --url "$PHP_RC_URL" \
-              --sha256 "$PHP_RC_SHA256" --version "$PHP_EXPECT_VERSION" --jobs 4
+              --thread-safety "$PHP_THREAD_SAFETY" --url "$PHP_SOURCE_URL" \
+              --sha256 "$PHP_SOURCE_SHA256" --version "$PHP_EXPECT_VERSION" --jobs 4
           fi
       - name: Build and package the extension
         id: package
