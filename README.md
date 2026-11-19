@@ -129,9 +129,14 @@ work around that restriction.
 In thread-safe PHP (FrankenPHP, a ZTS embed), threads that use connections to
 the same file run `SELECT` statements concurrently. Statements that may write
 take the database exclusively: `exec()`, prepared statements other than
-`SELECT`, Appender calls, and persistent-connection checkout. Concurrent
-autocommit updates of one row therefore queue instead of failing with a DuckDB
-write conflict. Opening or closing a connection never waits for a busy
+`SELECT`, and Appender calls. Concurrent autocommit updates of one row
+therefore queue instead of failing with a DuckDB write conflict. A
+persistent-connection checkout holds the database shared, except when it must
+reset an instance-wide setting (`http_proxy`, `http_proxy_username`,
+`http_proxy_password`, or a loaded httpfs extension's certificate and client
+options): the first checkout of each database, and any checkout after a
+request changed one of those settings, waits for running statements on the
+file. Opening or closing a connection never waits for a busy
 database at another path.
 
 When `open_basedir` is set, releasing a result (`closeCursor()`, a
@@ -632,12 +637,19 @@ checkout (`check_liveness`). Pass it again in the constructor options, or call
 
 ### `max_execution_time`
 
-On Linux, when `max_execution_time` expires during a DuckDB call, the driver
-interrupts the running query with `duckdb_interrupt`. The call
-fails with `INTERRUPT Error: Interrupted!` and PHP then raises its
-`Maximum execution time` fatal error. On Windows, PHP's timer doesn't run the
-interrupt hook, so a running query still finishes before PHP reports the
-timeout.
+When `max_execution_time` expires during a DuckDB call, the driver
+interrupts the running query with `duckdb_interrupt`. The call fails with
+`INTERRUPT Error: Interrupted!` and PHP then raises its `Maximum execution
+time` fatal error. This needs a timer that signals the timed-out thread:
+
+- Thread-safe PHP (FrankenPHP, ZTS) on Linux and FreeBSD, which uses per-thread
+  timers.
+- Non-thread-safe PHP on Linux, macOS, and other POSIX systems.
+
+Thread-safe PHP on macOS arms one process-wide timer whose signal can reach
+another thread, so the driver leaves the hook off there. On Windows, PHP's
+timer doesn't run the hook. In both cases a running query finishes before PHP
+reports the timeout.
 
 ### DuckDB log output
 

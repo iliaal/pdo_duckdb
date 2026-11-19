@@ -13,12 +13,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   database file: `SELECT` statements on one file now run concurrently, while
   writes still queue so concurrent autocommit updates don't hit write conflicts.
   Under `open_basedir`, releasing a result or closing a connection still
-  waits for running same-file queries.
+  waits for running same-file queries. A persistent-connection checkout waits
+  for them only the first time per database and after a request changed
+  `http_proxy` settings or httpfs options, which it resets.
 - Fixed opening or closing a connection in one thread waiting for a slow query
   on a different database file that another thread was closing.
-- Fixed `max_execution_time` not stopping a running DuckDB query. On Linux the
-  driver now interrupts the query when the limit expires, so a thread-safe
-  build no longer runs it to completion first. Windows is unchanged.
+- Fixed `max_execution_time` not stopping a running DuckDB query. The driver
+  now interrupts the query when the limit expires, on Linux and FreeBSD
+  thread-safe builds and on non-thread-safe POSIX builds. Thread-safe builds
+  on macOS and all Windows builds still run the query to completion first.
 
 ### Changed
 

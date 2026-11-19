@@ -35,6 +35,15 @@ $b = "duckdb:$dir/b.db;threads=2";
 if ($scenario === 'shared-reads') {
     check($workers === 4, 'shared-reads runs four workers');
     $db = new PDO($a, null, null, $options);
+    $persistent = $options + [PDO::ATTR_PERSISTENT => true];
+    if ($worker === 2) {
+        /* The first checkout of an instance takes it exclusively once, to
+         * record the instance-wide settings it resets. */
+        $p = new PDO($a, null, null, $persistent);
+        $p = null;
+        $p = new PDO($a, null, null, $persistent);
+        $p = null;
+    }
     if ($worker === 0) {
         $db->exec('CREATE TABLE counter (id INTEGER PRIMARY KEY, n INTEGER)');
         $db->exec('INSERT INTO counter VALUES (1, 0)');
@@ -54,11 +63,23 @@ if ($scenario === 'shared-reads') {
         }
         check($db->query('SELECT count(*) FROM counter')->fetchColumn() === 1, 'fast query on an open handle');
         mark('fast-end');
+    } elseif ($worker === 2) {
+        usleep(300000);
+        mark('checkout-start');
+        for ($i = 0; $i < 5; $i++) {
+            $p = new PDO($a, null, null, $persistent);
+            check($p->query('SELECT 1')->fetchColumn() === 1, 'persistent query result');
+            $p = null;
+        }
+        mark('checkout-end');
     }
     zts_instance_barrier();
     if ($worker === 0) {
         check(marked('fast-start') > marked('slow-start'), 'the fast reader must start while the slow query runs');
         check(marked('fast-end') < marked('slow-end'), 'a SELECT on the same file must not wait for a sibling SELECT');
+        check(marked('checkout-start') > marked('slow-start'), 'the persistent checkouts must start while the slow query runs');
+        check(marked('checkout-end') < marked('slow-end'),
+            'a persistent checkout and SELECT on the same file must not wait for a sibling SELECT');
     }
     zts_instance_barrier();
     /* Writers still take the instance exclusively: concurrent autocommit
@@ -130,7 +151,8 @@ if ($scenario === 'shared-reads') {
                 $elapsed, connection_status(), $error['message'] ?? 'none'));
         });
         try {
-            slow_query($db, 20000);
+            /* Runs well over 10 s to completion, far past the 4 s bound. */
+            slow_query($db, 40000);
         } catch (PDOException $e) {
         }
         throw new RuntimeException('the query must end in a max_execution_time error');

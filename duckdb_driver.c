@@ -58,6 +58,13 @@ typedef struct _pdo_duckdb_instance {
 	/* Member handles plus opens in flight; guarded by the registry mutex. The
 	 * registry is never held while waiting for an instance. */
 	unsigned int refs;
+	/* Values of the instance-wide settings that persistent checkout resets,
+	 * as read right after a reset; written only with the instance held
+	 * exclusively. */
+	char *liveness_network;
+	size_t liveness_network_len;
+	char *liveness_httpfs;
+	size_t liveness_httpfs_len;
 #ifdef ZTS
 	/* Guards the sandbox refusal fields, which shared holders may latch. */
 	MUTEX_T mutex;
@@ -130,8 +137,13 @@ zend_result pdo_duckdb_instances_minit(void)
 	if (!pdo_duckdb_cache) {
 		return FAILURE;
 	}
+#if !defined(ZTS) || defined(ZEND_MAX_EXECUTION_TIMERS)
+	/* Thread-safe PHP without per-thread timers arms one process-wide timer,
+	 * so the signal can land in a thread other than the timed-out one and the
+	 * hook would interrupt that thread's query. */
 	pdo_duckdb_previous_on_timeout = zend_on_timeout;
 	zend_on_timeout = pdo_duckdb_on_timeout;
+#endif
 #ifdef ZTS
 	pdo_duckdb_registry_mutex = tsrm_mutex_alloc();
 #endif
@@ -343,6 +355,8 @@ static void pdo_duckdb_instance_free(pdo_duckdb_instance *instance)
 #endif
 	free(instance->path);
 	free(instance->sandbox_basedir);
+	free(instance->liveness_network);
+	free(instance->liveness_httpfs);
 	free(instance);
 }
 
@@ -394,6 +408,7 @@ static duckdb_state pdo_duckdb_open_instance(pdo_duckdb_db_handle *H, const char
 	uint64_t device = 0, file = 0;
 	bool identified;
 	bool created = false;
+	bool hold_registry;
 	duckdb_state state = DuckDBError;
 	pdd_bridge_error bridge_error = {0};
 
@@ -461,7 +476,15 @@ static duckdb_state pdo_duckdb_open_instance(pdo_duckdb_db_handle *H, const char
 		pdo_duckdb_instances = instance;
 	}
 	instance->refs++;
-	pdo_duckdb_registry_unlock();
+	/* A file that does not exist yet has no identity to claim, so another
+	 * spelling of its path that expand_filepath() does not canonicalize (a bind
+	 * mount, for example) could publish a competing instance and open a second
+	 * engine on the same file. Keep other opens out until this one records the
+	 * identity. */
+	hold_registry = created && path && !identified;
+	if (!hold_registry) {
+		pdo_duckdb_registry_unlock();
+	}
 
 	H->instance = instance;
 	pdo_duckdb_instance_lock(H);
@@ -488,7 +511,10 @@ static duckdb_state pdo_duckdb_open_instance(pdo_duckdb_db_handle *H, const char
 		bool opened = pdo_duckdb_file_identity(path, &opened_device, &opened_file);
 		const char *identity_error = NULL;
 
-		pdo_duckdb_registry_lock();
+		if (!hold_registry) {
+			pdo_duckdb_registry_lock();
+		}
+		hold_registry = false;
 		if (!opened || (created && identified && (opened_device != device || opened_file != file))
 				|| (instance->has_identity && (instance->device != opened_device || instance->file != opened_file))) {
 			identity_error = "Unable to verify the database file identity safely";
@@ -509,6 +535,9 @@ static duckdb_state pdo_duckdb_open_instance(pdo_duckdb_db_handle *H, const char
 			*error = pdo_duckdb_open_error_copy(identity_error);
 			state = DuckDBError;
 		}
+	}
+	if (hold_registry) {
+		pdo_duckdb_registry_unlock();
 	}
 	if (state == DuckDBSuccess) {
 		H->instance_next = instance->handles;
@@ -2315,6 +2344,134 @@ static int pdo_duckdb_httpfs_loaded_state(duckdb_connection conn)
 	return state;
 }
 
+/* One VARCHAR per reset list above: the current values joined by chr(1), with
+ * chr(2) for NULL. */
+static const char pdo_duckdb_liveness_network_snapshot[] =
+	"SELECT concat_ws(chr(1), "
+	"coalesce(CAST(current_setting('http_proxy') AS VARCHAR), chr(2)), "
+	"coalesce(CAST(current_setting('http_proxy_username') AS VARCHAR), chr(2)), "
+	"coalesce(CAST(current_setting('http_proxy_password') AS VARCHAR), chr(2)))";
+
+static const char pdo_duckdb_liveness_httpfs_snapshot[] =
+	"SELECT concat_ws(chr(1), "
+	"coalesce(CAST(current_setting('enable_curl_server_cert_verification') AS VARCHAR), chr(2)), "
+	"coalesce(CAST(current_setting('enable_server_cert_verification') AS VARCHAR), chr(2)), "
+	"coalesce(CAST(current_setting('ca_cert_file') AS VARCHAR), chr(2)), "
+	"coalesce(CAST(current_setting('httpfs_client_implementation') AS VARCHAR), chr(2)))";
+
+/* *out is malloc()ed: the instance keeps it across requests. */
+static bool pdo_duckdb_liveness_snapshot(duckdb_connection conn, const char *sql, char **out, size_t *out_len)
+{
+	duckdb_result res = {0};
+	duckdb_data_chunk chunk;
+	bool ok = false;
+
+	*out = NULL;
+	*out_len = 0;
+	if (duckdb_query(conn, sql, &res) == DuckDBSuccess && duckdb_column_count(&res) == 1
+			&& duckdb_column_type(&res, 0) == DUCKDB_TYPE_VARCHAR
+			&& (chunk = duckdb_fetch_chunk(res)) != NULL) {
+		if (duckdb_data_chunk_get_size(chunk) == 1) {
+			duckdb_vector vec = duckdb_data_chunk_get_vector(chunk, 0);
+			duckdb_string_t *data = (duckdb_string_t *)duckdb_vector_get_data(vec);
+			uint64_t *validity = duckdb_vector_get_validity(vec);
+
+			if (!validity || duckdb_validity_row_is_valid(validity, 0)) {
+				size_t len = (size_t)duckdb_string_t_length(data[0]);
+
+				*out = malloc(len ? len : 1);
+				if (*out) {
+					memcpy(*out, duckdb_string_t_data(&data[0]), len);
+					*out_len = len;
+					ok = true;
+				}
+			}
+		}
+		duckdb_destroy_data_chunk(&chunk);
+	}
+	duckdb_destroy_result(&res);
+	return ok;
+}
+
+static bool pdo_duckdb_liveness_matches(duckdb_connection conn, const char *sql, const char *baseline, size_t baseline_len)
+{
+	char *current;
+	size_t len;
+	bool same;
+
+	if (!baseline || !pdo_duckdb_liveness_snapshot(conn, sql, &current, &len)) {
+		return false;
+	}
+	same = len == baseline_len && memcmp(current, baseline, len) == 0;
+	free(current);
+	return same;
+}
+
+static void pdo_duckdb_liveness_record(duckdb_connection conn, const char *sql, char **baseline, size_t *baseline_len)
+{
+	free(*baseline);
+	if (!pdo_duckdb_liveness_snapshot(conn, sql, baseline, baseline_len)) {
+		*baseline = NULL;
+		*baseline_len = 0;
+	}
+}
+
+/* Run with the instance held shared. True when no instance-wide setting
+ * differs from its value right after the last reset, so the checkout can skip
+ * the resets and the exclusive hold they need. */
+static bool pdo_duckdb_liveness_settings_clean(pdo_duckdb_db_handle *H, bool *dirty)
+{
+	int httpfs = pdo_duckdb_httpfs_loaded_state(H->conn);
+
+	if (httpfs < 0) {
+		*dirty = true;
+		return true;
+	}
+	return pdo_duckdb_liveness_matches(H->conn, pdo_duckdb_liveness_network_snapshot,
+			H->instance->liveness_network, H->instance->liveness_network_len)
+		&& (httpfs == 0 || pdo_duckdb_liveness_matches(H->conn, pdo_duckdb_liveness_httpfs_snapshot,
+			H->instance->liveness_httpfs, H->instance->liveness_httpfs_len));
+}
+
+/* Run with the instance held exclusively: http_proxy* and the httpfs options
+ * are DuckDB GLOBAL settings, so resetting them changes every connection. */
+static void pdo_duckdb_liveness_reset_settings(pdo_duckdb_db_handle *H, bool *dirty)
+{
+	size_t i;
+	int httpfs;
+	bool failed = false;
+
+	for (i = 0; i < sizeof(pdo_duckdb_liveness_network_resets)
+			/ sizeof(pdo_duckdb_liveness_network_resets[0]); i++) {
+		if (!pdo_duckdb_query_ok(H->conn, pdo_duckdb_liveness_network_resets[i])) {
+			failed = true;
+		}
+	}
+	/* httpfs options autoload the extension on RESET if it isn't loaded; only
+	 * touch them when a prior request already did. */
+	httpfs = pdo_duckdb_httpfs_loaded_state(H->conn);
+	if (httpfs < 0) {
+		failed = true;
+	} else if (httpfs > 0) {
+		for (i = 0; i < sizeof(pdo_duckdb_liveness_httpfs_resets)
+				/ sizeof(pdo_duckdb_liveness_httpfs_resets[0]); i++) {
+			if (!pdo_duckdb_query_ok(H->conn, pdo_duckdb_liveness_httpfs_resets[i])) {
+				failed = true;
+			}
+		}
+	}
+	if (failed) {
+		*dirty = true;
+		return;
+	}
+	pdo_duckdb_liveness_record(H->conn, pdo_duckdb_liveness_network_snapshot,
+		&H->instance->liveness_network, &H->instance->liveness_network_len);
+	if (httpfs > 0) {
+		pdo_duckdb_liveness_record(H->conn, pdo_duckdb_liveness_httpfs_snapshot,
+			&H->instance->liveness_httpfs, &H->instance->liveness_httpfs_len);
+	}
+}
+
 static void pdo_duckdb_liveness_discard(pdo_dbh_t *dbh)
 {
 	if (dbh->refcount <= 1) {
@@ -2337,13 +2494,13 @@ static bool pdo_duckdb_session_is_local(duckdb_connection conn)
 static zend_result pdo_duckdb_check_liveness(pdo_dbh_t *dbh)
 {
 	pdo_duckdb_db_handle *H = (pdo_duckdb_db_handle *)dbh->driver_data;
-	size_t i;
 	/* A failed residue reset means the connection may carry another
 	 * request's session state (or be sick); take the discard path rather
 	 * than silently reusing it. */
 	bool dirty = false;
 
-	if (!pdo_duckdb_native_enter_write(H)) {
+	/* Only resetting an instance-wide setting needs the instance exclusively. */
+	if (!pdo_duckdb_native_enter(H)) {
 		pdo_duckdb_liveness_discard(dbh);
 		return FAILURE;
 	}
@@ -2361,32 +2518,20 @@ static zend_result pdo_duckdb_check_liveness(pdo_dbh_t *dbh)
 			return FAILURE;
 		}
 #endif
-		if (!H->instance->external_access_disabled) {
-			for (i = 0; i < sizeof(pdo_duckdb_liveness_network_resets)
-					/ sizeof(pdo_duckdb_liveness_network_resets[0]); i++) {
-				if (!pdo_duckdb_query_ok(H->conn, pdo_duckdb_liveness_network_resets[i])) {
-					dirty = true;
-				}
+		if (!H->instance->external_access_disabled && !pdo_duckdb_liveness_settings_clean(H, &dirty)) {
+			/* A shared hold cannot upgrade in place. */
+			pdo_duckdb_instance_unlock(H);
+			if (!pdo_duckdb_native_enter_write(H)) {
+				pdo_duckdb_liveness_discard(dbh);
+				return FAILURE;
 			}
-			/* httpfs options autoload the extension on RESET if it
-			 * isn't loaded; only touch them when a prior request
-			 * already did. */
-			{
-				int httpfs = pdo_duckdb_httpfs_loaded_state(H->conn);
-				if (httpfs < 0) {
-					dirty = true;
-				} else if (httpfs > 0) {
-					for (i = 0; i < sizeof(pdo_duckdb_liveness_httpfs_resets)
-							/ sizeof(pdo_duckdb_liveness_httpfs_resets[0]); i++) {
-						if (!pdo_duckdb_query_ok(H->conn, pdo_duckdb_liveness_httpfs_resets[i])) {
-							dirty = true;
-						}
-					}
-				}
+			if (!H->instance->external_access_disabled) {
+				pdo_duckdb_liveness_reset_settings(H, &dirty);
 			}
 		}
-		/* A live wrapper may own a streaming result. Residue cleanup belongs
-		 * to request-boundary checkout; executing SQL here would end that result. */
+		/* enable_profiling is a connection-local setting. A live wrapper may
+		 * own a streaming result. Residue cleanup belongs to request-boundary
+		 * checkout; executing SQL here would end that result. */
 		if (!pdo_duckdb_query_ok(H->conn, "PRAGMA disable_profiling")) {
 			dirty = true;
 		}
