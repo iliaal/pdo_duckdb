@@ -183,8 +183,11 @@ $app->flush();   // push buffered rows; appender stays open for more rows
 $app->close();   // flush + finalize; further append/flush/close throw
 ```
 
-`flush()` commits buffered rows and leaves the appender usable. `close()`
-flushes, finalizes the native appender, and marks the PHP object closed.
+`flush()` writes buffered rows into the connection's current transaction and
+leaves the appender usable. The rows are committed immediately only in
+autocommit mode; an explicit transaction still needs `commit()` and can be
+rolled back. `close()` flushes, finalizes the native appender, and marks the
+PHP object closed.
 Prefer an explicit `close()`. If you don't close an appender, PHP closes it when
 the appender or its connection is destroyed:
 
@@ -219,9 +222,9 @@ Cast-probe failures and finite overflow in a top-level `FLOAT` column throw
 `PDOException("Failed to append value: …")`, preserving the appender and its
 buffered rows. Hard DuckDB failures on append/flush/close (including casts
 without an available preflight probe) poison the appender:
-later use throws `Error` and you must create a new one. Rows already flushed
-survive, but buffered rows are lost, so call `flush()` per unit of work to
-bound the loss.
+later use throws `Error` and you must create a new one. Rows already committed
+survive, but buffered rows are lost. Flushed rows in an explicit transaction
+are still subject to rollback; `flush()` alone is not a durability boundary.
 
 The appender doesn't check strings for valid UTF-8 before a top-level
 `VARCHAR` append. If you pass invalid UTF-8 for a `VARCHAR` column,
@@ -860,8 +863,9 @@ Other contracts:
   closed or poisoned appender throw `Error("Pdo\Duckdb\Appender is closed")`.
   `close()` is not idempotent: closing an already-closed appender throws the
   same `Error`. A failed native append/flush/close poisons the appender (later
-  use throws `Error`); rows already flushed survive, but unflushed buffered
-  rows are lost. Probe rejections (`Failed to append value: …`) and soft
+  use throws `Error`); committed rows survive, but unflushed buffered rows
+  are lost. Flushed rows in an explicit transaction can still be rolled back.
+  Probe rejections (`Failed to append value: …`) and soft
   validation failures don't poison.
 - **Structured conversion errors.** A row whose value exceeds the native
   nesting limit or cannot be decoded fails before any column is read: under
