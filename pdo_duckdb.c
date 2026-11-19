@@ -133,6 +133,7 @@ PHP_MSHUTDOWN_FUNCTION(pdo_duckdb)
 /* {{{ PHP_RINIT_FUNCTION */
 PHP_RINIT_FUNCTION(pdo_duckdb)
 {
+	pdo_duckdb_timeout_hook_rinit();
 	return SUCCESS;
 }
 /* }}} */

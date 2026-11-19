@@ -754,7 +754,7 @@ jobs:
           fi
           make -j"$(nproc)"
 
-      - name: Exercise simultaneous ZTS requests and shared-instance sandbox escalation
+      - name: Exercise simultaneous ZTS requests, shared-instance locking, sandbox escalation, and query timeouts
         if: matrix.ts == 'zts'
         env:
           PHP_CONFIG: /tmp/php-asan/bin/php-config

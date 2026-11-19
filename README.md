@@ -126,6 +126,26 @@ on Windows or macOS. Supporting those names requires a filesystem-aware engine
 cache and path manager; the driver does not create competing instances to
 work around that restriction.
 
+In thread-safe PHP (FrankenPHP, a ZTS embed), threads that use connections to
+the same file run `SELECT` statements concurrently. Statements that may write
+take the database exclusively: `exec()`, prepared statements other than
+`SELECT`, and Appender calls. Concurrent autocommit updates of one row
+therefore queue instead of failing with a DuckDB write conflict. A
+persistent-connection checkout holds the database shared, except when it must
+reset an instance-wide setting (`http_proxy`, `http_proxy_username`,
+`http_proxy_password`, or a loaded httpfs extension's certificate and client
+options): the first checkout of each database, and any checkout after a
+request changed one of those settings, waits for running statements on the
+file. Opening or closing a connection never waits for a busy
+database at another path.
+
+When `open_basedir` is set, releasing a result (`closeCursor()`, a
+re-execute, or freeing the statement) and closing a connection also take the
+database exclusively, because they stop DuckDB's file log sinks. They wait for
+statements running on the same file in other threads, so same-file queries
+still queue. For example, `$db->query($sql)->fetchAll()` waits when it frees
+its statement.
+
 ### Connection options
 
 Append DuckDB configuration as `;key=value` pairs on the DSN, or pass them as a
@@ -614,6 +634,32 @@ Persistent connections reset `DUCKDB_ATTR_UNBUFFERED` and
 `DUCKDB_ATTR_NATIVE_STRUCTURES` to false on every
 checkout (`check_liveness`). Pass it again in the constructor options, or call
 `setAttribute` after each `new PDO(..., [PDO::ATTR_PERSISTENT => true])`.
+
+### `max_execution_time`
+
+When `max_execution_time` expires during a DuckDB call, the driver
+interrupts the running query with `duckdb_interrupt`. The call fails with
+`INTERRUPT Error: Interrupted!` and PHP then raises its `Maximum execution
+time` fatal error. This needs a timer that signals the timed-out thread:
+
+- Thread-safe PHP (FrankenPHP, ZTS) on Linux and FreeBSD, which uses per-thread
+  timers.
+- Non-thread-safe PHP on Linux, macOS, and other POSIX systems.
+
+Thread-safe PHP on macOS arms one process-wide timer whose signal can reach
+another thread, so the driver leaves the hook off there. On Windows, PHP's
+timer doesn't run the hook. In both cases a running query finishes before PHP
+reports the timeout.
+
+### DuckDB log output
+
+DuckDB writes its `stdout` log storage
+(`CALL enable_logging(storage = 'stdout')`) and any other engine messages to
+the process's standard output and error, not to the PHP response. PHP output
+buffering doesn't capture them, and under FrankenPHP they appear in the server
+log. To read DuckDB log entries from PHP, use `storage = 'memory'` and query
+`duckdb_logs`. When `open_basedir` is set, the driver switches logging to
+memory storage.
 
 ## DuckDB 2.0
 

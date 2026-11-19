@@ -214,11 +214,15 @@ bool pdo_duckdb_enforce_sandbox(pdo_duckdb_db_handle *H);
 
 zend_result pdo_duckdb_instances_minit(void);
 void pdo_duckdb_instances_mshutdown(void);
+void pdo_duckdb_timeout_hook_rinit(void);
 void pdo_duckdb_instance_lock(pdo_duckdb_db_handle *H);
 void pdo_duckdb_instance_unlock(pdo_duckdb_db_handle *H);
 /* Success leaves the instance locked; failure leaves it unlocked. No PHP
  * callbacks may run before the caller releases the successful entry. */
 bool pdo_duckdb_native_enter(pdo_duckdb_db_handle *H);
+/* As pdo_duckdb_native_enter, holding the instance exclusively for SQL that
+ * may write. */
+bool pdo_duckdb_native_enter_write(pdo_duckdb_db_handle *H);
 /* Leaves the instance locked after stopping local writers before native
  * destruction; runs no SQL and performs no PHP allocations. */
 void pdo_duckdb_native_cleanup_enter(pdo_duckdb_db_handle *H);
