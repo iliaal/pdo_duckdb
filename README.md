@@ -183,8 +183,8 @@ $app->flush();   // push buffered rows; appender stays open for more rows
 $app->close();   // flush + finalize; further append/flush/close throw
 ```
 
-`flush()` writes buffered rows into the connection's current transaction and
-leaves the appender usable. The rows are committed immediately only in
+A successful `flush()` writes buffered rows into the connection's current
+transaction and leaves the appender usable. The rows are committed immediately only in
 autocommit mode; an explicit transaction still needs `commit()` and can be
 rolled back. `close()` flushes, finalizes the native appender, and marks the
 PHP object closed.
@@ -223,8 +223,11 @@ Cast-probe failures and finite overflow in a top-level `FLOAT` column throw
 buffered rows. Hard DuckDB failures on append/flush/close (including casts
 without an available preflight probe) poison the appender:
 later use throws `Error` and you must create a new one. Rows already committed
-survive, but buffered rows are lost. Flushed rows in an explicit transaction
-are still subject to rollback; `flush()` alone is not a durability boundary.
+survive, but buffered rows are lost. A duplicate-primary-key failure during
+`flush()` or `close()` aborts an explicit transaction,
+including its earlier successful flushes. Roll back the failed transaction;
+those earlier rows cannot be committed. See
+[transaction aborts](#sql-behavior-changes).
 
 The appender doesn't check strings for valid UTF-8 before a top-level
 `VARCHAR` append. If you pass invalid UTF-8 for a `VARCHAR` column,
@@ -864,9 +867,10 @@ Other contracts:
   `close()` is not idempotent: closing an already-closed appender throws the
   same `Error`. A failed native append/flush/close poisons the appender (later
   use throws `Error`); committed rows survive, but unflushed buffered rows
-  are lost. Flushed rows in an explicit transaction can still be rolled back.
-  Probe rejections (`Failed to append value: …`) and soft
-  validation failures don't poison.
+  are lost. A duplicate-primary-key failure during `flush()` or `close()` aborts an
+  explicit transaction, including earlier flushes; roll it back (see
+  [transaction aborts](#sql-behavior-changes)). Probe rejections
+  (`Failed to append value: …`) and soft validation failures don't poison.
 - **Structured conversion errors.** A row whose value exceeds the native
   nesting limit or cannot be decoded fails before any column is read: under
   `ERRMODE_EXCEPTION` the fetch throws, otherwise it returns `false` with the
