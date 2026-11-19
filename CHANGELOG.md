@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed thread-safe PHP (FrankenPHP, ZTS) serializing every query on a shared
+  database file: `SELECT` statements on one file now run concurrently, while
+  writes still queue so concurrent autocommit updates don't hit write conflicts.
+  Under `open_basedir`, releasing a result or closing a connection still
+  waits for running same-file queries.
+- Fixed opening or closing a connection in one thread waiting for a slow query
+  on a different database file that another thread was closing.
+- Fixed `max_execution_time` not stopping a running DuckDB query. On Linux the
+  driver now interrupts the query when the limit expires, so a thread-safe
+  build no longer runs it to completion first. Windows is unchanged.
+
 ### Changed
 
 - PHP 8.6 binaries are now stable builds against the PHP 8.6.0 release on

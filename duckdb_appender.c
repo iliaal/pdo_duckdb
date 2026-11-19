@@ -97,7 +97,7 @@ static void pdo_duckdb_appender_throw(pdo_duckdb_db_handle *H, duckdb_appender a
 
 static bool pdo_duckdb_appender_enter(pdo_duckdb_db_handle *H)
 {
-	if (pdo_duckdb_native_enter(H)) {
+	if (pdo_duckdb_native_enter_write(H)) {
 		return true;
 	}
 	zend_throw_exception_ex(php_pdo_get_exception(), PDO_DUCKDB_ERRCODE_SANDBOX,
@@ -410,7 +410,7 @@ static void pdo_duckdb_appender_release_native(pdo_duckdb_appender *a)
 		return;
 	}
 	if (a->appender && !a->closed) {
-		allowed = pdo_duckdb_native_enter(H);
+		allowed = pdo_duckdb_native_enter_write(H);
 	}
 	if (!allowed) {
 		pdo_duckdb_instance_lock(H);
