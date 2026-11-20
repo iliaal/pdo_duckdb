@@ -14,11 +14,6 @@ permissions: {}
 
 env:
   DUCKDB_VERSION: '2.0.1'
-  # Official php:8.6 Docker images are ZTS-only and setup-php's macOS 8.6 build
-  # is not the 8.6.0 release, so the 8.6 runtime is built from the release
-  # tarball inside each lane's pinned baseline.
-  PHP_SOURCE_URL: 'https://www.php.net/distributions/php-8.6.0.tar.xz'
-  PHP_SOURCE_SHA256: '5f84beaa3d763aee1e4feed99bf54ec692c383b322e25626807b589238c3a087'
 
 jobs:
   prepare:
@@ -94,6 +89,11 @@ jobs:
       PHP_EXPECT_VERSION: ${{ matrix.runtime-version }}
       PHP_THREAD_SAFETY: ${{ matrix.ts }}
       PHP_SOURCE_BUILD: ${{ matrix.source-build }}
+      # Official php:8.6 Docker images are ZTS-only and setup-php's macOS builds
+      # track the newest patch, so 8.6 everywhere and every macOS series build
+      # their runtime from the pinned release tarball.
+      PHP_SOURCE_URL: ${{ matrix.source-url }}
+      PHP_SOURCE_SHA256: ${{ matrix.source-sha256 }}
       TARGET_LIBC: ${{ matrix.libc }}
       TARGET_ARCH: ${{ matrix.arch }}
       MACOSX_DEPLOYMENT_TARGET: '11.0'
@@ -125,17 +125,6 @@ jobs:
         env:
           HOMEBREW_NO_AUTO_UPDATE: '1'
         run: brew install autoconf
-      - name: Setup stable PHP on macOS
-        if: runner.os == 'macOS' && !matrix.source-build
-        # setup-php main until a release marks PHP 8.6 stable; return to a tagged release then.
-        uses: shivammathur/setup-php@2001cd3148dcbaf467b7fa06cd7155ebb6d4cacf # main # zizmor: ignore[stale-action-refs,ref-version-mismatch]
-        timeout-minutes: 20
-        env:
-          SETUP_PHP_BREW_WATCHDOG: 'false'
-          phpts: ${{ matrix.ts }}
-        with:
-          php-version: ${{ matrix.php }}
-          coverage: none
       - name: Restore and verify matching source headers
         uses: ./.github/actions/duckdb-bridge
         with:
