@@ -18,6 +18,10 @@ on:
       source-compatibility-only:
         type: boolean
         default: false
+      # Space-separated subset of the release PHP versions; empty builds all of them.
+      php-versions:
+        type: string
+        default: ''
 
 permissions: {}
 
@@ -44,11 +48,15 @@ jobs:
         env:
           INCLUDE_SOURCE_FLOOR: ${{ inputs.include-source-floor }}
           SOURCE_COMPATIBILITY_ONLY: ${{ inputs.source-compatibility-only }}
+          PHP_VERSIONS: ${{ inputs.php-versions }}
         run: |
           set -euo pipefail
-          matrix=$(jq -cn --argjson floor "$INCLUDE_SOURCE_FLOOR" --argjson source "$SOURCE_COMPATIBILITY_ONLY" '
+          matrix=$(jq -cn --argjson floor "$INCLUDE_SOURCE_FLOOR" --argjson source "$SOURCE_COMPATIBILITY_ONLY" --arg subset "$PHP_VERSIONS" '
+            ["8.2", "8.3", "8.4", "8.5", "8.6"] as $all |
+            ($subset | split(" ") | map(select(length > 0))) as $picked |
+            if ($picked - $all | length) > 0 then error("php-versions lists a version outside the release matrix") else . end |
             {include: [
-              (if $source then ["8.1"] else (if $floor then ["8.1"] else [] end) + ["8.2", "8.3", "8.4", "8.5", "8.6"] end) | .[] as $php |
+              (if $source then ["8.1"] else (if $floor then ["8.1"] else [] end) + (if ($picked | length) > 0 then $picked else $all end) end) | .[] as $php |
               ["nts", "ts"][] as $ts |
               {php: $php, ts: $ts,
                channel: (if $php == "8.1" then "source" else "stable" end),

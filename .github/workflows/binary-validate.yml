@@ -1,7 +1,18 @@
 name: Binary build validation
 
+# Runs on pull requests that can change the release archives, and by manual
+# dispatch for the pre-tag dry run. Pushes to master do not run it.
 on:
-  workflow_call:
+  pull_request:
+    branches: [master]
+    paths:
+      - config.m4
+      - config.w32
+      - .github/**
+      - scripts/**
+      - .upstream/**
+      - 'pdo_duckdb_bridge*'
+      - 'duckdb_static_extensions.*'
   workflow_dispatch:
 
 permissions: {}
