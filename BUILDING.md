@@ -13,14 +13,14 @@ source headers. Configure does not download dependencies.
 
 ## Prepare matching source headers
 
-For the bundled DuckDB 2.0.0 release, run this from the extension checkout:
+For the bundled DuckDB 2.0.1 release, run this from the extension checkout:
 
 ```sh
 python3 scripts/duckdb-bridge-source.py stage \
-  --url https://codeload.github.com/duckdb/duckdb/tar.gz/refs/tags/v2.0.0 \
-  --sha256 7e89053255046bfb26afbd7f524a2fb84df7dbef496aa911ea35e4a1182fdc00 \
-  --version v2.0.0 \
-  --source-id d54cbbe3df17e8e5ce68312f483b4155836112aa \
+  --url https://codeload.github.com/duckdb/duckdb/tar.gz/refs/tags/v2.0.1 \
+  --sha256 1deae9d4917bd069c46c25c6ddbe51a2ef06cc7c12e6a10132af4fa0fb834a14 \
+  --version v2.0.1 \
+  --source-id 8d78114e90a53823803660bf821f6073ac87da8c \
   --output "$PWD/duckdb-bridge"
 ```
 
@@ -46,7 +46,7 @@ The blocking compatibility builds use these source commits:
 | --- | --- |
 | 1.5.3 | `14eca11bd9d4a0de2ea0f078be588a9c1c5b279c` |
 | 1.5.6 | `069cc9f9b5be802405797faecc284961b07c70ef` |
-| 2.0.0 | `d54cbbe3df17e8e5ce68312f483b4155836112aa` |
+| 2.0.1 | `8d78114e90a53823803660bf821f6073ac87da8c` |
 
 ## Unix shared-library build
 

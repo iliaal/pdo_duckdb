@@ -27,6 +27,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - PHP 8.6 binaries are now stable builds against the PHP 8.6.0 release on
   Linux, macOS, and Windows, replacing the 8.6.0 release-candidate builds.
+- Prebuilt binaries now bundle DuckDB 2.0.1, replacing 2.0.0.
+- PHP now refuses to start with a clear warning when pdo_duckdb was compiled
+  against a newer patch release of the same PHP minor than the one running,
+  such as a build for 8.4.28 loaded on 8.4.27. Previously such a build loaded
+  and then killed the process with an `undefined symbol` error on the first
+  call that needed a newer engine function. Requires PHP 8.3 or later headers.
 
 ### Compatibility
 

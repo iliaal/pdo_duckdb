@@ -16,7 +16,7 @@ concurrency:
 
 env:
   # Keep in sync with .upstream/duckdb.yml.
-  DUCKDB_VERSION: '2.0.0'
+  DUCKDB_VERSION: '2.0.1'
 
 jobs:
   validate:
@@ -56,7 +56,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        duckdb: ['1.5.3', '1.5.6', '2.0.0']
+        duckdb: ['1.5.3', '1.5.6', '2.0.1']
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -121,7 +121,7 @@ jobs:
       fail-fast: false
       matrix:
         php: ['8.1', '8.2', '8.3', '8.4', '8.5', '8.6']
-        duckdb: ['2.0.0']
+        duckdb: ['2.0.1']
         include:
           - php: '8.4'
             duckdb: '1.5.6'
@@ -218,13 +218,13 @@ jobs:
           BRIDGE_SOURCE: ${{ github.workspace }}/duckdb-bridge
         run: sh config-tests/duckdb_v2_detection.sh
       - name: Restore a different release for the bridge identity negative control
-        if: matrix.php == '8.4' && matrix.duckdb == '2.0.0'
+        if: matrix.php == '8.4' && matrix.duckdb == '2.0.1'
         uses: ./.github/actions/duckdb-bridge
         with:
           version: '1.5.3'
           path: duckdb-bridge-mismatch
       - name: Reject mismatched and modified C++ source caches
-        if: matrix.php == '8.4' && matrix.duckdb == '2.0.0'
+        if: matrix.php == '8.4' && matrix.duckdb == '2.0.1'
         env:
           DUCKDB_PREFIX: ${{ github.workspace }}/duckdb
           BRIDGE_SOURCE: ${{ github.workspace }}/duckdb-bridge
@@ -250,7 +250,7 @@ jobs:
       - name: Verify engine version and build generation
         env:
           PDO_DUCKDB_EXPECT_VERSION: ${{ matrix.duckdb }}
-          PDO_DUCKDB_EXPECT_V2: ${{ matrix.duckdb == '2.0.0' && '1' || '0' }}
+          PDO_DUCKDB_EXPECT_V2: ${{ matrix.duckdb == '2.0.1' && '1' || '0' }}
         run: |
           export LD_LIBRARY_PATH="$PWD/duckdb/lib"
           php -d "extension=$PWD/modules/pdo_duckdb.so" scripts/binary-probe.php
@@ -480,7 +480,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          for version in 1.5.3 1.5.6 2.0.0; do
+          for version in 1.5.3 1.5.6 2.0.1; do
             gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" \
               --name "interop-$version" --dir "storage-modules/$version"
           done
@@ -500,7 +500,7 @@ jobs:
               command += ['-d', 'extension=pdo']
           subprocess.run(command + pdo_probe, check=True)
           runners = {}
-          for version in ('1.5.3', '1.5.6', '2.0.0'):
+          for version in ('1.5.3', '1.5.6', '2.0.1'):
               root = pathlib.Path('storage-modules', version).resolve()
               module = root / 'modules/pdo_duckdb.so'
               library = root / 'duckdb/lib/libduckdb.so'
@@ -648,14 +648,14 @@ jobs:
       matrix:
         php: ['8.4', '8.6']
         ts: ['nts']
-        duckdb: ['2.0.0']
+        duckdb: ['2.0.1']
         include:
           - php: '8.4'
             ts: zts
             duckdb: '1.5.3'
           - php: '8.4'
             ts: zts
-            duckdb: '2.0.0'
+            duckdb: '2.0.1'
 
     env:
       ASAN_OPTIONS: exitcode=139:verify_asan_link_order=0:detect_odr_violation=0:detect_leaks=1
@@ -747,7 +747,7 @@ jobs:
             --with-pdo-duckdb="$PWD/duckdb" \
             --with-pdo-duckdb-bridge-source="$PWD/duckdb-bridge" \
             --with-php-config=/tmp/php-asan/bin/php-config
-          if [ "$DUCKDB_VERSION" = 2.0.0 ]; then
+          if [ "$DUCKDB_VERSION" = 2.0.1 ]; then
             grep -qx '#define HAVE_DUCKDB_V2 1' config.h
           else
             grep -qx '/\* #undef HAVE_DUCKDB_V2 \*/' config.h
@@ -805,7 +805,7 @@ jobs:
             tests/118_sandbox_loaded_quack_persistent.phpt \
             tests/119_sandbox_uncontained_extension.phpt \
             tests/136_sandbox_quack_listener_nul_uri.phpt
-          if [ "$DUCKDB_VERSION" = '2.0.0' ]; then
+          if [ "$DUCKDB_VERSION" = '2.0.1' ]; then
             bash scripts/check-required-tests.sh /tmp/test-output.txt \
               tests/166_remote_prepared_values.phpt \
               tests/167_remote_prepared_streaming.phpt \

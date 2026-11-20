@@ -31,7 +31,7 @@ foreach ($stmt as $row) {
   headers, and matching verified bridge sources; see [BUILDING.md](BUILDING.md)),
   available as a prebuilt bundle from the [DuckDB installation page](https://duckdb.org/docs/installation/)
   or via your package manager. Prebuilt installs (below) need nothing else.
-  Prebuilt binaries bundle DuckDB 2.0.0; see [DuckDB 2.0](#duckdb-20) for
+  Prebuilt binaries bundle DuckDB 2.0.1; see [DuckDB 2.0](#duckdb-20) for
   compatibility changes when you upgrade from 1.5.
 
 ## 🚀 Installation
@@ -669,7 +669,7 @@ memory storage.
 
 ## DuckDB 2.0
 
-Prebuilt binaries use DuckDB 2.0.0. Source builds continue to support DuckDB
+Prebuilt binaries use DuckDB 2.0.1. Source builds continue to support DuckDB
 1.5.3 and newer, with version-specific behavior described below. Keeping
 source compatibility does not make the engine upgrade transparent: new
 database files, SQL errors, streamed results, and canonical nested strings
@@ -678,7 +678,7 @@ can behave differently.
 ### Build against 2.0
 
 Download the `duckdb-shared-libs-<platform>.tar.gz` bundle from the
-[DuckDB 2.0.0 release](https://github.com/duckdb/duckdb/releases/tag/v2.0.0). Put
+[DuckDB 2.0.1 release](https://github.com/duckdb/duckdb/releases/tag/v2.0.1). Put
 every header from the bundle in `include/`, put the shared library in `lib/`,
 and point `configure` at that prefix:
 
