@@ -6,6 +6,9 @@ on:
       include-source-floor:
         type: boolean
         default: false
+      php-versions:
+        type: string
+        default: ''
   workflow_dispatch:
 
 permissions: {}
@@ -23,3 +26,4 @@ jobs:
       package-version: validation-${{ github.sha }}
       artifact-prefix: validation-windows
       include-source-floor: ${{ inputs.include-source-floor || false }}
+      php-versions: ${{ inputs.php-versions || '' }}

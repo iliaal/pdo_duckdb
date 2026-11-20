@@ -402,10 +402,6 @@ jobs:
             php -d "extension=$PWD/modules/pdo_duckdb.so" scripts/binary-probe.php
           php run-tests.php --show-diff -g FAIL,BORK,LEAK,XLEAK tests/
 
-  static-build:
-    name: Static release build
-    uses: ./.github/workflows/binary-validate.yml
-
   duckdb-floor:
     name: DuckDB 1.5.3 floor - PHP 8.4
     needs: bridge-sources

@@ -20,7 +20,10 @@ jobs:
       contents: read
     uses: ./.github/workflows/binary-validate-windows.yml
     with:
-      include-source-floor: true
+      # Push and PR builds one PHP version per MSVC toolset (8.3 vs16, 8.5 vs17,
+      # 8.6 vs18); a manual dispatch builds all 12 lanes for the pre-tag dry run.
+      include-source-floor: ${{ github.event_name == 'workflow_dispatch' }}
+      php-versions: ${{ github.event_name != 'workflow_dispatch' && '8.3 8.5 8.6' || '' }}
 
   legacy-source:
     name: DuckDB 1.5.3 and PHP 8.1 source compatibility
