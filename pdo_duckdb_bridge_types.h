@@ -29,6 +29,8 @@ pdd_bridge_status pdd_bridge_type_annotations(duckdb_logical_type type, pdd_brid
                                               pdd_bridge_error *error);
 void pdd_bridge_annotations_free(pdd_bridge_annotations *annotations);
 pdd_bridge_status pdd_bridge_type_variant(duckdb_logical_type *out, pdd_bridge_error *error);
+/* Whether the engine quotes a scalar UNION member rendered inside a LIST, ARRAY, STRUCT, or MAP (DuckDB 2.0.1+). */
+bool pdd_bridge_union_members_quoted(void);
 pdd_bridge_status pdd_bridge_type_is_tuple(duckdb_logical_type type, bool *out, pdd_bridge_error *error);
 pdd_bridge_status pdd_bridge_type_field_name(duckdb_logical_type type, idx_t field, pdd_bridge_bytes *out,
                                             pdd_bridge_error *error);

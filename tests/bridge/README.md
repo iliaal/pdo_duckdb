@@ -33,9 +33,10 @@ runtime compatibility checks.
 `types.c` is a C consumer of the bridge. It compares 40,970 cells against live
 DuckDB SQL casts and checks exact decimals, NUL-containing values and field names,
 tuples, empty containers, aliases, empty-result metadata, and failure/SQL NULL
-separation. It rejects the incomplete type returned by
+separation. Before DuckDB 2.0.1 it rejects the incomplete type returned by
 `duckdb_create_logical_type(DUCKDB_TYPE_VARIANT)`, including when that type is
-nested. Use a result's logical type or `pdd_bridge_type_variant()` instead.
+nested; use a result's logical type or `pdd_bridge_type_variant()` there. From
+2.0.1 that C API type is complete and the bridge accepts it.
 
 `variant.c` checks native VARIANT traversal independently of VARCHAR rendering.
 The node API preserves objects with empty or NUL-containing keys, heterogeneous

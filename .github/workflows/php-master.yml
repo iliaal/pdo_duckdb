@@ -20,7 +20,7 @@ concurrency:
 
 env:
   # Keep in sync with .upstream/duckdb.yml.
-  DUCKDB_VERSION: '2.0.0'
+  DUCKDB_VERSION: '2.0.1'
 
 jobs:
   php-master:

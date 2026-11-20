@@ -5,6 +5,11 @@
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/common/string_util.hpp"
 
+// DuckDB 2.0.1 renamed LogStorage to LogSink (duckdb/duckdb#26085) without changing its layout or behavior.
+#if __has_include("duckdb/logging/log_sink.hpp")
+#define PDD_BRIDGE_HAVE_LOG_SINK 1
+#endif
+
 #include <mutex>
 #include <new>
 #include <type_traits>
@@ -12,9 +17,25 @@
 
 namespace {
 
-class DiscardLogStorage final : public duckdb::LogStorage {
+#ifdef PDD_BRIDGE_HAVE_LOG_SINK
+using LogSink = duckdb::LogSink;
+using BufferingLogSink = duckdb::BufferingLogSink;
+using FileLogSink = duckdb::FileLogSink;
+using InMemoryLogSink = duckdb::InMemoryLogSink;
+#else
+using LogSink = duckdb::LogStorage;
+using BufferingLogSink = duckdb::BufferingLogStorage;
+using FileLogSink = duckdb::FileLogStorage;
+using InMemoryLogSink = duckdb::InMemoryLogStorage;
+#endif
+
+class DiscardLogStorage final : public LogSink {
 public:
+#ifdef PDD_BRIDGE_HAVE_LOG_SINK
+	const duckdb::string GetSinkName() override {
+#else
 	const duckdb::string GetStorageName() override {
+#endif
 		return "DiscardLogStorage";
 	}
 	void WriteLogEntry(duckdb::timestamp_t, duckdb::LogLevel, const duckdb::string &, const duckdb::string &,
@@ -39,14 +60,18 @@ public:
 		return &LogManagerMembers::lock;
 	}
 	static auto Storage() noexcept {
+#ifdef PDD_BRIDGE_HAVE_LOG_SINK
+		return &LogManagerMembers::log_sink;
+#else
 		return &LogManagerMembers::log_storage;
+#endif
 	}
 	static auto Config() noexcept {
 		return &LogManagerMembers::config;
 	}
 };
 
-class BufferingStorageMembers : public duckdb::BufferingLogStorage {
+class BufferingStorageMembers : public BufferingLogSink {
 public:
 	static auto Mutex() noexcept {
 		return &BufferingStorageMembers::lock;
@@ -65,23 +90,23 @@ struct FileStorageTablesAccess {
 };
 
 // Explicit instantiation permits this private member pointer ([temp.spec.general]); no object layout is copied.
-template struct FileStorageTablesAccess<&duckdb::FileLogStorage::tables>;
+template struct FileStorageTablesAccess<&FileLogSink::tables>;
 
 static_assert(std::is_same<decltype(LogManagerMembers::Mutex()), duckdb::mutex duckdb::LogManager::*>::value,
 	"Log manager access must use a base member pointer, not a downcast");
 static_assert(std::is_same<decltype(LogManagerMembers::Storage()),
-	duckdb::shared_ptr<duckdb::LogStorage> duckdb::LogManager::*>::value, "Log storage member type changed");
+	duckdb::shared_ptr<LogSink> duckdb::LogManager::*>::value, "Log storage member type changed");
 static_assert(std::is_same<decltype(BufferingStorageMembers::Mutex()),
-	duckdb::mutex duckdb::BufferingLogStorage::*>::value, "Storage mutex must use a base member pointer");
+	duckdb::mutex BufferingLogSink::*>::value, "Storage mutex must use a base member pointer");
 
-duckdb::shared_ptr<duckdb::LogStorage> discard_storage() noexcept {
+duckdb::shared_ptr<LogSink> discard_storage() noexcept {
 	// An allocation-failure fallback must outlive every engine handle without heap allocation or destructor ordering.
 	alignas(DiscardLogStorage) static unsigned char memory[sizeof(DiscardLogStorage)];
 	static auto *storage = new (memory) DiscardLogStorage();
-	return duckdb::shared_ptr<duckdb::LogStorage>(duckdb::shared_ptr<duckdb::LogStorage>(), storage);
+	return duckdb::shared_ptr<LogSink>(duckdb::shared_ptr<LogSink>(), storage);
 }
 
-void revoke_file_storage(duckdb::FileLogStorage &file_storage) {
+void revoke_file_storage(FileLogSink &file_storage) {
 	std::lock_guard<duckdb::mutex> lock(file_storage.*BufferingStorageMembers::Mutex());
 	for (auto &entry : file_storage.*tables_member(FileStorageTables())) {
 		// Retained binders must fail in Initialize before touching CSVWriter's borrowed WriteStream.
@@ -92,16 +117,16 @@ void revoke_file_storage(duckdb::FileLogStorage &file_storage) {
 }
 
 bool detach_storage(duckdb::LogManager &manager) {
-	duckdb::shared_ptr<duckdb::LogStorage> previous;
+	duckdb::shared_ptr<LogSink> previous;
 	bool mismatched = false;
 	{
 		std::lock_guard<duckdb::mutex> lock(manager.*LogManagerMembers::Mutex());
 		const auto &storage_name = (manager.*LogManagerMembers::Config()).storage;
 		auto *storage = (manager.*LogManagerMembers::Storage()).get();
-		auto *file_storage = dynamic_cast<duckdb::FileLogStorage *>(storage);
+		auto *file_storage = dynamic_cast<FileLogSink *>(storage);
 		const bool named_memory = duckdb::StringUtil::CIEquals(storage_name.data(), storage_name.size(), "memory", 6);
 		const bool named_file = duckdb::StringUtil::CIEquals(storage_name.data(), storage_name.size(), "file", 4);
-		if (named_memory && dynamic_cast<duckdb::InMemoryLogStorage *>(storage)) {
+		if (named_memory && dynamic_cast<InMemoryLogSink *>(storage)) {
 			return false;
 		}
 		mismatched = named_memory || (named_file != (file_storage != nullptr));
@@ -129,6 +154,10 @@ extern "C" pdd_bridge_status pdd_bridge_clear_instance_writers(duckdb_connection
 			return;
 		}
 		manager.SetEnableLogging(false);
+#ifdef PDD_BRIDGE_HAVE_LOG_SINK
+		manager.SetLogSink(*context.db, "memory");
+#else
 		manager.SetLogStorage(*context.db, "memory");
+#endif
 	});
 }

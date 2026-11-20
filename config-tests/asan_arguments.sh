@@ -174,7 +174,7 @@ ci_status_check() {
     fi
     echo "PASS: CI DuckDB ${version} ${label}"
 }
-for version in 2.0.0 1.5.3; do
+for version in 2.0.1 1.5.3; do
     ci_status_check 'successful runner and logger' "${version}" 0 0 0
     ci_status_check 'ordinary runner failure' "${version}" 1 1 0
     ci_status_check 'runner crash' "${version}" 42 42 0
@@ -186,7 +186,7 @@ for version in 2.0.0 1.5.3; do
     for required in "${common_required[@]}"; do
         ci_status_check "required ${required} cannot skip" "${version}" 1 0 0 "SKIP fixture [${required}]"
     done
-    if [[ "${version}" = 2.0.0 ]]; then
+    if [[ "${version}" = 2.0.1 ]]; then
         ga_status=1
     else
         ga_status=0

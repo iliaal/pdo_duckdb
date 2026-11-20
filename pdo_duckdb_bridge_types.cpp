@@ -4,7 +4,9 @@
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/common/types/vector.hpp"
 #include "duckdb/function/cast/vector_cast_helpers.hpp"
+#include "duckdb/function/cast/nested_to_varchar_cast.hpp"
 #include <memory>
+#include <type_traits>
 #include <vector>
 #if PDO_DUCKDB_BRIDGE_ENGINE_MAJOR < 2
 #include "duckdb/common/extra_type_info.hpp"
@@ -16,6 +18,13 @@ struct pdd_bridge_value {
 };
 
 namespace pdd_bridge {
+template <typename T, typename = void>
+struct has_wrap_child_cast : std::false_type {};
+template <typename T>
+struct has_wrap_child_cast<T, std::void_t<decltype(&T::WrapChildCast)>> : std::true_type {};
+// DuckDB 2.0.1 added WrapChildCast to quote scalar UNION members of LIST, ARRAY, STRUCT, and MAP renderings.
+static constexpr bool union_members_quoted = has_wrap_child_cast<duckdb::NestedToVarcharCast>::value;
+
 static void validate_type(const duckdb::LogicalType &root) {
     duckdb::vector<const duckdb::LogicalType *> pending {&root};
     while (!pending.empty()) {
@@ -51,7 +60,7 @@ static void validate_type(const duckdb::LogicalType &root) {
 static duckdb::LogicalType &logical_type(duckdb_logical_type type) {
     require(type != nullptr, "Missing logical type");
     auto &native = *reinterpret_cast<duckdb::LogicalType *>(type);
-    /* duckdb_create_logical_type(VARIANT) omits required internal field types in both API generations. */
+    /* Before DuckDB 2.0.1, duckdb_create_logical_type(VARIANT) omits required internal field types. */
     validate_type(native);
     return native;
 }
@@ -246,6 +255,10 @@ static duckdb::string nested_pdo(const duckdb::Value &input, duckdb_connection c
     if (input.type().id() == duckdb::LogicalTypeId::VARIANT) {
         return variant_render(input, connection, escape);
     }
+    if (union_members_quoted && escape && input.type().id() == duckdb::LogicalTypeId::UNION) {
+        auto &member = duckdb::UnionValue::GetValue(input);
+        return nested_pdo(member, connection, !member.type().IsNested());
+    }
     auto rendered = canonical_pdo(input, connection);
     return escape && !input.type().IsNested() ? quote_nested(rendered, false) : rendered;
 }
@@ -435,6 +448,10 @@ pdd_bridge_status pdd_bridge_type_variant(duckdb_logical_type *out, pdd_bridge_e
         pdd_bridge::require(out != nullptr, "Missing VARIANT type output");
         *out = reinterpret_cast<duckdb_logical_type>(new duckdb::LogicalType(duckdb::LogicalType::VARIANT()));
     });
+}
+
+bool pdd_bridge_union_members_quoted(void) {
+    return pdd_bridge::union_members_quoted;
 }
 
 pdd_bridge_status pdd_bridge_type_is_tuple(duckdb_logical_type type, bool *out, pdd_bridge_error *error) {

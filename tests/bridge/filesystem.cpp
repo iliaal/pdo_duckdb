@@ -8,6 +8,7 @@
 
 #include <cstdio>
 #include <filesystem>
+#include <fstream>
 #include <memory>
 #include <mutex>
 #include <random>
@@ -433,6 +434,27 @@ void failed_sibling_preserves_pending_open() {
 	require(scalar(owner, "SELECT id FROM held.t") == 17, "Failed sibling damaged the successful attachment");
 }
 
+void ordinary_files_resample() {
+	Directory directory;
+	const auto csv = directory.path / "export.csv";
+	Cache cache;
+	Database database(cache, directory.path / "primary.duckdb");
+	const auto copy = "COPY (SELECT 7 AS value) TO " + quote(csv) + " (HEADER)";
+	query(database, copy);
+	query(database, copy);
+	std::filesystem::remove(csv);
+	query(database, copy);
+	{
+		std::ofstream replacement(directory.path / "replacement.csv");
+		replacement << "value\n8\n";
+	}
+	std::filesystem::rename(directory.path / "replacement.csv", csv);
+	require(scalar(database, "SELECT value FROM read_csv_auto(" + quote(csv) + ")") == 8,
+			"Replaced ordinary file was not read");
+	query(database, copy);
+	require(scalar(database, "SELECT value FROM read_csv_auto(" + quote(csv) + ")") == 7,
+			"Ordinary file was not rewritten after replacement");
+}
 } // namespace
 
 int main() {
@@ -443,6 +465,7 @@ int main() {
 		concurrent_aliases();
 		retained_attachment_owner();
 		failed_sibling_preserves_pending_open();
+		ordinary_files_resample();
 #ifndef _WIN32
 		replacement(false);
 		replacement(true);

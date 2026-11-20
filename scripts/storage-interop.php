@@ -76,7 +76,7 @@ if (($argv[1] ?? '') === '--worker') {
 
 if ($argc !== 2 || $argv[1] === '--help') {
     fwrite(STDERR, "Usage: php scripts/storage-interop.php runners.json\n"
-        . "runners.json maps 1.5.3, 1.5.6, and 2.0.0 to {\"command\":[\"/path/to/php\",\"-n\",\"-d\",\"extension=pdo\",\"-d\",\"extension=/path/to/pdo_duckdb.so\"],\"env\":{\"LD_LIBRARY_PATH\":\"/path/to/duckdb/lib\"}}.\n");
+        . "runners.json maps 1.5.3, 1.5.6, 2.0.0, and 2.0.1 to {\"command\":[\"/path/to/php\",\"-n\",\"-d\",\"extension=pdo\",\"-d\",\"extension=/path/to/pdo_duckdb.so\"],\"env\":{\"LD_LIBRARY_PATH\":\"/path/to/duckdb/lib\"}}.\n");
     exit($argc === 2 ? 0 : 1);
 }
 
@@ -113,7 +113,7 @@ $directory = null;
 $status = 0;
 try {
     $runners = json_decode(file_get_contents($argv[1]), true, 512, JSON_THROW_ON_ERROR);
-    foreach (['1.5.3', '1.5.6', '2.0.0'] as $version) {
+    foreach (['1.5.3', '1.5.6', '2.0.0', '2.0.1'] as $version) {
         $runner = $runners[$version] ?? [];
         if (!isset($runner['command']) || !is_array($runner['command'])
             || !array_is_list($runner['command']) || $runner['command'] === []) {
@@ -145,11 +145,11 @@ try {
         $marker = "$nonce/$creator";
         $initial = [[1, $marker, '6F6C6400FF']];
         expect_rows(run_engine($runners, $creator, 'create', $path, $marker), $initial, "$creator create");
-        expect_rows(run_engine($runners, '2.0.0', 'read', $path), $initial, "$creator read by GA");
+        expect_rows(run_engine($runners, '2.0.1', 'read', $path), $initial, "$creator read by GA");
         $marker .= '/GA';
         $updated = [[1, $marker, '6F6C6400FF'], [2, "$marker/new", '6E657700FE']];
-        expect_rows(run_engine($runners, '2.0.0', 'write', $path, $marker), $updated, "$creator GA write");
-        foreach (['1.5.3', '1.5.6', '2.0.0'] as $reader) {
+        expect_rows(run_engine($runners, '2.0.1', 'write', $path, $marker), $updated, "$creator GA write");
+        foreach (['1.5.3', '1.5.6', '2.0.0', '2.0.1'] as $reader) {
             expect_rows(run_engine($runners, $reader, 'read', $path), $updated, "$creator reopened by $reader");
         }
         echo "$creator file: GA update and insert survive both old readers\n";
@@ -158,9 +158,9 @@ try {
         $path = "$directory/compatible-$compatibility.db";
         $marker = "$nonce/$compatibility";
         $expected = [[1, $marker, '6F6C6400FF']];
-        expect_rows(run_engine($runners, '2.0.0', 'create', $path, $marker, $compatibility), $expected,
+        expect_rows(run_engine($runners, '2.0.1', 'create', $path, $marker, $compatibility), $expected,
             "$compatibility create");
-        foreach (['1.5.3', '1.5.6', '2.0.0'] as $reader) {
+        foreach (['1.5.3', '1.5.6', '2.0.0', '2.0.1'] as $reader) {
             expect_rows(run_engine($runners, $reader, 'read', $path), $expected, "$compatibility read by $reader");
         }
         echo "GA $compatibility compatibility: both old readers preserve data\n";
@@ -168,7 +168,7 @@ try {
     $path = "$directory/default.db";
     $marker = "$nonce/default";
     $expected = [[1, $marker, '6F6C6400FF']];
-    expect_rows(run_engine($runners, '2.0.0', 'create', $path, $marker), $expected, 'GA default create');
+    expect_rows(run_engine($runners, '2.0.1', 'create', $path, $marker), $expected, 'GA default create');
     foreach (['1.5.3', '1.5.6'] as $reader) {
         $error = run_engine($runners, $reader, 'reject', $path);
         if (!str_contains($error, 'Trying to read a database file with version number')
@@ -176,8 +176,9 @@ try {
             throw new RuntimeException("$reader: unexpected new-format rejection: $error");
         }
     }
-    expect_rows(run_engine($runners, '2.0.0', 'read', $path), $expected, 'GA default after old-reader rejection');
-    echo "GA default format: both old readers reject it; GA data remains intact\n";
+    expect_rows(run_engine($runners, '2.0.1', 'read', $path), $expected, 'GA default after old-reader rejection');
+    expect_rows(run_engine($runners, '2.0.0', 'read', $path), $expected, 'GA default read by 2.0.0');
+    echo "GA default format: both old readers reject it; GA data remains intact and 2.0.0 reads it\n";
 } catch (Throwable $e) {
     fwrite(STDERR, $e::class . ': ' . $e->getMessage() . "\n");
     $status = 1;

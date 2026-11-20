@@ -13,7 +13,7 @@ on:
 permissions: {}
 
 env:
-  DUCKDB_VERSION: '2.0.0'
+  DUCKDB_VERSION: '2.0.1'
   # Official php:8.6 Docker images are ZTS-only and setup-php's macOS 8.6 build
   # is not the 8.6.0 release, so the 8.6 runtime is built from the release
   # tarball inside each lane's pinned baseline.

@@ -6,13 +6,13 @@ ab3d1d33951b8cb8bdcae740d8e06adf66bfb7ee880a3f7052d7a35088e16d2d  static-libs-li
 56249751117a4c04289764e06eb431352ce33fb3f8e2f30401122d4d0e184139  static-libs-linux-arm64.zip
 e77c382fba15e3f5c0b3265d12e3a4de534699fdb91bcc9d10d4a857a58103d5  static-libs-osx-arm64.zip
 
-# DuckDB 2.0.0 GA release assets.
-993ad89e7dfca66cd6da994c2cad090c2fc160ddf9f550498a098ab4bb13cfb1  duckdb-shared-libs-linux-amd64.tar.gz
-14cd63180614cfd961f7959146ecd9087527ff20b67311efdc3fa1c29c18204d  duckdb-shared-libs-osx-universal.tar.gz
-2b83169128239de5f45fe21de80f99bf436e53aa4bb24020dd951a1ba8d4b95f  duckdb-shared-libs-windows-amd64.tar.gz
-112d62c980f5447cd303a70b3dacbc09acd41ccb4ef6d154e8629f543a0f8568  duckdb-static-libs-linux-amd64.tar.gz
-8171b4842e68a85b2e82b342d3bf7b542a88fd6666e0c18438d7b459012494ee  duckdb-static-libs-linux-arm64.tar.gz
-c3a571e6d4a0da97534c631df463ab13c07f8cf78049625f5df936b7beaab9ce  duckdb-static-libs-osx-arm64.tar.gz
-2f783d69fc8713cf8482577fcde7e000f487997908feb9ef20ad35a3a642f59c  duckdb-static-libs-linux-amd64-musl.tar.gz
-988bd2dbe05a115ee45ec97dd29b405ca59d54999fca712d7230d0b8ff930c44  duckdb-static-libs-linux-arm64-musl.tar.gz
-9a7e2c1200209ea70cdf4535aa3fdf581c3a141137569462ed7b555cde49b112  duckdb-static-libs-windows-amd64.tar.gz
+# DuckDB 2.0.1 GA release assets.
+e25502612fed533a243b61f23a2a574daad030e7e88906222a5f0ab30d06769e  duckdb-shared-libs-linux-amd64.tar.gz
+9a4be5a2a31ad5bb8c92bf37f18d59b9c10a79b392d7848cabd6eb2e05837449  duckdb-shared-libs-osx-universal.tar.gz
+d51f23831423b82418ee1d5bae324484f9fbe4a2c2424fa5b6be3392453c62ce  duckdb-shared-libs-windows-amd64.tar.gz
+2d5655fd5948dfb0cd16df5fc8f7cdf0b37948374cf0629af995cf4a5e3a4c82  duckdb-static-libs-linux-amd64.tar.gz
+3d581ff935f1836363cc459e640737cdc1892ab3ed69e74853e93f01d9d071f0  duckdb-static-libs-linux-arm64.tar.gz
+adaada35202db67d010b06277320aa700f1313d9997b549a948349c9fd749a41  duckdb-static-libs-osx-arm64.tar.gz
+16b18b670cc6e4c8b9cc6d5716dbb7eb76ec4c1043c022fe01d4e15cae0fd601  duckdb-static-libs-linux-amd64-musl.tar.gz
+d83ef54db14dd00c30aefa4d462134ae1cf09783bf8879299c34b5e38746bcb3  duckdb-static-libs-linux-arm64-musl.tar.gz
+5dc279579e87ae657bc7b5e2988742a6fd6ca3cd1c326990c05bb0a0f9939bf0  duckdb-static-libs-windows-amd64.tar.gz

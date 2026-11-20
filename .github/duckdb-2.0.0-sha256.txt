@@ -1,0 +1,3 @@
+# DuckDB 2.0.0 source-compatibility builds.
+993ad89e7dfca66cd6da994c2cad090c2fc160ddf9f550498a098ab4bb13cfb1  duckdb-shared-libs-linux-amd64.tar.gz
+112d62c980f5447cd303a70b3dacbc09acd41ccb4ef6d154e8629f543a0f8568  duckdb-static-libs-linux-amd64.tar.gz
