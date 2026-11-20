@@ -20,8 +20,9 @@ class PdoDuckDb_Ext
      * closed or poisoned appender throws Error("Pdo\Duckdb\Appender is
      * closed"); close() is not idempotent. A failed native append/flush/close
      * poisons the appender: committed rows survive, unflushed rows are lost.
-     * A duplicate-primary-key failure during flush() or close() aborts an explicit
-     * transaction, including earlier flushes; roll back the transaction.
+     * A primary key, UNIQUE, NOT NULL, or CHECK constraint violation during
+     * flush() or close() aborts an explicit transaction, including earlier
+     * flushes; roll back the transaction.
      * Probe rejections ("Failed to append value: ...") and soft validation
      * failures leave the appender usable.
      */

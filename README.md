@@ -25,10 +25,8 @@ foreach ($stmt as $row) {
 ## Requirements
 
 - PHP 8.1 or newer with the `pdo` extension for source builds
-- Prebuilt binaries require PHP 8.2.35+, 8.3.36+, 8.4.27+, or 8.5.12+ in their
-  respective series. PHP 8.6 binaries are development builds that target
-  8.6.0RC4 on Linux and macOS and the current 8.6.0 release candidate on
-  Windows.
+- Prebuilt binaries require PHP 8.2.36+, 8.3.37+, 8.4.28+, 8.5.13+, or 8.6.0+
+  in their respective series.
 - For a source build only: DuckDB 1.5.3 or newer (`libduckdb`, complete C
   headers, and matching verified bridge sources; see [BUILDING.md](BUILDING.md)),
   available as a prebuilt bundle from the [DuckDB installation page](https://duckdb.org/docs/installation/)
@@ -128,6 +126,26 @@ on Windows or macOS. Supporting those names requires a filesystem-aware engine
 cache and path manager; the driver does not create competing instances to
 work around that restriction.
 
+In thread-safe PHP (FrankenPHP, a ZTS embed), threads that use connections to
+the same file run `SELECT` statements concurrently. Statements that may write
+take the database exclusively: `exec()`, prepared statements other than
+`SELECT`, and Appender calls. Concurrent autocommit updates of one row
+therefore queue instead of failing with a DuckDB write conflict. A
+persistent-connection checkout holds the database shared, except when it must
+reset an instance-wide setting (`http_proxy`, `http_proxy_username`,
+`http_proxy_password`, or a loaded httpfs extension's certificate and client
+options): the first checkout of each database, and any checkout after a
+request changed one of those settings, waits for running statements on the
+file. Opening or closing a connection never waits for a busy
+database at another path.
+
+When `open_basedir` is set, releasing a result (`closeCursor()`, a
+re-execute, or freeing the statement) and closing a connection also take the
+database exclusively, because they stop DuckDB's file log sinks. They wait for
+statements running on the same file in other threads, so same-file queries
+still queue. For example, `$db->query($sql)->fetchAll()` waits when it frees
+its statement.
+
 ### Connection options
 
 Append DuckDB configuration as `;key=value` pairs on the DSN, or pass them as a
@@ -184,9 +202,9 @@ $app->close();   // flush + finalize; further append/flush/close throw
 ```
 
 A successful `flush()` writes buffered rows into the connection's current
-transaction and leaves the appender usable. The rows are committed immediately only in
-autocommit mode; an explicit transaction still needs `commit()` and can be
-rolled back. `close()` flushes, finalizes the native appender, and marks the
+transaction and leaves the appender usable. The rows are committed immediately
+only in autocommit mode; an explicit transaction still needs `commit()` and can
+be rolled back. `close()` flushes, finalizes the native appender, and marks the
 PHP object closed.
 Prefer an explicit `close()`. If you don't close an appender, PHP closes it when
 the appender or its connection is destroyed:
@@ -223,10 +241,10 @@ Cast-probe failures and finite overflow in a top-level `FLOAT` column throw
 buffered rows. Hard DuckDB failures on append/flush/close (including casts
 without an available preflight probe) poison the appender:
 later use throws `Error` and you must create a new one. Rows already committed
-survive, but buffered rows are lost. A duplicate-primary-key failure during
-`flush()` or `close()` aborts an explicit transaction,
-including its earlier successful flushes. Roll back the failed transaction;
-those earlier rows cannot be committed. See
+survive, but buffered rows are lost. A primary key, `UNIQUE`, `NOT NULL`, or
+`CHECK` constraint violation during `flush()` or `close()` aborts an explicit
+transaction, including its earlier successful flushes. Roll back the failed
+transaction; those earlier rows cannot be committed. See
 [transaction aborts](#sql-behavior-changes).
 
 The appender doesn't check strings for valid UTF-8 before a top-level
@@ -623,6 +641,32 @@ Persistent connections reset `DUCKDB_ATTR_UNBUFFERED` and
 checkout (`check_liveness`). Pass it again in the constructor options, or call
 `setAttribute` after each `new PDO(..., [PDO::ATTR_PERSISTENT => true])`.
 
+### `max_execution_time`
+
+When `max_execution_time` expires during a DuckDB call, the driver
+interrupts the running query with `duckdb_interrupt`. The call fails with
+`INTERRUPT Error: Interrupted!` and PHP then raises its `Maximum execution
+time` fatal error. This needs a timer that signals the timed-out thread:
+
+- Thread-safe PHP (FrankenPHP, ZTS) on Linux and FreeBSD, which uses per-thread
+  timers.
+- Non-thread-safe PHP on Linux, macOS, and other POSIX systems.
+
+Thread-safe PHP on macOS arms one process-wide timer whose signal can reach
+another thread, so the driver leaves the hook off there. On Windows, PHP's
+timer doesn't run the hook. In both cases a running query finishes before PHP
+reports the timeout.
+
+### DuckDB log output
+
+DuckDB writes its `stdout` log storage
+(`CALL enable_logging(storage = 'stdout')`) and any other engine messages to
+the process's standard output and error, not to the PHP response. PHP output
+buffering doesn't capture them, and under FrankenPHP they appear in the server
+log. To read DuckDB log entries from PHP, use `storage = 'memory'` and query
+`duckdb_logs`. When `open_basedir` is set, the driver switches logging to
+memory storage.
+
 ## DuckDB 2.0
 
 Prebuilt binaries use DuckDB 2.0.0. Source builds continue to support DuckDB
@@ -867,10 +911,11 @@ Other contracts:
   `close()` is not idempotent: closing an already-closed appender throws the
   same `Error`. A failed native append/flush/close poisons the appender (later
   use throws `Error`); committed rows survive, but unflushed buffered rows
-  are lost. A duplicate-primary-key failure during `flush()` or `close()` aborts an
-  explicit transaction, including earlier flushes; roll it back (see
-  [transaction aborts](#sql-behavior-changes)). Probe rejections
-  (`Failed to append value: …`) and soft validation failures don't poison.
+  are lost. Primary key, `UNIQUE`, `NOT NULL`, and `CHECK` constraint violations
+  during `flush()` or `close()` abort the explicit transaction, including
+  earlier flushes; roll it back (see [transaction aborts](#sql-behavior-changes)).
+  Probe rejections (`Failed to append value: …`) and soft validation failures
+  don't poison.
 - **Structured conversion errors.** A row whose value exceeds the native
   nesting limit or cannot be decoded fails before any column is read: under
   `ERRMODE_EXCEPTION` the fetch throws, otherwise it returns `false` with the

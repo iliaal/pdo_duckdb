@@ -790,7 +790,9 @@ static int pdo_duckdb_stmt_execute(pdo_stmt_t *stmt)
 		}
 	}
 	pdo_duckdb_stmt_clear_expanded_bindings(S);
-	if (!pdo_duckdb_native_enter(S->H)) {
+	if (!(S->deferred_query || !S->prepared
+			|| duckdb_prepared_statement_type(S->prepared) != DUCKDB_STATEMENT_TYPE_SELECT
+			? pdo_duckdb_native_enter_write(S->H) : pdo_duckdb_native_enter(S->H))) {
 		if (expanded) {
 			zend_string_release(expanded);
 		}

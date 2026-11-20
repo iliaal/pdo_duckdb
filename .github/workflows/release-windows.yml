@@ -51,7 +51,7 @@ jobs:
               (if $source then ["8.1"] else (if $floor then ["8.1"] else [] end) + ["8.2", "8.3", "8.4", "8.5", "8.6"] end) | .[] as $php |
               ["nts", "ts"][] as $ts |
               {php: $php, ts: $ts,
-               channel: (if $php == "8.6" then "development" elif $php == "8.1" then "source" else "stable" end),
+               channel: (if $php == "8.1" then "source" else "stable" end),
                runner: (if $php == "8.6" then "windows-2025-vs2026" else "windows-2022" end)}
             ]}')
           echo "matrix=$matrix" >> "$GITHUB_OUTPUT"

@@ -2,7 +2,7 @@ param(
     [Parameter(Mandatory)][string] $PackageVersion,
     [Parameter(Mandatory)][ValidatePattern('^8\.[1-6]$')][string] $PhpSeries,
     [Parameter(Mandatory)][ValidateSet('nts', 'ts')][string] $ThreadSafety,
-    [Parameter(Mandatory)][ValidateSet('source', 'stable', 'development')][string] $Channel,
+    [Parameter(Mandatory)][ValidateSet('source', 'stable')][string] $Channel,
     [string] $BuildDirectory = 'builder',
     [string] $ArtifactsDirectory = 'artifacts',
     [string] $DuckDBDirectory = 'duckdb-deps',
@@ -15,7 +15,7 @@ $ErrorActionPreference = 'Stop'
 if ($PackageVersion -notmatch '^[A-Za-z0-9][A-Za-z0-9._+-]*$') {
     throw 'unsupported package version for an archive name'
 }
-$expectedChannel = if ($PhpSeries -eq '8.6') { 'development' } elseif ($PhpSeries -eq '8.1') { 'source' } else { 'stable' }
+$expectedChannel = if ($PhpSeries -eq '8.1') { 'source' } else { 'stable' }
 if ($Channel -ne $expectedChannel) { throw 'PHP channel does not match its version' }
 $vs = if ($PhpSeries -in @('8.1', '8.2', '8.3')) { 'vs16' } elseif ($PhpSeries -eq '8.6') { 'vs18' } else { 'vs17' }
 $suffix = "$PhpSeries-$ThreadSafety-$vs-x86_64"
@@ -37,10 +37,11 @@ if ($sdkVersionLine.Count -ne 1 -or $sdkVersionLine[0] -notmatch '^#define PHP_V
 }
 $sdkVersion = $Matches[1]
 $stableVersions = @{
-    '8.2' = '8.2.35'
-    '8.3' = '8.3.36'
-    '8.4' = '8.4.27'
-    '8.5' = '8.5.12'
+    '8.2' = '8.2.36'
+    '8.3' = '8.3.37'
+    '8.4' = '8.4.28'
+    '8.5' = '8.5.13'
+    '8.6' = '8.6.0'
 }
 if ($Channel -eq 'stable' -and $sdkVersion -cne $stableVersions[$PhpSeries]) {
     throw "expected pinned PHP SDK $($stableVersions[$PhpSeries]), got $sdkVersion"
@@ -111,9 +112,7 @@ echo json_encode([PHP_VERSION, PHP_MAJOR_VERSION . '.' . PHP_MINOR_VERSION, PHP_
             throw "PHP ABI mismatch: $identity"
         }
         if ($version -ne $sdkVersion) { throw "PHP runtime $version differs from SDK $sdkVersion" }
-        if ($Channel -eq 'development') {
-            if ($version -cnotmatch '^8\.6\.0RC\d+$') { throw "expected a PHP 8.6.0 release candidate, got $version" }
-        } elseif ($version -notmatch '^8\.[1-5]\.\d+$') {
+        if ($version -notmatch '^8\.[1-6]\.\d+$') {
             throw "expected stable PHP, got $version"
         }
         Write-Host "Validating PHP $version $ThreadSafety x64 ($Channel), SDK $sdkVersion, $vs"
