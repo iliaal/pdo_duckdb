@@ -19,7 +19,10 @@ class PdoDuckDb_Ext
      * an empty $columns list, TypeError for non-string column names. Using a
      * closed or poisoned appender throws Error("Pdo\Duckdb\Appender is
      * closed"); close() is not idempotent. A failed native append/flush/close
-     * poisons the appender: flushed rows survive, unflushed rows are lost.
+     * poisons the appender: committed rows survive, unflushed rows are lost.
+     * A primary key, UNIQUE, NOT NULL, or CHECK constraint violation during
+     * flush() or close() aborts an explicit transaction, including earlier
+     * flushes; roll back the transaction.
      * Probe rejections ("Failed to append value: ...") and soft validation
      * failures leave the appender usable.
      */
