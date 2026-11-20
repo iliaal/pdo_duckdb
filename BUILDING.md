@@ -150,12 +150,15 @@ replace the combined DLL: it does not export the bridge entry points.
 
 ## Binary targets and verification
 
-The binary workflows build PHP 8.2–8.6 as stable targets. Linux and macOS
-build the PHP 8.6 runtime from the checksum-pinned 8.6.0 release tarball; the
-other series use pinned PHP images or setup-php. PHP 8.1 remains a source target.
-Stable binaries require PHP 8.2.36+, 8.3.37+, 8.4.28+, 8.5.13+, or 8.6.0+ in
-their respective series. They use the newer PHP allocation APIs to stop safely after
-a pending memory-limit error. Older patches remain supported through source
+The binary workflows build PHP 8.2–8.6 as stable targets. Linux builds the
+PHP 8.6 runtime, and macOS every runtime, from checksum-pinned release
+tarballs; the other Linux series use digest-pinned PHP images. PHP 8.1 remains
+a source target. Each Linux and macOS series builds on the oldest patch that
+exports the newer PHP allocation APIs, which stop safely after a pending
+memory-limit error: PHP 8.2.35+, 8.3.36+, 8.4.27+, 8.5.12+, or 8.6.0+. Windows
+binaries build on the PHP SDK that php-windows-builder resolves for each
+series and require 8.2.36+, 8.3.37+, 8.4.28+, 8.5.13+, or 8.6.0+. A module
+refuses to load on a patch older than the one it was built against. Older patches remain supported through source
 builds; do not load these binaries on them. PIE selects archives by minor, so
 use the explicit source-build command in the README for older patches.
 Rebuild source-installed modules when upgrading PHP across these minimums.

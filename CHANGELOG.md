@@ -45,8 +45,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Compatibility
 
-- Prebuilt binaries now require PHP 8.2.36+, 8.3.37+, 8.4.28+, 8.5.13+, or
-  8.6.0+, matching the 2026-11-19 PHP security releases they are built against.
+- Linux and macOS prebuilt binaries now require PHP 8.2.35+, 8.3.36+, 8.4.27+,
+  8.5.12+, or 8.6.0+, the first patches with the engine's safe allocation APIs.
+  Windows binaries require 8.2.36+, 8.3.37+, 8.4.28+, 8.5.13+, or 8.6.0+.
   Older patches require an explicit source build.
 - Source builds now compile against DuckDB 2.0.1, which renamed the engine's
   log storage classes to log sinks. Source builds against 2.0.0 and 1.5.3 or
