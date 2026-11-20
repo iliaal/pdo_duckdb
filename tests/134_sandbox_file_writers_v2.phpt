@@ -67,6 +67,12 @@ function attempt(string $label, string $sql): void {
 attempt('enable_logging storage_path', "CALL enable_logging(storage='file', storage_path='$outside/log_a')");
 attempt('enable_logging storage_config', "CALL enable_logging(storage='file', storage_config={'path': '$outside/log_b'})");
 attempt('SET logging_storage', "SET logging_storage='file'");
+// DuckDB 2.0.1 adds logging_sink and keeps logging_storage as a deprecated alias.
+$probe = new PDO('duckdb::memory:', null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
+$sink_setting = $probe->query("SELECT count(*) FROM duckdb_settings() WHERE name = 'logging_sink'")->fetchColumn()
+    ? 'logging_sink' : 'logging_storage';
+$probe = null;
+attempt('SET sink-selection setting', "SET $sink_setting='stdout'");
 attempt('SET enable_logging', 'SET enable_logging=true');
 attempt('DIRECT_IO attach', "ATTACH '$outside/direct.db' AS d (IO_MODE 'DIRECT_IO')");
 attempt('MMAP attach', "ATTACH '$outside/mmap.db' AS m (IO_MODE 'MMAP')");
@@ -100,6 +106,7 @@ bool(true)
 enable_logging storage_path: denied
 enable_logging storage_config: denied
 SET logging_storage: denied
+SET sink-selection setting: denied
 SET enable_logging: denied
 DIRECT_IO attach: denied
 MMAP attach: denied

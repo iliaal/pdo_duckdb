@@ -22,6 +22,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   now interrupts the query when the limit expires, on Linux and FreeBSD
   thread-safe builds and on non-thread-safe POSIX builds. Thread-safe builds
   on macOS and all Windows builds still run the query to completion first.
+- Fixed `COPY ... TO` and `duckdb_extensions()` failing with "Database path
+  was replaced or unlinked" on DuckDB 2.0.1 after the target file or an
+  installed extension was deleted or replaced. Only files opened as attached
+  databases now refuse replacement.
+- Fixed fetched nested values on DuckDB 2.0.1 leaving a scalar UNION member
+  inside a LIST, ARRAY, STRUCT, or MAP unquoted; they now match
+  `CAST(... AS VARCHAR)`, which quotes such members from 2.0.1 on.
 
 ### Changed
 
@@ -39,6 +46,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Prebuilt binaries now require PHP 8.2.36+, 8.3.37+, 8.4.28+, 8.5.13+, or
   8.6.0+, matching the 2026-11-19 PHP security releases they are built against.
   Older patches require an explicit source build.
+- Source builds now compile against DuckDB 2.0.1, which renamed the engine's
+  log storage classes to log sinks. Source builds against 2.0.0 and 1.5.3 or
+  later are unchanged.
 
 ## [0.9.0] - 2026-10-27
 

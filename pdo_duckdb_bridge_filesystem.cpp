@@ -8,6 +8,7 @@
 #include "duckdb/main/capi/capi_internal.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/client_context_state.hpp"
+#include "duckdb/main/database_manager.hpp"
 #include "duckdb/planner/extension_callback.hpp"
 
 #include <algorithm>
@@ -106,6 +107,8 @@ struct Entry {
 	Identity identity;
 	std::vector<const Owner *> owners;
 	std::vector<PendingReference> pending;
+	// Set once an owner reports the path as an attached database; only those entries refuse replacement.
+	bool database = false;
 
 	bool HasOwner(const Owner *owner) const { return std::find(owners.begin(), owners.end(), owner) != owners.end(); }
 	void AddOwner(const Owner *owner) {
@@ -139,11 +142,7 @@ class Registry {
   public:
 	void Validate(const std::string &path) {
 		std::lock_guard<std::mutex> lock(mutex);
-		for (const auto &entry : entries) {
-			if (entry.path == path) {
-				ValidateEntry(entry);
-			}
-		}
+		DropStale([&](const Entry &entry) { return entry.path == path; });
 	}
 
 	std::string Canonicalize(const Owner *owner, const std::string &path,
@@ -151,9 +150,9 @@ class Registry {
 		std::lock_guard<std::mutex> lock(mutex);
 		CapturePending(nullptr);
 		auto identity = identify(path);
+		DropStale([&](const Entry &entry) { return entry.path == path || entry.identity.Matches(identity); });
 		for (auto &entry : entries) {
 			if (entry.path == path || entry.identity.Matches(identity)) {
-				ValidateEntry(entry);
 				entry.AddReference(owner, query);
 				return entry.path;
 			}
@@ -170,6 +169,17 @@ class Registry {
 	void Refresh(const Owner *owner) {
 		std::lock_guard<std::mutex> lock(mutex);
 		CapturePending(owner);
+	}
+
+	void MarkDatabases(const Owner *owner, const std::vector<std::string> &paths) {
+		std::lock_guard<std::mutex> lock(mutex);
+		CapturePending(owner);
+		for (auto &entry : entries) {
+			if (!entry.database && entry.HasOwner(owner) &&
+				std::find(paths.begin(), paths.end(), entry.path) != paths.end()) {
+				entry.database = true;
+			}
+		}
 	}
 
 	void Remove(const Owner *owner) {
@@ -209,10 +219,19 @@ class Registry {
 	}
 
   private:
-	static void ValidateEntry(const Entry &entry) {
-		if (entry.identity.kind == FileKind::REGULAR && !entry.identity.Matches(identify(entry.path))) {
-			throw std::runtime_error(
-				"Database path was replaced or unlinked; close its filesystem owners before reopening");
+	// DuckDB 2.0.1 also canonicalizes COPY targets and extension files. Their samples are not databases, so a
+	// replaced one is dropped and sampled again instead of refusing the path.
+	template <typename Selected>
+	void DropStale(Selected selected) {
+		for (auto it = entries.begin(); it != entries.end();) {
+			if (!selected(*it) || it->identity.kind != FileKind::REGULAR || it->identity.Matches(identify(it->path))) {
+				++it;
+			} else if (it->database) {
+				throw std::runtime_error(
+					"Database path was replaced or unlinked; close its filesystem owners before reopening");
+			} else {
+				it = entries.erase(it);
+			}
 		}
 	}
 
@@ -261,6 +280,7 @@ class Owner {
 	}
 	void Validate(const std::string &path) { registry->Validate(path); }
 	void Refresh() { registry->Refresh(this); }
+	void MarkDatabases(const std::vector<std::string> &paths) { registry->MarkDatabases(this, paths); }
 	void Complete(const std::shared_ptr<const QueryToken> &query, bool failed) {
 		registry->Complete(this, query, failed);
 	}
@@ -284,7 +304,7 @@ class CaptureCreatedFiles final : public duckdb::ClientContextState {
 		}
 		return query;
 	}
-	void QueryEnd(duckdb::ClientContext &, duckdb::optional_ptr<duckdb::ErrorData> error) noexcept override {
+	void QueryEnd(duckdb::ClientContext &context, duckdb::optional_ptr<duckdb::ErrorData> error) noexcept override {
 		try {
 			std::shared_ptr<const QueryToken> completed;
 			{
@@ -292,10 +312,12 @@ class CaptureCreatedFiles final : public duckdb::ClientContextState {
 				active = false;
 				completed.swap(query);
 			}
-			if (completed) {
-				if (auto current = owner.lock()) {
+			if (auto current = owner.lock()) {
+				if (completed) {
 					current->Complete(completed, error && error->HasError());
 				}
+				// Read outside the registry lock so the registry never waits on the database manager.
+				current->MarkDatabases(duckdb::DatabaseManager::Get(context).GetAttachedDatabasePaths());
 			}
 		} catch (...) {
 			// QueryEnd follows commit. Keep the sample pending; the next canonicalization retries before opening.
@@ -330,7 +352,10 @@ class IdentityFileSystem final : public duckdb::VirtualFileSystem {
 		}
 		return owner->Canonicalize(canonical, query);
 	}
-	void Refresh() { owner->Refresh(); }
+	void Refresh(duckdb::DatabaseInstance &db) {
+		owner->Refresh();
+		owner->MarkDatabases(duckdb::DatabaseManager::Get(db).GetAttachedDatabasePaths());
+	}
 
   private:
 	std::shared_ptr<Owner> owner;
@@ -375,6 +400,6 @@ extern "C" pdd_bridge_status pdd_bridge_filesystem_refresh(duckdb_database handl
 		auto &config = duckdb::DBConfig::GetConfig(*wrapper.database->instance);
 		auto filesystem = dynamic_cast<IdentityFileSystem *>(config.file_system.get());
 		pdd_bridge::require(filesystem != nullptr, "Database has no PDO filesystem identity guard");
-		filesystem->Refresh();
+		filesystem->Refresh(*wrapper.database->instance);
 	});
 }

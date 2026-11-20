@@ -20,6 +20,10 @@ $cases = [
     "[[TIME '12:00:00']::TIME[1]]",
     "[union_value(t := TIME '12:00:00')::UNION(n INTEGER, t TIME)]",
     "{'u': union_value(t := TIMESTAMP '2020-01-01 10:00:00')::UNION(n INTEGER, t TIMESTAMP)}",
+    "MAP {union_value(t := 'a:b')::UNION(n INTEGER, t VARCHAR): union_value(t := TIME '01:02:03')::UNION(n INTEGER, t TIME)}",
+    "[union_value(t := 'a:b')::UNION(n INTEGER, t VARCHAR)]::UNION(n INTEGER, t VARCHAR)[1]",
+    "[union_value(l := [TIME '12:00:00'])::UNION(n INTEGER, l TIME[]), union_value(n := NULL)::UNION(n INTEGER, l TIME[])]",
+    "[{'v': 1::VARIANT, 'u': union_value(t := TIME '12:00:00')::UNION(n INTEGER, t TIME)}]",
 ];
 $expected = [
     "['2020-01-01 10:00:00']",
@@ -32,10 +36,22 @@ $expected = [
     "[[12:00:00]]",
     "[12:00:00]",
     "{'u': 2020-01-01 10:00:00}",
+    "{a:b=01:02:03}",
+    "[a:b]",
+    "[['12:00:00'], NULL]",
+    "[{'v': 1, 'u': 12:00:00}]",
 ];
 if (pdo_duckdb_v2_headers()) {
     $expected[6] = "['2020-01-01 10:00:00', '2020-01-01 11:00:00']";
     $expected[7] = "[['12:00:00']]";
+}
+// DuckDB 2.0.1 quotes a scalar UNION member inside a container like any other leaf.
+if (version_compare(ltrim($db->query('SELECT version()')->fetchColumn(), 'v'), '2.0.1', '>=')) {
+    $expected[8] = "['12:00:00']";
+    $expected[9] = "{'u': '2020-01-01 10:00:00'}";
+    $expected[10] = "{'a:b'='01:02:03'}";
+    $expected[11] = "['a:b']";
+    $expected[13] = "[{'v': 1, 'u': '12:00:00'}]";
 }
 foreach ($cases as $i => $expr) {
     $row = $db->query("SELECT $expr AS got, CAST($expr AS VARCHAR) AS want")->fetch(PDO::FETCH_ASSOC);
@@ -94,6 +110,10 @@ literal 7: canonical
 literal 8: canonical
 literal 9: canonical
 literal 10: canonical
+literal 11: canonical
+literal 12: canonical
+literal 13: canonical
+literal 14: canonical
 DATE list: 500 rows, 0 mismatches
 DATE struct: 500 rows, 0 mismatches
 DATE map_key: 500 rows, 0 mismatches

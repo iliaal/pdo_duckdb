@@ -473,6 +473,29 @@ static void variants_and_children(duckdb_connection connection) {
     duckdb_destroy_result(&result);
 }
 
+/* DuckDB 2.0.1 made duckdb_create_logical_type(VARIANT) return the complete type
+ * (src/main/capi/v1/logical_types-c.cpp); earlier engines omit its field types. */
+static int c_api_variant_is_complete(void) {
+    int major = 0, minor = 0, patch = 0;
+    REQUIRE(sscanf(duckdb_library_version(), "v%d.%d.%d", &major, &minor, &patch) == 3);
+    return major > 2 || (major == 2 && (minor > 0 || patch >= 1));
+}
+
+/* The feature test behind pdd_bridge_union_members_quoted() must agree with the engine's own rendering. */
+static void union_member_quoting(duckdb_connection connection) {
+    duckdb_result result;
+    query(connection, "SELECT CAST([union_value(t := TIME '12:00:00')::UNION(n INTEGER, t TIME)] AS VARCHAR), "
+                      "CAST(union_value(t := TIME '12:00:00')::UNION(n INTEGER, t TIME) AS VARCHAR)", &result);
+    char *nested = duckdb_value_varchar(&result, 0, 0);
+    char *top = duckdb_value_varchar(&result, 1, 0);
+    REQUIRE(nested != NULL && top != NULL);
+    REQUIRE(strcmp(top, "12:00:00") == 0);
+    REQUIRE(strcmp(nested, pdd_bridge_union_members_quoted() ? "['12:00:00']" : "[12:00:00]") == 0);
+    duckdb_free(nested);
+    duckdb_free(top);
+    duckdb_destroy_result(&result);
+}
+
 static void construction(void) {
     duckdb_value scalar = duckdb_create_varchar_length("a\0b", 3);
     pdd_bridge_value *value = NULL, *structure = NULL, *variant = NULL, *decoded = NULL;
@@ -488,17 +511,29 @@ static void construction(void) {
     pdd_bridge_bytes_free(&bytes);
     duckdb_destroy_logical_type(&type);
     type = duckdb_create_logical_type(DUCKDB_TYPE_VARIANT);
-    REQUIRE(pdd_bridge_value_cast(structure, type, NULL, &variant, &error) == PDD_BRIDGE_ERROR);
-    REQUIRE(variant == NULL && error.data != NULL);
-    pdd_bridge_error_free(&error);
-    duckdb_logical_type incomplete_list = duckdb_create_list_type(type);
-    REQUIRE(pdd_bridge_value_list(incomplete_list, NULL, 0, &decoded, &error) == PDD_BRIDGE_ERROR);
-    REQUIRE(decoded == NULL && error.data != NULL);
-    pdd_bridge_error_free(&error);
-    REQUIRE(pdd_bridge_type_declaration(incomplete_list, &bytes, &error) == PDD_BRIDGE_ERROR);
-    REQUIRE(bytes.data == NULL && error.data != NULL);
-    pdd_bridge_error_free(&error);
-    duckdb_destroy_logical_type(&incomplete_list);
+    duckdb_logical_type c_api_list = duckdb_create_list_type(type);
+    if (c_api_variant_is_complete()) {
+        OK(pdd_bridge_value_cast(structure, type, NULL, &variant, &error));
+        REQUIRE(variant != NULL);
+        pdd_bridge_value_destroy(&variant);
+        OK(pdd_bridge_value_list(c_api_list, NULL, 0, &decoded, &error));
+        REQUIRE(decoded != NULL);
+        pdd_bridge_value_destroy(&decoded);
+        OK(pdd_bridge_type_declaration(c_api_list, &bytes, &error));
+        expect_bytes(bytes, "VARIANT[]", 9);
+        pdd_bridge_bytes_free(&bytes);
+    } else {
+        REQUIRE(pdd_bridge_value_cast(structure, type, NULL, &variant, &error) == PDD_BRIDGE_ERROR);
+        REQUIRE(variant == NULL && error.data != NULL);
+        pdd_bridge_error_free(&error);
+        REQUIRE(pdd_bridge_value_list(c_api_list, NULL, 0, &decoded, &error) == PDD_BRIDGE_ERROR);
+        REQUIRE(decoded == NULL && error.data != NULL);
+        pdd_bridge_error_free(&error);
+        REQUIRE(pdd_bridge_type_declaration(c_api_list, &bytes, &error) == PDD_BRIDGE_ERROR);
+        REQUIRE(bytes.data == NULL && error.data != NULL);
+        pdd_bridge_error_free(&error);
+    }
+    duckdb_destroy_logical_type(&c_api_list);
     duckdb_destroy_logical_type(&type);
     OK(pdd_bridge_type_variant(&type, &error));
     OK(pdd_bridge_value_cast(structure, type, NULL, &variant, &error));
@@ -588,6 +623,7 @@ int main(void) {
     empty_key_variants(connection);
     variants_and_children(connection);
     construction();
+    union_member_quoting(connection);
     duckdb_disconnect(&connection);
     duckdb_close(&database);
     puts("bridge types: 40970 differential cells, metadata, typed VARIANT, NUL input, exact decimal, and error contracts passed");

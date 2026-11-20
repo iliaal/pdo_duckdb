@@ -68,7 +68,29 @@ void operator delete[](void *memory, std::size_t) noexcept {
 }
 #endif
 
+#if __has_include("duckdb/logging/log_sink.hpp")
+#define PDD_BRIDGE_TEST_LOG_SINK 1
+#endif
+
 namespace {
+
+#ifdef PDD_BRIDGE_TEST_LOG_SINK
+using LogSink = duckdb::LogSink;
+using BufferingLogSink = duckdb::BufferingLogSink;
+using FileLogSink = duckdb::FileLogSink;
+
+duckdb::shared_ptr<LogSink> current_sink(duckdb::LogManager &manager) {
+	return manager.GetLogSink();
+}
+#else
+using LogSink = duckdb::LogStorage;
+using BufferingLogSink = duckdb::BufferingLogStorage;
+using FileLogSink = duckdb::FileLogStorage;
+
+duckdb::shared_ptr<LogSink> current_sink(duckdb::LogManager &manager) {
+	return manager.GetLogStorage();
+}
+#endif
 
 void require(bool condition, const char *message) {
 	if (!condition) {
@@ -199,7 +221,7 @@ void require_revoked(Operation operation, const std::filesystem::path &directory
 		"Retained file storage did not report a revoked path");
 }
 
-void retained_storage_operations(duckdb::LogStorage &storage, duckdb_connection connection,
+void retained_storage_operations(LogSink &storage, duckdb_connection connection,
 	const std::filesystem::path &directory, const Files &before, bool normalized) {
 	require_revoked([&] { storage.FlushAll(); }, directory, before);
 	duckdb::vector<duckdb::Value> inputs;
@@ -220,7 +242,7 @@ void retained_storage_operations(duckdb::LogStorage &storage, duckdb_connection 
 	require_revoked([&] { storage.BindReplace(context, input, target); }, directory, before);
 }
 
-class BufferingStorageMembers : public duckdb::BufferingLogStorage {
+class BufferingStorageMembers : public BufferingLogSink {
 public:
 	static auto Mutex() noexcept {
 		return &BufferingStorageMembers::lock;
@@ -384,7 +406,7 @@ void storage_mismatch_test(bool actual_file) {
 		query(database.conn, "SELECT 'storage_mismatch_positive_control'");
 		auto &manager = log_manager(database.conn);
 		manager.SetEnableLogging(false);
-		auto storage = manager.GetLogStorage();
+		auto storage = current_sink(manager);
 		if (actual_file) {
 			manager.GlobalLoggerReference()->WriteLog("", duckdb::LogLevel::LOG_INFO, "storage_mismatch_pending_record");
 		}
@@ -423,8 +445,8 @@ void retained_storage_test(bool normalized) {
 		query(database.conn, "SELECT 'retained_storage_positive_control'");
 		auto &manager = log_manager(database.conn);
 		manager.SetEnableLogging(false);
-		auto storage = manager.GetLogStorage();
-		require(dynamic_cast<duckdb::FileLogStorage *>(storage.get()) != nullptr, "Expected engine file log storage");
+		auto storage = current_sink(manager);
+		require(dynamic_cast<FileLogSink *>(storage.get()) != nullptr, "Expected engine file log storage");
 		manager.GlobalLoggerReference()->WriteLog("", duckdb::LogLevel::LOG_INFO, "retained_storage_pending_record");
 		before = snapshot(directory.path);
 		require(contains(before, "retained_storage_positive_control"), "Retained storage positive control did not write");
@@ -449,8 +471,8 @@ Files concurrent_binder(duckdb_connection owner, duckdb_connection reader, const
 			prepare_reader();
 		}
 		manager.GlobalLoggerReference()->WriteLog("", duckdb::LogLevel::LOG_INFO, "concurrent_binder_pending_record");
-		auto storage = manager.GetLogStorage();
-		auto &buffering = dynamic_cast<duckdb::BufferingLogStorage &>(*storage);
+		auto storage = current_sink(manager);
+		auto &buffering = dynamic_cast<BufferingLogSink &>(*storage);
 		std::unique_lock<duckdb::mutex> storage_lock(buffering.*BufferingStorageMembers::Mutex());
 		const auto before = snapshot(directory);
 		require(contains(before, "concurrent_binder_positive_control"), "Concurrent binder positive control did not write");
@@ -534,7 +556,7 @@ void allocation_failure_test() {
 		require(contains(snapshot(directory.path), "allocation_failure_positive_control"), "Allocation failure positive control did not write");
 		query(database.conn, "BEGIN");
 		query(database.conn, "INSERT INTO writes VALUES(17)");
-		auto storage = log_manager(database.conn).GetLogStorage();
+		auto storage = current_sink(log_manager(database.conn));
 		{
 			Stream stream(database.conn);
 			idx_t rows = stream.next();

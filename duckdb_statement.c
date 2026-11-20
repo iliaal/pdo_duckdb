@@ -1618,8 +1618,10 @@ static void pdo_duckdb_smart_append_i64(smart_str *out, int64_t value)
  * with recognized whitespace, case-insensitively "null", or containing one
  * of "'(),:=[]{} (plus '\\' on 2.0). The engine applies the same test to
  * the VARCHAR rendering of every LIST/STRUCT/MAP child, so a TIME or
- * TIMESTAMP leaf (its ':') is quoted too. UNION members render raw in the
- * engine, so the recursion below passes escape=false for those. */
+ * TIMESTAMP leaf (its ':') is quoted too. A UNION renders its member raw at the
+ * top level; inside a container, DuckDB 2.0.1+ quotes a scalar member like any
+ * other leaf (NestedToVarcharCast::WrapChildCast) while earlier engines leave
+ * it raw. */
 static const bool pdo_duckdb_varchar_quote_table[256] = {
 	['"'] = true, ['\''] = true, ['('] = true, [')'] = true, [','] = true,
 	[':'] = true, ['='] = true, ['['] = true, [']'] = true, ['{'] = true,
@@ -2018,6 +2020,22 @@ static pdo_duckdb_nested_render_type *pdo_duckdb_nested_render_type_build(
 	return NULL;
 }
 
+/* DuckDB renders a nested UNION member without quotes. */
+static bool pdo_duckdb_nested_render_type_is_container(const pdo_duckdb_nested_render_type *type)
+{
+	switch (type->type) {
+		case DUCKDB_TYPE_LIST:
+		case DUCKDB_TYPE_ARRAY:
+		case DUCKDB_TYPE_STRUCT:
+		case DUCKDB_TYPE_MAP:
+		case DUCKDB_TYPE_UNION:
+		case DUCKDB_TYPE_VARIANT:
+			return true;
+		default:
+			return false;
+	}
+}
+
 static bool pdo_duckdb_fast_nested_cell_to_smart_str(duckdb_vector vec, idx_t row,
 		const pdo_duckdb_nested_render_type *type, smart_str *out, bool escape_varchar)
 {
@@ -2151,7 +2169,9 @@ static bool pdo_duckdb_fast_nested_cell_to_smart_str(duckdb_vector vec, idx_t ro
 
 			member_vec = duckdb_struct_vector_get_child(vec, tag + 1);
 			return pdo_duckdb_fast_nested_cell_to_smart_str(
-				member_vec, row, type->children[tag], out, false);
+				member_vec, row, type->children[tag], out,
+				escape_varchar && pdd_bridge_union_members_quoted()
+					&& !pdo_duckdb_nested_render_type_is_container(type->children[tag]));
 		}
 		default:
 			return pdo_duckdb_smart_append_fast_scalar(
@@ -2175,7 +2195,8 @@ static bool pdo_duckdb_fast_nested_col_to_string(duckdb_vector vec, idx_t row,
 			return false;
 	}
 
-	if (!pdo_duckdb_fast_nested_cell_to_smart_str(vec, row, type, &out, true)
+	/* escape_varchar describes the cell's parent: a top-level UNION has none. */
+	if (!pdo_duckdb_fast_nested_cell_to_smart_str(vec, row, type, &out, false)
 			|| PDO_DUCKDB_HAS_OOM()) {
 		smart_str_free(&out);
 		return false;

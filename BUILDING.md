@@ -46,6 +46,7 @@ The blocking compatibility builds use these source commits:
 | --- | --- |
 | 1.5.3 | `14eca11bd9d4a0de2ea0f078be588a9c1c5b279c` |
 | 1.5.6 | `069cc9f9b5be802405797faecc284961b07c70ef` |
+| 2.0.0 | `d54cbbe3df17e8e5ce68312f483b4155836112aa` |
 | 2.0.1 | `8d78114e90a53823803660bf821f6073ac87da8c` |
 
 ## Unix shared-library build

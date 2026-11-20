@@ -56,7 +56,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        duckdb: ['1.5.3', '1.5.6', '2.0.1']
+        duckdb: ['1.5.3', '1.5.6', '2.0.0', '2.0.1']
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -125,8 +125,12 @@ jobs:
         include:
           - php: '8.4'
             duckdb: '1.5.6'
+          - php: '8.4'
+            duckdb: '2.0.0'
     env:
       DUCKDB_VERSION: ${{ matrix.duckdb }}
+      # 2.0.0 and 2.0.1 publish identically named assets, so the older release keeps its own checksum file.
+      DUCKDB_SHA256_FILE: ${{ matrix.duckdb == '2.0.0' && '.github/duckdb-2.0.0-sha256.txt' || '.github/duckdb-sha256.txt' }}
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -144,7 +148,7 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: duckdb
-          key: duckdb-shared-linux-amd64-${{ env.DUCKDB_VERSION }}-${{ hashFiles('.github/duckdb-sha256.txt') }}-headers-v2
+          key: duckdb-shared-linux-amd64-${{ env.DUCKDB_VERSION }}-${{ hashFiles(env.DUCKDB_SHA256_FILE) }}-headers-v2
 
       - name: Download libduckdb
         if: steps.cache-duckdb.outputs.cache-hit != 'true'
@@ -156,7 +160,7 @@ jobs:
           esac
           curl -fsSL -o "$asset" \
             "https://github.com/duckdb/duckdb/releases/download/v${DUCKDB_VERSION}/${asset}"
-          grep "  $asset$" .github/duckdb-sha256.txt | sha256sum --check --strict
+          grep "  $asset$" "$DUCKDB_SHA256_FILE" | sha256sum --check --strict
           mkdir -p duckdb/include duckdb/lib raw
           case "$asset" in
             *.zip) unzip -o "$asset" -d raw ;;
@@ -175,7 +179,7 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: duckdb-static-probe.archive
-          key: duckdb-static-config-probe-${{ env.DUCKDB_VERSION }}-${{ hashFiles('.github/duckdb-sha256.txt') }}
+          key: duckdb-static-config-probe-${{ env.DUCKDB_VERSION }}-${{ hashFiles(env.DUCKDB_SHA256_FILE) }}
       - name: Verify and extract the static probe bundle
         if: matrix.php == '8.4'
         env:
@@ -190,7 +194,7 @@ jobs:
             curl -fsSL --retry 5 -o duckdb-static-probe.archive \
               "https://github.com/duckdb/duckdb/releases/download/v${DUCKDB_VERSION}/$asset"
           fi
-          checksum=$(awk -v asset="$asset" '$2 == asset { print $1 }' .github/duckdb-sha256.txt)
+          checksum=$(awk -v asset="$asset" '$2 == asset { print $1 }' "$DUCKDB_SHA256_FILE")
           [[ "$checksum" =~ ^[a-f0-9]{64}$ ]]
           printf '%s  duckdb-static-probe.archive\n' "$checksum" | sha256sum --check --strict -
           mkdir duckdb-static-probe
@@ -250,7 +254,7 @@ jobs:
       - name: Verify engine version and build generation
         env:
           PDO_DUCKDB_EXPECT_VERSION: ${{ matrix.duckdb }}
-          PDO_DUCKDB_EXPECT_V2: ${{ matrix.duckdb == '2.0.1' && '1' || '0' }}
+          PDO_DUCKDB_EXPECT_V2: ${{ startsWith(matrix.duckdb, '2.') && '1' || '0' }}
         run: |
           export LD_LIBRARY_PATH="$PWD/duckdb/lib"
           php -d "extension=$PWD/modules/pdo_duckdb.so" scripts/binary-probe.php
@@ -480,7 +484,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          for version in 1.5.3 1.5.6 2.0.1; do
+          for version in 1.5.3 1.5.6 2.0.0 2.0.1; do
             gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" \
               --name "interop-$version" --dir "storage-modules/$version"
           done
@@ -500,7 +504,7 @@ jobs:
               command += ['-d', 'extension=pdo']
           subprocess.run(command + pdo_probe, check=True)
           runners = {}
-          for version in ('1.5.3', '1.5.6', '2.0.1'):
+          for version in ('1.5.3', '1.5.6', '2.0.0', '2.0.1'):
               root = pathlib.Path('storage-modules', version).resolve()
               module = root / 'modules/pdo_duckdb.so'
               library = root / 'duckdb/lib/libduckdb.so'
