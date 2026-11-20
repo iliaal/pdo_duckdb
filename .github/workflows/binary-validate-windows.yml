@@ -14,7 +14,7 @@ on:
 permissions: {}
 
 concurrency:
-  group: binary-validate-windows-${{ github.ref }}
+  group: binary-validate-windows-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
