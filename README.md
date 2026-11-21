@@ -150,17 +150,22 @@ its statement.
 ### Connection options
 
 Append DuckDB configuration as `;key=value` pairs on the DSN, or pass them as a
-`PDO::DUCKDB_ATTR_CONFIG` array:
+`PDO::DUCKDB_ATTR_CONFIG` array. The following are two ways to open the same
+existing database read-only with a 2 GB memory limit:
 
 ```php
-// open a database read-only, with a memory cap
+// Via the DSN
 $db = new PDO('duckdb:/data/analytics.duckdb;access_mode=read_only;memory_limit=2GB');
 
-// equivalent, via the options array
-$db = new PDO('duckdb::memory:', null, null, [
-    PDO::DUCKDB_ATTR_CONFIG => ['threads' => 4, 'memory_limit' => '2GB'],
+// Alternatively, via the options array
+$db = new PDO('duckdb:/data/analytics.duckdb', null, null, [
+    PDO::DUCKDB_ATTR_CONFIG => ['access_mode' => 'read_only', 'memory_limit' => '2GB'],
 ]);
 ```
+
+If both forms supply a valid value for the same setting, the array value takes
+precedence over the DSN value, subject to the restrictions below. An invalid
+DSN option fails the connection before the array is applied.
 
 Any DuckDB setting name works (`access_mode`, `memory_limit`, `threads`, ...);
 an unknown option fails the connection. `force_mbedtls_unsafe` is rejected at
