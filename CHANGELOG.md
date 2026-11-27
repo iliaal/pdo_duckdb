@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed source builds through PIE 1.6 or newer failing with "Unable to stage
+  the DuckDB shared library" when PHP was built with a multiarch
+  `--with-libdir` (such as `lib/x86_64-linux-gnu`) and libduckdb sits in the
+  prefix's plain `lib/` directory. `configure` now falls back to `lib/` when
+  the multiarch directory holds no libduckdb.
+
 ## [0.10.0] - 2026-11-20
 
 ### Fixed

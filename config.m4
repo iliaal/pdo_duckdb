@@ -237,6 +237,14 @@ elif test "$PHP_PDO_DUCKDB" != "no"; then
   DUCKDB_CONFIG_INCLUDE="$DUCKDB_CONFIG_INCLUDE_STAGE"
   DUCKDB_CONFIG_LIBDIR="$DUCKDB_CONFIG_LIBDIR_STAGE"
   DUCKDB_RUNTIME_LIBDIR="$DUCKDB_DIR/$PHP_LIBDIR"
+  dnl PIE 1.6+ forwards PHP's own --with-libdir (e.g. lib/x86_64-linux-gnu),
+  dnl but DuckDB's release bundle and most hand installs put libduckdb in a
+  dnl plain lib/ under the prefix. Use that when the multiarch dir has none.
+  if test "$PHP_LIBDIR" != "lib" &&
+      ! ls "$DUCKDB_RUNTIME_LIBDIR"/libduckdb.* >/dev/null 2>&1 &&
+      ls "$DUCKDB_DIR/lib"/libduckdb.* >/dev/null 2>&1; then
+    DUCKDB_RUNTIME_LIBDIR="$DUCKDB_DIR/lib"
+  fi
   if ! rm -rf "$DUCKDB_CONFIG_INCLUDE_STAGE" "$DUCKDB_CONFIG_LIBDIR_STAGE" ||
       ! ln -s "$DUCKDB_INCDIR" "$DUCKDB_CONFIG_INCLUDE_STAGE"; then
     pdo_duckdb_cleanup_staged_aliases
