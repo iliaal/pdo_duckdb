@@ -44,10 +44,12 @@ namespace Pdo {
         public function duckdbAppender(string $table, string|array|null $schema = null, ?array $columns = null): \Pdo\Duckdb\Appender {}
 
         /**
-         * Return the tables a query references, using DuckDB's parser. Read
-         * queries only; DML (INSERT/UPDATE/DELETE) yields an empty array. With
-         * $qualified, a non-default schema is included (e.g. "s.orders").
-         * Throws if the query cannot be parsed.
+         * Return the tables a query references, using DuckDB's parser. UPDATE,
+         * DELETE, and MERGE yield an empty array; INSERT ... SELECT lists the
+         * tables it reads; DDL behavior is unspecified. With $qualified, a
+         * non-default schema is included (e.g. "s.orders"). A NUL byte in $query
+         * throws ValueError; a query that cannot be parsed throws PDOException
+         * with a detail-free message (prepare the query for specifics).
          */
         public function duckdbTableNames(string $query, bool $qualified = false): array {}
 
